@@ -1,0 +1,25 @@
+{
+  "name": "urnetwork-javascript-socket-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "node": "node node/main.mjs",
+    "self-test": "node node/main.mjs --self-test",
+    "browser": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "test": "node --test node/*.test.mjs",
+    "test:browser": "node --test browser/runtime.test.mjs"
+  },
+  "dependencies": {
+    "@urnetwork/sdk": "nightly",
+    "axios": "^1.13.0",
+    "undici": "^7.16.0"
+  },
+  "devDependencies": {
+    "vite": "^7.3.0",
+    "playwright": "^1.56.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

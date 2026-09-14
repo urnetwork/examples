@@ -1,0 +1,14 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion><groupId>io.ur.examples</groupId><artifactId>socket</artifactId><version>1.0</version>
+  <properties><maven.compiler.release>17</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding><urnetwork.sdk.version>0.0.1-dev.0</urnetwork.sdk.version></properties>
+  <dependencies>
+    <dependency><groupId>io.ur</groupId><artifactId>urnetwork-sdk</artifactId><version>${urnetwork.sdk.version}</version></dependency>
+    <dependency><groupId>com.squareup.okhttp3</groupId><artifactId>okhttp-jvm</artifactId><version>5.3.2</version></dependency>
+    <dependency><groupId>com.squareup.retrofit2</groupId><artifactId>retrofit</artifactId><version>3.0.0</version></dependency>
+    <dependency><groupId>org.apache.httpcomponents.client5</groupId><artifactId>httpclient5</artifactId><version>5.5.1</version></dependency>
+  </dependencies>
+  <build><sourceDirectory>.</sourceDirectory><plugins>
+    <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.14.0</version><configuration><includes><include>*.java</include></includes></configuration></plugin>
+    <plugin><groupId>org.codehaus.mojo</groupId><artifactId>exec-maven-plugin</artifactId><version>3.5.0</version><configuration><mainClass>Main</mainClass><cleanupDaemonThreads>false</cleanupDaemonThreads></configuration></plugin>
+  </plugins></build>
+</project>

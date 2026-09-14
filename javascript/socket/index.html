@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>URnetwork browser sockets</title></head>
+<body>
+  <h1>URnetwork browser sockets</h1>
+  <p>Paste a hosted Device configuration. It stays in this page's memory.</p>
+  <label>Device configuration<br><textarea id="config" rows="12" cols="80" autocomplete="off" spellcheck="false"></textarea></label>
+  <p><label>HTTPS URL <input id="url" type="url" value="https://example.com/" size="60"></label></p>
+  <button id="get">GET through an SDK TLS socket</button>
+  <p><label>WebTransport echo endpoint <input id="wt-url" type="url" placeholder="https://your-server.example/echo" size="60"></label></p>
+  <button id="wt">WebTransport stream echo</button>
+  <button id="close">Close device</button>
+  <pre id="output" aria-live="polite"></pre>
+  <script type="module" src="/browser/main.mjs"></script>
+</body></html>

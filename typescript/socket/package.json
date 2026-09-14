@@ -1,0 +1,23 @@
+{
+  "name": "urnetwork-typescript-socket-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx main.ts",
+    "self-test": "tsx main.ts --self-test",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@urnetwork/sdk": "nightly",
+    "axios": "^1.13.0",
+    "undici": "^7.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
