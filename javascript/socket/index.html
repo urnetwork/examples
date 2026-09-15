@@ -7,8 +7,9 @@
   <label>Device configuration<br><textarea id="config" rows="12" cols="80" autocomplete="off" spellcheck="false"></textarea></label>
   <p><label>HTTPS URL <input id="url" type="url" value="https://example.com/" size="60"></label></p>
   <button id="get">GET through an SDK TLS socket</button>
-  <p><label>WebTransport echo endpoint <input id="wt-url" type="url" placeholder="https://your-server.example/echo" size="60"></label></p>
-  <button id="wt">WebTransport stream echo</button>
+  <p><label>Protocol <select id="protocol"><option value="tcp">TCP</option><option value="udp">UDP</option></select></label>
+  <label>Echo endpoint <input id="endpoint" placeholder="echo.example:9000" size="40"></label></p>
+  <button id="direct-echo">Direct Sockets echo</button>
   <button id="close">Close device</button>
   <pre id="output" aria-live="polite"></pre>
   <script type="module" src="/browser/main.mjs"></script>

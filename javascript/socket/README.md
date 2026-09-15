@@ -1,6 +1,6 @@
 # JavaScript sockets: Node and browser
 
-This directory contains **two runnable programs**, both using `@urnetwork/sdk` and an initialized hosted `DeviceRemote`. [Node](node/main.mjs) demonstrates UR sockets in Undici and Axios. [Browser](browser/main.mjs) demonstrates raw socket I/O, an Axios request adapter, and the SDK WebTransport API.
+This directory contains **two runnable programs**, both using `@urnetwork/sdk` and an initialized hosted `DeviceRemote`. [Node](node/main.mjs) demonstrates UR sockets in Undici and Axios. [Browser](browser/main.mjs) demonstrates an Axios request adapter. Both include Direct Sockets TCP/UDP echo through the Device.
 
 ## Install and check
 
@@ -39,7 +39,7 @@ export URNETWORK_HTTP_URL='https://example.com/'
 npm run node
 ```
 
-Optional `URNETWORK_UDP_ECHO=echo.example:9000` sends a UDP datagram. Optional `URNETWORK_WEBTRANSPORT_URL=https://transport.example/echo` opens a WebTransport bidirectional echo stream.
+Optional `URNETWORK_TCP_ECHO=echo.example:9000` runs a Direct Sockets TCP echo. `URNETWORK_UDP_ECHO=echo.example:9001` runs a Direct Sockets UDP echo. Use ordinary TCP/UDP echo servers you control. Bracket IPv6 endpoints, for example `[2001:db8::1]:9000`.
 
 [ur_node_socket.mjs](ur_node_socket.mjs) adapts async `Conn` I/O into a Node `Duplex`. The connector retains the hostname, uses verified `dialTls` for HTTPS with HTTP/1.1 ALPN, and closes the SDK connection when the Node stream is destroyed.
 
@@ -57,17 +57,38 @@ The example supports HTTP/1.1. Kernel socket options are not available. It rejec
 npm run browser
 ```
 
-Open the printed localhost URL, paste the same hosted Device configuration into the form, and select **GET through UR socket** or **WebTransport echo**. `npm run build` emits a static site including the matching WASM and Go runtime glue. Deploy those assets together on an HTTPS origin.
+Open the printed localhost URL and paste the same hosted Device configuration into the form. Use **GET through an SDK TLS socket**, or choose TCP/UDP and a `host:port` echo endpoint for **Direct Sockets echo**. `npm run build` emits a static site including the matching WASM and Go runtime glue. Deploy those assets together on an HTTPS origin.
 
 Browsers' native `fetch` and `XMLHttpRequest` expose no raw socket factory. [browser/http.mjs](browser/http.mjs) therefore supplies a small HTTP/1.1 **GET-only** engine over `Conn`, and Axios uses it through its public `adapter` option. It handles length-delimited, chunked, and connection-close response bodies, caps responses at 1 MiB, and uses a 30-second deadline. It is an executable integration example, not a general HTTP client: pooling, redirects, cookies, streaming uploads, and compression are outside this adapter's scope.
 
-WebTransport is an HTTPS/HTTP3 session protocol over QUIC, with streams and datagrams. It is **not** the proposed JavaScript Direct Sockets raw TCP/UDP API. `device.webTransport(url)` uses the SDK's QUIC implementation over a UR UDP socket; the endpoint must implement WebTransport and permit your browser origin. `device.dial` is the raw socket interface. See [the WebTransport support profile](https://github.com/urnetwork/sdk/blob/main/SOCKET.md) for supported options and deliberate API limitations. The echo endpoint must reply to the opened bidirectional stream.
+## Direct Sockets
+
+[device.mjs](device.mjs) binds the standard constructor signatures to the Device:
+
+```js
+const {TCPSocket, UDPSocket} = device.directSockets;
+const udp = new UDPSocket({remoteAddress: "echo.example", remotePort: 9001});
+const {readable, writable} = await udp.opened;
+const writer = writable.getWriter();
+await writer.write({data: new TextEncoder().encode("hello")});
+writer.releaseLock();
+const reader = readable.getReader();
+console.log((await reader.read()).value.data);
+reader.releaseLock();
+await udp.close(); await udp.closed;
+```
+
+For TCP, use `new TCPSocket("echo.example", 9000)` and write bytes directly. The executable helper handles split TCP replies, UDP message boundaries, a 30-second I/O timeout, and stream cleanup. TCP accepts `BufferSource` writes and default/BYOB readers. Connected UDP reads and writes `{data}` objects. Cancel or abort pending I/O, release reader/writer locks, then await `close()` and `closed`.
+
+The SDK interface works in ordinary browsers and Node. Chrome's native [Direct Sockets API](https://developer.chrome.com/docs/iwa/direct-sockets) requires an Isolated Web App; this example uses the UR Device instead. It does not install browser globals. The client profile supports `dnsQueryType: "ipv4"` or `"ipv6"`; omission retains hostname Happy Eyeballs. Bound UDP, multicast, listeners, and per-socket buffer/no-delay/keep-alive tuning are unavailable. See the [SDK support profile](https://github.com/urnetwork/sdk/blob/main/SOCKET.md).
+
+These constructors use plain TCP/UDP. The HTTP examples continue to use `dialTls` for HTTPS. UDP hostname races can duplicate the initial datagram; `opened` address fields initially show a candidate and update after consuming the first reply.
 
 ## Research and verification
 
-The Node adapter tests cover stream bytes, EOF, close/half-close, original-host TLS dialing, and the browser HTTP parser. SDK tests cover WebTransport streams/datagrams and session cleanup; the Node self-test uses real WASM. Browser packaging is checked by Vite. A real-browser runtime test loads and closes WASM without an account: run `npx playwright install chromium`, then `npm run test:browser` (or set `BROWSER_EXECUTABLE` to an installed Chrome executable).
+The Node adapter tests cover stream bytes, EOF, close/half-close, original-host TLS dialing, and the browser HTTP parser. Direct Sockets tests cover TCP/UDP messages and timeout cleanup. The SDK's Go/WASM tests carry real TCP/UDP IPv4/IPv6 packets through the Direct Sockets streams; the Node self-test uses real WASM. Browser packaging is checked by Vite. A real-browser runtime test loads and closes WASM without an account: run `npx playwright install chromium`, then `npm run test:browser` (or set `BROWSER_EXECUTABLE` to an installed Chrome executable).
 
-Sources checked September 14, 2026: [Node Agent.createConnection](https://nodejs.org/api/http.html#agentcreateconnectionoptions-callback), [Undici connectors](https://github.com/nodejs/undici/blob/main/docs/docs/api/Connector.md), [Axios configuration](https://axios-http.com/docs/req_config), [WHATWG Fetch](https://fetch.spec.whatwg.org/), [W3C WebTransport](https://www.w3.org/TR/webtransport/), [Direct Sockets proposal](https://wicg.github.io/direct-sockets/).
+Direct Sockets sources checked September 15, 2026: [WICG proposal](https://wicg.github.io/direct-sockets/), [Chrome implementation](https://developer.chrome.com/docs/iwa/direct-sockets). HTTP integration sources: [Node Agent.createConnection](https://nodejs.org/api/http.html#agentcreateconnectionoptions-callback), [Undici connectors](https://github.com/nodejs/undici/blob/main/docs/docs/api/Connector.md), [Axios configuration](https://axios-http.com/docs/req_config), [WHATWG Fetch](https://fetch.spec.whatwg.org/).
 
 ## Socket behavior
 

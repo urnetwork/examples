@@ -16,21 +16,3 @@ export async function openDevice(config, wasmOptions = {}) {
     return {sdk, device, close() {device.close(); sdk.close();}};
   } catch (error) {device.close(); sdk.close(); throw error;}
 }
-
-export async function streamEcho(device, endpoint) {
-  const transport = device.webTransport(endpoint, {timeoutMillis: 30000});
-  let timer;
-  try {
-    await transport.ready;
-    const stream = await transport.createBidirectionalStream();
-    const writer = stream.writable.getWriter();
-    const reader = stream.readable.getReader();
-    const reply = reader.read();
-    await writer.write(new TextEncoder().encode("hello from URnetwork"));
-    await writer.close();
-    const result = await Promise.race([reply, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("WebTransport echo timed out")), 30000);
-    })]);
-    return result.done ? "(stream ended)" : new TextDecoder().decode(result.value);
-  } finally {clearTimeout(timer); transport.close(); await transport.closed.catch(() => {});}
-}

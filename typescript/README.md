@@ -1,6 +1,6 @@
 # TypeScript SDK installation
 
-TypeScript uses sdk/js. Conn provides typed async reads/writes and ReadableStream/WritableStream adapters; the Device exposes dial, dialTls and webTransport.
+TypeScript uses sdk/js. Conn provides typed async reads/writes and Web Streams adapters; the Device exposes dial, dialTls and Direct Sockets constructors through directSockets.
 
 **Publication status:** new package coordinates below describe the intended public release. They are not yet all published. Build the local package while publication is being prepared.
 

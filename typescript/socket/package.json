@@ -5,6 +5,7 @@
   "scripts": {
     "start": "tsx main.ts",
     "self-test": "tsx main.ts --self-test",
+    "test": "tsx --test direct-sockets.test.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {

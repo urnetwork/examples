@@ -4,7 +4,7 @@ import https from "node:https";
 import {URNetwork} from "@urnetwork/sdk";
 import {Agent, fetch as undiciFetch} from "undici";
 import axios from "axios";
-import {openDevice, streamEcho} from "../device.mjs";
+import {openDevice, directSocketEcho} from "../device.mjs";
 import {connector} from "../ur_node_socket.mjs";
 
 if (process.argv.includes("--self-test")) {
@@ -29,15 +29,8 @@ if (process.argv.includes("--self-test")) {
     console.log("Undici:", response.status, (await response.text()).slice(0, 500));
     const other = await axios.get(url, {httpAgent, httpsAgent, proxy: false, timeout: 30000});
     console.log("Axios:", other.status, String(other.data).slice(0, 500));
-    if (process.env.URNETWORK_UDP_ECHO) {
-      const conn = await session.device.dial("udp", process.env.URNETWORK_UDP_ECHO, {timeoutMillis: 30000});
-      try {
-        await conn.setDeadline(Date.now() + 10000);
-        await conn.write(new TextEncoder().encode("hello"));
-        console.log("UDP echo:", await conn.read());
-      } finally {await conn.close();}
-    }
-    if (process.env.URNETWORK_WEBTRANSPORT_URL) console.log(await streamEcho(session.device, process.env.URNETWORK_WEBTRANSPORT_URL));
+    if (process.env.URNETWORK_TCP_ECHO) console.log("Direct Sockets TCP:", await directSocketEcho(session.device, "tcp", process.env.URNETWORK_TCP_ECHO));
+    if (process.env.URNETWORK_UDP_ECHO) console.log("Direct Sockets UDP:", await directSocketEcho(session.device, "udp", process.env.URNETWORK_UDP_ECHO));
   } finally {
     await dispatcher.destroy();
     httpAgent.destroy(); httpsAgent.destroy(); session.close();

@@ -1,7 +1,7 @@
 import axios, {AxiosError} from "axios";
 import wasmUrl from "@urnetwork/sdk/wasm/sdk.wasm?url";
 import wasmExecUrl from "@urnetwork/sdk/wasm/wasm_exec.js?url";
-import {openDevice, streamEcho} from "../device.mjs";
+import {openDevice, directSocketEcho} from "../device.mjs";
 import {get} from "./http.mjs";
 
 let session;
@@ -21,8 +21,8 @@ document.querySelector("#get").onclick = async () => {
   try {const response = await client.get(document.querySelector("#url").value); output.textContent = response.status + "\n" + String(response.data);}
   catch (error) {output.textContent = error.message;}
 };
-document.querySelector("#wt").onclick = async () => {
-  try {output.textContent = await streamEcho(await device(), document.querySelector("#wt-url").value);}
+document.querySelector("#direct-echo").onclick = async () => {
+  try {output.textContent = await directSocketEcho(await device(), document.querySelector("#protocol").value, document.querySelector("#endpoint").value);}
   catch (error) {output.textContent = error.message;}
 };
 document.querySelector("#close").onclick = () => {session?.close(); session = undefined; output.textContent = "Closed";};
