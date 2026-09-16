@@ -16,17 +16,19 @@ For preview builds, use `npm install @urnetwork/sdk@nightly`. The unqualified co
 
 ## Supported platforms
 
-The typed Node program uses Node 24+ and a hosted DeviceRemote. The same package supplies browser types; the adjacent JavaScript directory includes the executable browser program.
+The typed Node programs use Node 24+. Sockets use a hosted `DeviceRemote`; messages use a provider-capable native companion through extension RPC. The same SDK supplies browser types; the adjacent JavaScript socket directory includes the executable browser program.
 
 ## GitHub and local builds
 
 Use a packaged npm tarball, or clone and build sdk/js. See the JavaScript guide for Git package layout and compatibility migration details.
 
+The new messaging RPC capability requires the current SDK source in the [sibling-checkout layout](../javascript/integration/companion/README.md#build-from-sibling-checkouts). The message package uses `file:../../../sdk/js`. `npm run build` type-checks without emitting files; Node 24 runs `main.ts` directly with type stripping.
+
 ## Examples
 
 - [Integration](integration/README.md): service provisioning, scoped client credentials and Device lifecycle.
 - [Sockets](socket/README.md): TCP/UDP, TLS/DTLS and HTTP client adapters.
-- [Messages](messages/README.md): URMS codec checks and the current hosted-runtime capability gate.
+- [Messages](messages/README.md): live peers, targeted URMS text/ACK messages and offline codec tests through a native companion.
 
 Apps use `URNETWORK_CLIENT_JWT` and a persisted `URNETWORK_INSTANCE_ID`; only the service backend holds `URNETWORK_ROOT_JWT`. See the [shared contract](../INTEGRATION_CONTRACT.md) and [official networking research](../NETWORK_EXAMPLES.md).
 

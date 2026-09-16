@@ -4,9 +4,13 @@
   "type": "module",
   "scripts": {
     "self-test": "node main.mjs --self-test",
+    "test": "node --test *.test.mjs",
     "start": "node main.mjs"
   },
+  "dependencies": {
+    "@urnetwork/sdk": "file:../../../sdk/js"
+  },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   }
 }

@@ -25,7 +25,7 @@ This directory includes a [Device adapter](device.mjs), [Node socket adapter](ur
 
 The self-test initializes and closes the real Go/WASM runtime without an account. `npm run check` validates the SDK's exported socket types under NodeNext module resolution.
 
-The hosted `DeviceRemote` has no subprotocol messaging API, and hosted proxy devices are not visible peers. [Messages](../messages/README.md) documents the codec checks and capability gate.
+Hosted proxy devices are not visible peers and reject subprotocol messaging. [Messages](../messages/README.md) uses the SDK's typed subprotocol API through a separate provider-capable native companion. The hosted socket setup here is unchanged.
 
 ## Replace HTTP socket creation
 

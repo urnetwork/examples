@@ -35,7 +35,7 @@ For the browser form, set `byJwt` to the scoped client JWT supplied by your serv
 
 The [backend allocator](../integration/README.md#backend-allocator) provisions the scoped client credential; your hosting service separately supplies the hosted instance ID, RPC URL and signed proxy credential.
 
-The hosted `DeviceRemote` supports these sockets but has no subprotocol messaging API; hosted proxy devices are also excluded from the visible peer list. See [Messages](../messages/README.md) for the codec checks and capability gate.
+Hosted proxy devices remain excluded from the visible peer list and reject subprotocol messaging. [Messages](../messages/README.md) uses the SDK's typed subprotocol API through a separate provider-capable native companion. The hosted socket setup here is unchanged.
 
 ## Run Node
 

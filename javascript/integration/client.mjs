@@ -1,5 +1,5 @@
-// DeviceRemote needs backend-issued hosted proxy configuration in addition to
-// the scoped client JWT. The caller supplies the SDK to keep one WASM runtime.
+// Both remote factories use a scoped client JWT and a stable installation ID.
+// Hosted socket devices additionally need backend-issued proxy configuration.
 export function clientConfig(environment, hosted) {
   const byJwt = environment.URNETWORK_CLIENT_JWT;
   const instanceId = environment.URNETWORK_INSTANCE_ID;

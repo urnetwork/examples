@@ -4,14 +4,17 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "self-test": "npm run build && node dist/main.js --self-test",
-    "start": "node dist/main.js"
+    "self-test": "npm run build && node main.ts --self-test",
+    "start": "node main.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   },
+  "dependencies": {
+    "@urnetwork/sdk": "file:../../../sdk/js"
+  },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   }
 }

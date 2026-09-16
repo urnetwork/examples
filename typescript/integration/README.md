@@ -2,9 +2,9 @@
 
 [Installation](../README.md) · [Integration](README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md)
 
-Only the authenticated service backend holds `URNETWORK_ROOT_JWT`. The app receives a scoped JWT with an assigned `client_id`, plus the configuration of a hosted Device. Follow the [shared integration contract](../../INTEGRATION_CONTRACT.md) for provisioning and ownership checks.
+Only the authenticated service backend holds `URNETWORK_ROOT_JWT`. The app receives a scoped JWT with an assigned `client_id`. Hosted sockets and native-companion messaging use that same credential boundary; the companion is an app-side process and never holds the root JWT. Follow the [shared integration contract](../../INTEGRATION_CONTRACT.md) for provisioning and ownership checks.
 
-## Client setup
+## Hosted socket client setup
 
 The reusable bootstrap is [client.mjs](client.mjs), and [main.ts](main.ts) is its runnable integration entry point. `clientConfig(process.env, hosted)` requires `URNETWORK_CLIENT_JWT` and `URNETWORK_INSTANCE_ID` and overrides any `byJwt`/`instanceId` values in the JSON file. `openDevice(URNetwork, config)` initializes WASM, waits for hosted RPC connectivity, selects a location and returns a session whose `close()` closes the Device and runtime.
 
@@ -40,7 +40,15 @@ All three environment variables are required for this entry point. `URNETWORK_IN
 
 The Node [socket program](../socket/README.md) uses this same environment merge. The [JavaScript browser form](../../javascript/socket/README.md#run-the-browser) instead requires all six JSON fields, including `byJwt` and `instanceId`, because it does not read shell environment variables.
 
-Hosted `DeviceRemote` exposes no subprotocol API, and hosted proxy devices are excluded from the visible peer list. [Messages](../messages/README.md) provides the common codec and an explicit unsupported-runtime gate; real peer messaging requires a runtime with local Device peer/subprotocol support and two distinct clients.
+## Messaging client setup
+
+[Messages](../messages/README.md) uses Node 24 and a provider-capable native companion through the SDK's extension RPC transport. Follow the [companion setup guide](../../javascript/integration/companion/README.md) for the exact sibling-checkout layout, SDK/WASM build, native build, configuration file, token, loopback address and optional browser Origin.
+
+The reusable [companion.mjs](companion.mjs) helper exports `openMessageDevice(URNetwork, config, token)`. Merge `URNETWORK_CLIENT_JWT` and `URNETWORK_INSTANCE_ID` with `clientConfig` as above, and supply `URNETWORK_COMPANION_TOKEN` separately. The messaging JSON contains `apiUrl`, `platformUrl` and `companionUrl`. It does not need a hosted proxy credential. The companion and Node controller must use the same client JWT and persisted instance ID.
+
+`openMessageDevice` returns a connecting Device so the message controller can install peer/state listeners **before initial RPC sync**. The controller then waits for connectivity and opens subprotocol `4096`. A reconnect invalidates the subscription; watch its `closed` Promise, close it and create a fresh subscription before retrying. The example exits on transport failure so it cannot mistake a stale subscription for a live receiver.
+
+The full native `DeviceLocal` owns the provider transport. The JS/TS application owns URMS encoding, decoding, target selection and ACK correlation. Hosted socket proxies retain their existing restrictions and explicitly reject subprotocol messaging. The backend allocator below only issues the app's scoped identity; it does not run or authorize the local companion.
 
 ## Backend allocator
 

@@ -14,17 +14,19 @@ The canonical name is awaiting its first publication. Its preview builds use `np
 
 ## Supported platforms
 
-The package loader runs in current browsers and Node; the executable Node example uses Node 24+. Both examples use a configured hosted DeviceRemote. Bun is an alternative installer; Bun runtime behavior is not separately qualified.
+The package loader runs in current browsers and Node; executable Node examples use Node 24+. Sockets use a configured hosted `DeviceRemote`. Messages use a native provider companion through extension RPC. The supplied messaging executable is a Node CLI; browser integrations can supply an extension-owned RPC transport. Bun is an alternative installer; Bun runtime behavior is not separately qualified.
 
 ## GitHub and local builds
 
 npm supports Git dependencies, but this repository's package is under js/. Use a published .tgz release asset, or clone sdk and run `make -C sdk/js package check-package` and install its tarball from `sdk/js/release/artifacts`. repository.directory is not a Git subdirectory installer.
 
+The new messaging RPC capability requires the current SDK source. Its [companion build guide](integration/companion/README.md#build-from-sibling-checkouts) lists the `examples`, `sdk`, `connect`, `glog` and `goidenticons` sibling layout and exact commands. The message package uses `file:../../../sdk/js` so its JavaScript bundle and WASM come from that build.
+
 ## Examples
 
 - [Integration](integration/README.md): service provisioning, scoped client credentials and Device lifecycle.
 - [Sockets](socket/README.md): TCP/UDP, TLS/DTLS and HTTP client adapters.
-- [Messages](messages/README.md): URMS codec checks and the current hosted-runtime capability gate.
+- [Messages](messages/README.md): live peers, targeted URMS text/ACK messages and offline codec tests through a native companion.
 
 Apps use `URNETWORK_CLIENT_JWT` and a persisted `URNETWORK_INSTANCE_ID`; only the service backend holds `URNETWORK_ROOT_JWT`. See the [shared contract](../INTEGRATION_CONTRACT.md) and [official networking research](../NETWORK_EXAMPLES.md).
 

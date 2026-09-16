@@ -2,7 +2,7 @@
 
 Every example app receives a scoped client JWT through `URNETWORK_CLIENT_JWT`. The JWT must contain its assigned `client_id` claim. The service backend alone holds `URNETWORK_ROOT_JWT`, authenticates service users and provisions their clients. The app never receives the root JWT.
 
-This contract applies to [all languages](README.md). Socket and messaging programs share the same client bootstrap. Messages additionally require a local Device with peer discovery and subprotocol support; see the [messaging protocol](MESSAGES_PROTOCOL.md).
+This contract applies to [all languages](README.md). Socket and messaging programs share the same client bootstrap. Messages additionally require a provider-capable native Device with peer discovery and subprotocol support. JavaScript and TypeScript reach that Device through their [native companion](javascript/integration/companion/README.md); see the [messaging protocol](MESSAGES_PROTOCOL.md).
 
 ## Identity and storage
 
@@ -68,7 +68,7 @@ For a new key, the request includes `description` and `device_spec` and omits bo
 
 Successful stdout is a JSON object with `client_id` and `by_client_jwt`. Capture it inside the service and return the scoped credential only through the authenticated backend-to-app response. Do not forward build-tool output or write JWTs to normal logs. Direct executable run commands are provided in each guide. The root JWT is never printed. `--self-test` exercises new/reissue requests, input rejection, mapping round-trips and response parsing without credentials or network; initial dependency installation may still access package registries.
 
-These allocators provision client identities. They do not provision a JavaScript/TypeScript hosted proxy, its RPC URL, signed proxy credential or instance ID; obtain those separately from the hosting service.
+These allocators provision client identities. They do not provision a JavaScript/TypeScript hosted socket proxy, its RPC URL, signed proxy credential or instance ID; obtain those separately from the hosting service. JS/TS messaging instead starts a native companion under the app's scoped client identity. The companion has no root-JWT allocator role and never needs `URNETWORK_ROOT_JWT`.
 
 ## App startup and cleanup
 
@@ -83,10 +83,10 @@ All native client helpers require both environment variables. In particular, the
 
 Create the network-space manager and Device with the scoped JWT, retain their owners while callbacks or sockets can run, and close subscriptions and connections before releasing the Device and manager. The language integration guide identifies its bootstrap implementation and run commands. Persist client state in storage appropriate to the application; the environment variables are the command-line examples' configuration interface.
 
-For JavaScript and TypeScript, a hosted Device requires its real hosted instance ID, WebSocket RPC URL and signed proxy credential as well as the scoped JWT. An arbitrary local UUID cannot identify that remote process. Their [integration guide](javascript/integration/README.md) explains this hosted configuration and the current messaging capability gate.
+JavaScript and TypeScript have two Device paths. Hosted socket examples require the hosting service's actual instance ID, WebSocket RPC URL and signed proxy credential as well as the scoped JWT. Messaging uses a [native companion](javascript/integration/companion/README.md) that starts its own provider-capable `DeviceLocal`. Its Node controller and companion share the same scoped `URNETWORK_CLIENT_JWT`, persisted `URNETWORK_INSTANCE_ID`, and random `URNETWORK_COMPANION_TOKEN`; the RPC checks the client and instance pairing. The token authorizes local control and is separate from either JWT. Install mirrored peer listeners before initial RPC sync; close and reopen subprotocol subscriptions after reconnects.
 
 ## Two-terminal messaging demo
 
 Provision two distinct top-level clients in the same URnetwork network, associated with two authorized demo users/installations. Give terminal A client A's scoped JWT and a persisted instance ID A. Give terminal B client B's scoped JWT and a different persisted instance ID B. Merely changing the instance ID while reusing one JWT still addresses the same client identity.
 
-Start a supported [messages program](README.md) in each terminal. Wait for the live peer list to include the other client, select its `client_id`, and query its supported subprotocols before sending. Both sides must advertise subprotocol `4096`. The receiver validates the frame and returns the application ACK described in [URMS v1](MESSAGES_PROTOCOL.md). Different native languages use identical bytes and can participate in the same demo.
+Start a supported [messages program](README.md) in each terminal. Wait for the live peer list to include the other client, select its `client_id`, and query its supported subprotocols before sending. Both sides must advertise subprotocol `4096`. The receiver validates the frame and returns the application ACK described in [URMS v1](MESSAGES_PROTOCOL.md). All language examples use identical bytes and can participate in the same demo. Each JS/TS installation also needs its own native companion process. On one machine, give the two companions different loopback ports and tokens; the [companion guide](javascript/integration/companion/README.md#two-clients-on-one-machine) describes the four-process setup.

@@ -2,7 +2,7 @@
 
 The language [messages examples](README.md) exchange text and application acknowledgements using URnetwork subprotocol **4096** (`0x1000`). Each SDK subprotocol message carries exactly one URMS frame. The subprotocol ID belongs to the SDK envelope; it is not repeated in the application frame.
 
-Both endpoints need distinct scoped clients in the same network, separate persisted instance IDs, and Devices that expose subprotocol messaging. Follow the [integration contract](INTEGRATION_CONTRACT.md) before running a two-terminal demo. JavaScript and TypeScript currently provide codec checks and an explicit capability gate: their hosted `DeviceRemote` has no subprotocol API, and a hosted proxy is not a visible peer.
+Both endpoints need distinct scoped clients in the same network, separate persisted instance IDs, and Devices that expose subprotocol messaging. Follow the [integration contract](INTEGRATION_CONTRACT.md) before running a two-terminal demo. JavaScript and TypeScript use Node 24 and a [native companion](javascript/integration/companion/README.md): the application processes URMS while a full native `DeviceLocal` carries network traffic through extension RPC. Hosted proxy devices remain ineligible for peer messaging.
 
 ## Wire layout
 
@@ -53,11 +53,15 @@ Both must round-trip byte-for-byte in every codec. Credential-free checks should
 
 ## Discovery and send lifecycle
 
-Enable subprotocol `4096` and keep the listener subscription alive. Subscribe to the Device's real-time peer changes, obtain the current peer snapshot, and refresh the displayed candidates on updates. A service-side stored client mapping identifies ownership; it does not prove that a peer is currently connected. Exclude self and use the discovered peer's `client_id`, never its display name or installation UUID, as the destination.
+Subscribe to the Device's real-time peer changes before obtaining the current snapshot, then refresh the displayed candidates on updates. Enable subprotocol `4096` and keep its listener subscription alive. For the JS/TS browser-style RPC client, install mirrored peer/state listeners before the initial sync, wait for that sync, and then enable the subprotocol. Adding such listeners later can reconnect the RPC transport and invalidate an existing subprotocol subscription. A service-side stored client mapping identifies ownership; it does not prove that a peer is currently connected. Exclude self and use the discovered peer's `client_id`, never its display name or installation UUID, as the destination.
 
 Before sending TEXT, query the selected peer's supported subprotocols with a bounded timeout. Send only after a successful answer includes `4096`. A query failure, timeout, unsupported peer or disconnect is a visible failure to send; stale presence or a cached answer is not evidence of delivery. Re-query after a reconnect or before a later send. Real-time presence can change between the query and the send, so continue to handle enqueue failure and ACK timeout.
 
 Successful `SendSubprotocol` enqueue means the SDK accepted the outbound bytes. It does not mean the destination application accepted them. Only a valid correlated URMS ACK confirms that the receiving example parsed and accepted that TEXT. This ACK does not assert that a person read it or that it was durably stored. A timeout leaves delivery uncertain: the receiver or its ACK may have been lost. URMS v1 does not provide durable storage, global ordering or exactly-once processing. Applications that retry should suppress duplicate processing by source and message ID while permitting another ACK for an already accepted TEXT.
+
+For JS/TS, `device.enableSubprotocol(4096, listener)` returns a subscription with `send(clientId, bytes)`, `querySubprotocols(clientId, timeoutMillis)`, `close()`, and a `closed` Promise. A query result of `null` means unavailable/unanswered; an empty array means the peer advertised no subprotocols. Registrations belong to one RPC session and are not replayed after reconnects. A transport, listener or receive-queue failure rejects `closed`; recreate the registration and query support again before another send.
+
+The companion RPC permits 16 registrations per session, at most 65535 bytes per raw frame, and a receive queue of 64 messages or 1 MiB per registration. Overflow fails the subscription instead of coalescing or silently replacing frames. URMS still applies its stricter 4112-byte frame limit.
 
 ## Callback ownership and shutdown
 

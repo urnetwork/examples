@@ -1,0 +1,1 @@
+export function openMessageDevice<T>(URNetwork: {init(options?: any): Promise<{createExtensionDeviceRemote(config: any): T; close(): void}>}, config: any, token: string | undefined, wasmOptions?: any): Promise<{device: T; sdk: unknown; close(): void}>;
