@@ -22,8 +22,8 @@ Create an absolute-path JSON file with the hosted Device settings issued by your
 
 ```json
 {
-  "apiUrl": "api.bringyour.com",
-  "platformUrl": "connect.bringyour.com",
+  "apiUrl": "https://api.bringyour.com",
+  "platformUrl": "wss://connect.bringyour.com",
   "proxyUrl": "your-hosted-device-websocket-url",
   "signedProxyId": "your-hosted-device-HMAC-auth-token"
 }
