@@ -1,0 +1,17 @@
+{
+  "name": "urnetwork-typescript-messages",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "self-test": "npm run build && node dist/main.js --self-test",
+    "start": "node dist/main.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

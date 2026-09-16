@@ -1,0 +1,15 @@
+{
+  "name": "urnetwork-javascript-integration",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node main.mjs",
+    "self-test": "node main.mjs --self-test"
+  },
+  "dependencies": {
+    "@urnetwork/sdk": "nightly"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

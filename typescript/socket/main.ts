@@ -7,6 +7,7 @@ import axios from "axios";
 import {openDevice} from "./device.mjs";
 import {directSocketEcho} from "./direct-sockets.js";
 import {connector} from "./ur_node_socket.mjs";
+import {clientConfig} from "../integration/client.mjs";
 
 if (process.argv.includes("--self-test")) {
   const sdk = await URNetwork.init();
@@ -15,7 +16,7 @@ if (process.argv.includes("--self-test")) {
 } else {
   const file = process.env.URNETWORK_DEVICE_CONFIG;
   if (!file) throw new Error("Set URNETWORK_DEVICE_CONFIG to the hosted Device JSON file described in README.md.");
-  const session: {device: DeviceRemote; close(): void} = await openDevice(JSON.parse(await readFile(file, "utf8")));
+  const session: {device: DeviceRemote; close(): void} = await openDevice(clientConfig(process.env, JSON.parse(await readFile(file, "utf8"))));
   const httpAgent = new http.Agent({keepAlive: true});
   const httpsAgent = new https.Agent({keepAlive: true});
   // The adapter implements Node's Duplex callback contract over async Conn I/O.

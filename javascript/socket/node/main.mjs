@@ -6,6 +6,7 @@ import {Agent, fetch as undiciFetch} from "undici";
 import axios from "axios";
 import {openDevice, directSocketEcho} from "../device.mjs";
 import {connector} from "../ur_node_socket.mjs";
+import {clientConfig} from "../../integration/client.mjs";
 
 if (process.argv.includes("--self-test")) {
   const sdk = await URNetwork.init();
@@ -15,7 +16,7 @@ if (process.argv.includes("--self-test")) {
 } else {
   const configFile = process.env.URNETWORK_DEVICE_CONFIG;
   if (!configFile) throw new Error("Set URNETWORK_DEVICE_CONFIG to a hosted Device JSON file; see ../README.md.");
-  const config = JSON.parse(await readFile(configFile, "utf8"));
+  const config = clientConfig(process.env, JSON.parse(await readFile(configFile, "utf8")));
   const url = process.env.URNETWORK_HTTP_URL || "https://example.com/";
   const session = await openDevice(config);
   const httpAgent = new http.Agent({keepAlive: true});

@@ -1,5 +1,7 @@
 # JavaScript sockets: Node and browser
 
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+
 This directory contains **two runnable programs**, both using `@urnetwork/sdk` and an initialized hosted `DeviceRemote`. [Node](node/main.mjs) demonstrates UR sockets in Undici and Axios. [Browser](browser/main.mjs) demonstrates an Axios request adapter. Both include Direct Sockets TCP/UDP echo through the Device.
 
 ## Install and check
@@ -22,19 +24,25 @@ Provision a hosted Device running the socket-capable SDK. Obtain its actual inst
 {
   "apiUrl": "api.bringyour.com",
   "platformUrl": "connect.bringyour.com",
-  "byJwt": "your-platform-jwt",
+  "byJwt": "your-scoped-client-jwt",
   "proxyUrl": "your-hosted-device-websocket-url",
   "signedProxyId": "your-hosted-device-HMAC-auth-token",
   "instanceId": "the-hosted-device-instance-uuid"
 }
 ```
 
-The signed proxy ID and JWT are different credentials. The sample validates all six fields, waits for the Device RPC connection, then chooses a location. Keep the configuration file out of source control. WASM supplies the API in the browser and Node; the hosted Device carries the actual connection path.
+For the browser form, set `byJwt` to the scoped client JWT supplied by your service and `instanceId` to the actual hosted instance ID. Node uses the shared [client bootstrap](../integration/client.mjs): it requires `URNETWORK_CLIENT_JWT` and `URNETWORK_INSTANCE_ID` and overrides those two JSON fields, so the Node file may contain only the other four fields. Never place `URNETWORK_ROOT_JWT` in this file. The signed proxy ID and client JWT are different credentials. The sample validates all six merged fields, waits for the Device RPC connection, then chooses a location. Keep the configuration file out of source control. WASM supplies the API in the browser and Node; the hosted Device carries the actual connection path.
+
+The [backend allocator](../integration/README.md#backend-allocator) provisions the scoped client credential; your hosting service separately supplies the hosted instance ID, RPC URL and signed proxy credential.
+
+The hosted `DeviceRemote` supports these sockets but has no subprotocol messaging API; hosted proxy devices are also excluded from the visible peer list. See [Messages](../messages/README.md) for the codec checks and capability gate.
 
 ## Run Node
 
 ```sh
 export URNETWORK_DEVICE_CONFIG='/absolute/path/to/device.json'
+export URNETWORK_CLIENT_JWT='your-scoped-client-jwt'
+export URNETWORK_INSTANCE_ID='the-actual-hosted-device-instance-uuid'
 export URNETWORK_HTTP_URL='https://example.com/'
 npm run node
 ```
@@ -57,7 +65,7 @@ The example supports HTTP/1.1. Kernel socket options are not available. It rejec
 npm run browser
 ```
 
-Open the printed localhost URL and paste the same hosted Device configuration into the form. Use **GET through an SDK TLS socket**, or choose TCP/UDP and a `host:port` echo endpoint for **Direct Sockets echo**. `npm run build` emits a static site including the matching WASM and Go runtime glue. Deploy those assets together on an HTTPS origin.
+Open the printed localhost URL and paste the complete six-field hosted Device configuration into the form. The browser does not read the Node shell environment, so the form must contain both `byJwt` and `instanceId`. Use **GET through an SDK TLS socket**, or choose TCP/UDP and a `host:port` echo endpoint for **Direct Sockets echo**. `npm run build` emits a static site including the matching WASM and Go runtime glue. Deploy those assets together on an HTTPS origin.
 
 Browsers' native `fetch` and `XMLHttpRequest` expose no raw socket factory. [browser/http.mjs](browser/http.mjs) therefore supplies a small HTTP/1.1 **GET-only** engine over `Conn`, and Axios uses it through its public `adapter` option. It handles length-delimited, chunked, and connection-close response bodies, caps responses at 1 MiB, and uses a 30-second deadline. It is an executable integration example, not a general HTTP client: pooling, redirects, cookies, streaming uploads, and compression are outside this adapter's scope.
 

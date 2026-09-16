@@ -1,0 +1,10 @@
+[package]
+name = "urnetwork-messages-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+urnetwork-sdk = "0.0.1-dev.0"
+serde_json = "1"
+getrandom = "0.3"

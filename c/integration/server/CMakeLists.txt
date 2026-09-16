@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.18)
+project(urnetwork_server_allocator LANGUAGES C)
+find_package(CURL REQUIRED)
+find_package(json-c CONFIG REQUIRED)
+add_executable(allocator allocator.c)
+target_compile_features(allocator PRIVATE c_std_11)
+target_link_libraries(allocator PRIVATE CURL::libcurl json-c::json-c)

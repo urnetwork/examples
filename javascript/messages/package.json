@@ -1,0 +1,12 @@
+{
+  "name": "urnetwork-javascript-messages",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "self-test": "node main.mjs --self-test",
+    "start": "node main.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

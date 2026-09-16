@@ -1,6 +1,8 @@
 # C# sockets, HttpClient and RestSharp
 
-[Program.cs](Program.cs) uses `URnetwork.SDK` with a local Device. [UrStream.cs](UrStream.cs) adapts its Conn to a .NET Stream and [UrSession.cs](UrSession.cs) owns the native SDK handles.
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+
+[Program.cs](Program.cs) uses `URnetwork.SDK` with a local Device. [UrStream.cs](UrStream.cs) adapts its Conn to a .NET Stream and [UrSession.cs](../integration/UrSession.cs) owns the native SDK handles.
 
 ## Install and run
 
@@ -34,10 +36,10 @@ Sources checked September 14, 2026: [.NET ConnectCallback](https://learn.microso
 
 ## Device setup
 
-The executable creates a local Device using the SDK's existing network-space APIs, applies your JWT, and chooses the best available location. Set an account JWT as described in the [SDK setup guide](https://ur.io/docs/getting-started-sdk). Generate an instance ID once with this program's `--new-id` mode, save it, and reuse it for this installation.
+The executable creates a local Device with the scoped client JWT issued by your service backend and chooses the best available location. Follow the [integration guide](../integration/README.md): the JWT must contain its assigned `client_id`; only the backend holds the root JWT. Generate an instance ID once with this program's `--new-id` mode, save it, and reuse it for this installation.
 
 ```sh
-export URNETWORK_JWT='your-account-jwt'
+export URNETWORK_CLIENT_JWT='your-scoped-client-jwt'
 export URNETWORK_INSTANCE_ID='your-persisted-instance-uuid'
 ```
 

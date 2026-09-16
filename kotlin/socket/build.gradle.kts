@@ -9,4 +9,5 @@ dependencies {
     implementation("io.ktor:ktor-client-core:3.3.0")
 }
 kotlin { jvmToolchain(21) }
+sourceSets.main { java.srcDir("../integration/client") }
 application { mainClass.set("MainKt") }

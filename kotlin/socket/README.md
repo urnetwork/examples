@@ -1,5 +1,7 @@
 # Kotlin sockets and Ktor
 
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+
 [src/main/kotlin/Main.kt](src/main/kotlin/Main.kt) is a runnable desktop Kotlin/JVM program using the Java SDK. Its local Device and SocketFactory helpers are included under `src/main/java`.
 
 ## Install and run
@@ -26,14 +28,14 @@ Before first publication, install the JAR/POM built by `sdk/java` into Maven Loc
 
 The DNS placeholder preserves the original hostname for the SDK. TLS is JSSE/OkHttp TLS above a UR TCP stream, with normal certificate verification. The example intentionally chooses the engine whose socket creation can be replaced. Native Kotlin/Multiplatform targets do not use this JVM/JNA artifact. Android Kotlin uses the gomobile AAR and portable Socket methods; platform-specific UI/lifecycle setup is separate.
 
-Sources checked September 14, 2026: [Ktor engines](https://ktor.io/docs/http-client-engines.html), [Ktor OkHttpConfig](https://api.ktor.io/ktor-client-okhttp/io.ktor.client.engine.okhttp/-ok-http-config/index.html), [OkHttp socket factory](https://square.github.io/okhttp/5.x/okhttp/okhttp3/-ok-http-client/-builder/socket-factory.html), [Retrofit](https://github.com/square/retrofit).
+Sources checked September 14, 2026: [Ktor engines](https://ktor.io/docs/client-engines.html), [Ktor OkHttpConfig](https://api.ktor.io/ktor-client-okhttp/io.ktor.client.engine.okhttp/-ok-http-config/index.html), [OkHttp socket factory](https://square.github.io/okhttp/5.x/okhttp/okhttp3/-ok-http-client/-builder/socket-factory.html), [Retrofit](https://github.com/square/retrofit).
 
 ## Device setup
 
-The executable creates a local Device using the SDK's existing network-space APIs, applies your JWT, and chooses the best available location. Set an account JWT as described in the [SDK setup guide](https://ur.io/docs/getting-started-sdk). Generate an instance ID once with this program's `--new-id` mode, save it, and reuse it for this installation.
+The executable creates a local Device with the scoped client JWT issued by your service backend and chooses the best available location. Follow the [integration guide](../integration/README.md): the JWT must contain its assigned `client_id`; only the backend holds the root JWT. Generate an instance ID once with this program's `--new-id` mode, save it, and reuse it for this installation.
 
 ```sh
-export URNETWORK_JWT='your-account-jwt'
+export URNETWORK_CLIENT_JWT='your-scoped-client-jwt'
 export URNETWORK_INSTANCE_ID='your-persisted-instance-uuid'
 ```
 

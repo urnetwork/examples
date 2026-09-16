@@ -1,0 +1,12 @@
+{
+  "name": "urnetwork-javascript-server-allocator",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "self-test": "node allocator.mjs --self-test",
+    "start": "node allocator.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

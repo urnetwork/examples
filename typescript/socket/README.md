@@ -1,5 +1,7 @@
 # TypeScript sockets
 
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+
 [main.ts](main.ts) is a runnable, typed Node 24+ application. It imports `Conn` and `DeviceRemote` from `@urnetwork/sdk`, sends optional TCP/UDP echoes through Direct Sockets, and configures Undici and Axios to open UR SDK connections.
 
 ## Install and run
@@ -10,14 +12,20 @@ npm run check
 npm test
 npm run self-test
 export URNETWORK_DEVICE_CONFIG='/absolute/path/to/device.json'
+export URNETWORK_CLIENT_JWT='your-scoped-client-jwt'
+export URNETWORK_INSTANCE_ID='the-actual-hosted-device-instance-uuid'
 npm start
 ```
 
 Use a socket-capable package release. Before its first publication, install the tarball built by `make -C sdk/js package check-package` with `npm install /absolute/path/to/urnetwork-sdk-<version>.tgz`. No separate `@types` SDK package is required.
 
-Create the six-field hosted Device JSON described in the [JavaScript guide](../../javascript/socket/README.md#hosted-device-configuration). This directory includes its own [Device bootstrap](device.mjs), [Node socket adapter](ur_node_socket.mjs), and [typed Direct Sockets example](direct-sockets.ts), so it runs independently. `URNETWORK_HTTP_URL` selects the HTTP URL. `URNETWORK_TCP_ECHO=echo.example:9000` and `URNETWORK_UDP_ECHO=echo.example:9001` enable optional Direct Sockets echo requests to ordinary TCP/UDP servers. Bracket IPv6 endpoints.
+Create the hosted Device JSON described in the [JavaScript guide](../../javascript/socket/README.md#hosted-device-configuration). The shared [client bootstrap](../integration/client.mjs) requires all three environment variables above and overrides the JSON's `byJwt` and `instanceId` from the environment; the file may contain only `apiUrl`, `platformUrl`, `proxyUrl` and `signedProxyId`. Use the actual instance ID supplied by the hosting service. The service allocator issues client credentials; it does not create the hosted proxy or its RPC settings.
+
+This directory includes a [Device adapter](device.mjs), [Node socket adapter](ur_node_socket.mjs), and [typed Direct Sockets example](direct-sockets.ts); retain the adjacent integration directory for its shared bootstrap. `URNETWORK_HTTP_URL` selects the HTTP URL. `URNETWORK_TCP_ECHO=echo.example:9000` and `URNETWORK_UDP_ECHO=echo.example:9001` enable optional Direct Sockets echo requests to ordinary TCP/UDP servers. Bracket IPv6 endpoints.
 
 The self-test initializes and closes the real Go/WASM runtime without an account. `npm run check` validates the SDK's exported socket types under NodeNext module resolution.
+
+The hosted `DeviceRemote` has no subprotocol messaging API, and hosted proxy devices are not visible peers. [Messages](../messages/README.md) documents the codec checks and capability gate.
 
 ## Replace HTTP socket creation
 

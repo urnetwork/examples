@@ -9,10 +9,10 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	integration "github.com/urnetwork/examples/go/integration"
 	sdk "github.com/urnetwork/sdk/v2026"
 )
 
@@ -31,26 +31,14 @@ func run() error {
 		fmt.Println(sdk.Version)
 		return nil
 	}
-	jwt := os.Getenv("URNETWORK_JWT")
-	if jwt == "" {
-		return fmt.Errorf("set URNETWORK_JWT to your account JWT; see README.md")
-	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	manager := sdk.NewNetworkSpaceManagerNoStorage()
-	defer manager.Close()
-	space := manager.UpdateNetworkSpaceValues(sdk.NewNetworkSpaceKey("ur.network", "main"), &sdk.NetworkSpaceValues{MigrationHostName: "bringyour.com"})
-	space.GetApi().SetByJwt(jwt)
-	id, err := persistentID()
+	session, err := integration.Open(true)
 	if err != nil {
 		return err
 	}
-	device, err := sdk.NewDeviceLocalWithDefaults(space, jwt, "Go socket example", "go", "1", id, false)
-	if err != nil {
-		return err
-	}
-	defer device.Close()
-	device.SetConnectLocation(&sdk.ConnectLocation{ConnectLocationId: &sdk.ConnectLocationId{BestAvailable: true}})
+	defer session.Close()
+	device := session.Device
 	switch *mode {
 	case "proxy":
 		address, closeProxy, err := StartProxy(ctx, device)
@@ -115,35 +103,4 @@ func run() error {
 	default:
 		return fmt.Errorf("unknown mode %q", *mode)
 	}
-}
-func persistentID() (*sdk.Id, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return nil, err
-	}
-	name := filepath.Join(dir, "urnetwork-examples", "go-instance-id")
-	if data, err := os.ReadFile(name); err == nil {
-		return sdk.ParseId(string(data))
-	}
-	if err = os.MkdirAll(filepath.Dir(name), 0700); err != nil {
-		return nil, err
-	}
-	id := sdk.NewId()
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if os.IsExist(err) {
-		data, e := os.ReadFile(name)
-		if e != nil {
-			return nil, e
-		}
-		return sdk.ParseId(string(data))
-	}
-	if err != nil {
-		return nil, err
-	}
-	_, err = f.WriteString(id.String())
-	closeErr := f.Close()
-	if err != nil {
-		return nil, err
-	}
-	return id, closeErr
 }

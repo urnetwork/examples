@@ -1,5 +1,7 @@
 # Go sockets and HTTP clients
 
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+
 [main.go](main.go) creates a local Device and demonstrates `net.Conn`-compatible sockets. [socket.go](socket.go) installs `Device.DialContext` in an `http.Transport`. [proxy.go](proxy.go) also provides a runnable loopback proxy for clients in other languages that require OS sockets.
 
 ## Install and run
@@ -10,14 +12,15 @@ Install a socket-capable release using Go modules. The checked-in calendar-versi
 go get github.com/urnetwork/sdk/v2026@<socket-release-version>
 go mod tidy
 go run . -version
-export URNETWORK_JWT='your-account-jwt'
+export URNETWORK_CLIENT_JWT='your-scoped-client-jwt'
+export URNETWORK_INSTANCE_ID='your-persisted-instance-uuid'
 go run . -mode http -target https://example.com/
 go run . -mode resty -target https://example.com/
 ```
 
-Go 1.26.7+ is used by this example. The program saves an instance UUID under your user configuration directory in `urnetwork-examples/go-instance-id` and reuses it. Device creation, account setup and provider selection use the existing SDK APIs.
+Go 1.26.7+ is used by this example. The shared [client bootstrap](../integration/client.go) requires both environment variables and does not generate or save an instance UUID. Generate one during installation (for example with `uuidgen` on macOS), persist it and export that same value on later runs. Device creation uses the scoped JWT issued by your backend; see the [integration contract](../../INTEGRATION_CONTRACT.md).
 
-For an unversioned development checkout, change the SDK import and requirement to `github.com/urnetwork/sdk v0.0.0` and add local `replace` directives for `sdk`, `connect`, `glog` and `goidenticons`. Published calendar-major modules use their versioned import paths; a local replace alone cannot rewrite imports inside an unversioned source tree.
+For an unversioned development checkout, update SDK imports and requirements in both this module and the shared integration module to `github.com/urnetwork/sdk v0.0.0`, then add the required local `replace` directives for `sdk`, `connect`, `glog` and `goidenticons`. Published calendar-major modules use their versioned import paths; a local replace alone cannot rewrite imports inside an unversioned source tree.
 
 ## Replace the socket factory
 

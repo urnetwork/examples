@@ -13,6 +13,10 @@
 **/__pycache__/
 **/.bundle/
 **/socket-example
+**/messages-example
+**/codec-test
+**/runtime.o
+**/*.class
 **/device.json
 **/.env
 .DS_Store

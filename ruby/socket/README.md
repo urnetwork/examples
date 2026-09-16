@@ -1,5 +1,7 @@
 # Ruby sockets, Net::HTTP and Faraday
 
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+
 [main.rb](main.rb) is a complete program using the `urnetwork-sdk` gem's FFI wrapper. Direct modes create a local Device and use its Conn for TLS, UDP or DTLS.
 
 ## Install and run
@@ -35,10 +37,10 @@ Sources checked September 14, 2026: [Net::HTTP implementation](https://github.co
 
 ## Device setup
 
-The executable creates a local Device using the SDK's existing network-space APIs, applies your JWT, and chooses the best available location. Set an account JWT as described in the [SDK setup guide](https://ur.io/docs/getting-started-sdk). Generate an instance ID once with this program's `--new-id` mode, save it, and reuse it for this installation.
+The executable creates a local Device with the scoped client JWT issued by your service backend and chooses the best available location. Follow the [integration guide](../integration/README.md): the JWT must contain its assigned `client_id`; only the backend holds the root JWT. Generate an instance ID once with this program's `--new-id` mode, save it, and reuse it for this installation.
 
 ```sh
-export URNETWORK_JWT='your-account-jwt'
+export URNETWORK_CLIENT_JWT='your-scoped-client-jwt'
 export URNETWORK_INSTANCE_ID='your-persisted-instance-uuid'
 ```
 

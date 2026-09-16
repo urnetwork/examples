@@ -1,0 +1,10 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion><groupId>io.ur.examples</groupId><artifactId>messages</artifactId><version>1.0</version>
+  <properties><maven.compiler.release>17</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding><urnetwork.sdk.version>0.0.1-dev.0</urnetwork.sdk.version></properties>
+  <dependencies><dependency><groupId>io.ur</groupId><artifactId>urnetwork-sdk</artifactId><version>${urnetwork.sdk.version}</version></dependency></dependencies>
+  <build><sourceDirectory>.</sourceDirectory><plugins>
+    <plugin><groupId>org.codehaus.mojo</groupId><artifactId>build-helper-maven-plugin</artifactId><version>3.6.1</version><executions><execution><id>integration</id><phase>generate-sources</phase><goals><goal>add-source</goal></goals><configuration><sources><source>../integration</source></sources></configuration></execution></executions></plugin>
+    <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.14.0</version><configuration><includes><include>*.java</include></includes></configuration></plugin>
+    <plugin><groupId>org.codehaus.mojo</groupId><artifactId>exec-maven-plugin</artifactId><version>3.5.0</version><configuration><mainClass>Main</mainClass><cleanupDaemonThreads>false</cleanupDaemonThreads></configuration></plugin>
+  </plugins></build>
+</project>

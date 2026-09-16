@@ -1,5 +1,7 @@
 # Rust sockets, ureq and reqwest
 
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+
 [src/main.rs](src/main.rs) runs the examples. [session.rs](src/session.rs) owns a local Device, and [ur_http.rs](src/ur_http.rs) supplies a ureq connector, resolver and transport over `urnetwork_sdk::Conn`.
 
 ## Install and run
@@ -37,10 +39,10 @@ Sources checked September 14, 2026: [ureq Connector](https://docs.rs/ureq/latest
 
 ## Device setup
 
-The executable creates a local Device using the SDK's existing network-space APIs, applies your JWT, and chooses the best available location. Set an account JWT as described in the [SDK setup guide](https://ur.io/docs/getting-started-sdk). Generate an instance ID once with this program's `--new-id` mode, save it, and reuse it for this installation.
+The executable creates a local Device with the scoped client JWT issued by your service backend and chooses the best available location. Follow the [integration guide](../integration/README.md): the JWT must contain its assigned `client_id`; only the backend holds the root JWT. Generate an instance ID once with this program's `--new-id` mode, save it, and reuse it for this installation.
 
 ```sh
-export URNETWORK_JWT='your-account-jwt'
+export URNETWORK_CLIENT_JWT='your-scoped-client-jwt'
 export URNETWORK_INSTANCE_ID='your-persisted-instance-uuid'
 ```
 

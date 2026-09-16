@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.18)
+project(urnetwork_server_allocator LANGUAGES CXX)
+find_package(CURL REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+add_executable(allocator allocator.cpp)
+target_compile_features(allocator PRIVATE cxx_std_17)
+target_link_libraries(allocator PRIVATE CURL::libcurl nlohmann_json::nlohmann_json)

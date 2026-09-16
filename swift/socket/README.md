@@ -1,5 +1,7 @@
 # Swift sockets, URLSession and Alamofire
 
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+
 [main.swift](Sources/SocketExample/main.swift) is a runnable **macOS 14+ command-line example**. It uses the gomobile XCFramework's portable Socket API directly, and shows URLSession/Alamofire routing through an HTTP CONNECT proxy.
 
 ## Install and run
@@ -17,7 +19,7 @@ swift run SocketExample urlsession https://example.com/
 swift run SocketExample alamofire https://example.com/
 ```
 
-Before the distribution repository's first publication, copy a freshly built SDK XCFramework into `.native/URnetworkSdk.xcframework` here and set `URNETWORK_XCFRAMEWORK=.native/URnetworkSdk.xcframework`. SwiftPM requires that local binary-target path to be relative to this package. The SDK's existing `sdk/build` Makefile builds the Apple artifact; an older framework without `openSocket` is insufficient.
+Before the distribution repository's first publication, set `URNETWORK_XCFRAMEWORK` to the absolute path of a freshly built `URnetworkSdk.xcframework`, for example `export URNETWORK_XCFRAMEWORK='/absolute/path/to/URnetworkSdk.xcframework'`. The shared [integration package](../integration/Package.swift) converts that path for SwiftPM; relative paths resolve from `swift/integration`. Both sockets and messages use its [UrSession](../integration/Sources/URExampleIntegration/UrSession.swift) helper. The SDK's existing `sdk/build` Makefile builds the Apple artifact; an older framework without `openSocket` is insufficient.
 
 Set the Device variables below for raw modes. The executable's minimum macOS version is 14 because the proxy example uses `ProxyConfiguration`. SDK sockets themselves retain the Apple SDK's iOS 16 / macOS 13.5 baseline. iOS apps can reuse the portable socket calls on a worker queue; they need their normal app lifecycle/bootstrap code.
 
@@ -40,10 +42,10 @@ Sources checked September 14, 2026: [URLSession proxyConfigurations](https://dev
 
 ## Device setup
 
-The executable creates a local Device using the SDK's existing network-space APIs, applies your JWT, and chooses the best available location. Set an account JWT as described in the [SDK setup guide](https://ur.io/docs/getting-started-sdk). Generate an instance ID once with this program's `--new-id` mode, save it, and reuse it for this installation.
+The executable creates a local Device with the scoped client JWT issued by your service backend and chooses the best available location. Follow the [integration guide](../integration/README.md): the JWT must contain its assigned `client_id`; only the backend holds the root JWT. Generate an instance ID once with this program's `--new-id` mode, save it, and reuse it for this installation.
 
 ```sh
-export URNETWORK_JWT='your-account-jwt'
+export URNETWORK_CLIENT_JWT='your-scoped-client-jwt'
 export URNETWORK_INSTANCE_ID='your-persisted-instance-uuid'
 ```
 

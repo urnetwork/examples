@@ -2,6 +2,7 @@ import Foundation
 import Network
 import Alamofire
 import URnetworkSdk
+import URExampleIntegration
 
 struct ExampleError: Error, CustomStringConvertible {
     let description: String
@@ -45,22 +46,9 @@ func main() async throws {
     }
     guard ["tls", "udp", "dtls"].contains(mode) else {throw ExampleError("Modes: tls, udp, dtls, urlsession, alamofire")}
     if mode != "tls" && args.count < 3 {throw ExampleError("UDP/DTLS require an echo server host:port")}
-    let jwt = try required("URNETWORK_JWT"), idString = try required("URNETWORK_INSTANCE_ID")
-    var error: NSError?
-    guard let id = SdkParseId(idString, &error) else {throw error ?? ExampleError("Invalid instance ID") as NSError}
-    guard let manager = SdkNewNetworkSpaceManagerNoStorage() else {throw ExampleError("No network space manager")}
-    defer {manager.close()}
-    let values = SdkNetworkSpaceValues()
-    values.migrationHostName = "bringyour.com"
-    guard let space = manager.updateNetworkSpaceValues(SdkNewNetworkSpaceKey("ur.network", "main"), values: values) else {throw ExampleError("No network space")}
-    space.getApi()?.setByJwt(jwt)
-    guard let device = SdkNewDeviceLocalWithDefaults(space, jwt, "Swift socket example", "swift", "1", id, false, &error)
-    else {throw error ?? ExampleError("Device setup failed") as NSError}
-    defer {device.close()}
-    let location = SdkConnectLocation(), locationId = SdkConnectLocationId()
-    locationId.bestAvailable = true
-    location.connectLocationId = locationId
-    device.setConnectLocation(location)
+    let session = try UrSession()
+    defer {session.close()}
+    let device = session.device
     let address = args.count > 2 ? args[2] : "example.com:443"
     // This command-line program can block here. Apps should put portable socket
     // operations on a worker queue, never on the UI thread.

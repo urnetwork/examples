@@ -1,0 +1,17 @@
+{
+  "name": "urnetwork-typescript-server-allocator",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "self-test": "npm run build && node dist/allocator.js --self-test",
+    "start": "node dist/allocator.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "@types/node": "^24.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

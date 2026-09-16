@@ -1,0 +1,2 @@
+source "https://rubygems.org"
+gem "urnetwork-sdk", ">= 0.0.1.pre.dev.0"

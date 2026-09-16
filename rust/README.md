@@ -20,11 +20,15 @@ Rust 1.85+ and a platform included in the release manifest. The small public cra
 
 Cargo supports Git dependencies, but the source checkout must first have its runtime prepared with `make -C sdk/rust native` (or explicitly use URNETWORK_SDK_LIBRARY). For an install independent of the checkout, use the .crate produced by `make -C sdk/rust`.
 
-## Use the SDK
+## Examples
 
-Start with [socket/README.md](socket/README.md) for native socket replacements, TLS/DTLS, Happy Eyeballs, and HTTP client integration. The executable examples include Device setup; see the [SDK authentication and connection setup](https://ur.io/docs/getting-started-sdk). A native handle must come from the same runtime in the same process.
+- [Integration](integration/README.md): service provisioning, scoped client credentials and Device lifecycle.
+- [Sockets](socket/README.md): TCP/UDP, TLS/DTLS and HTTP client adapters.
+- [Messages](messages/README.md): live peer discovery and interoperable text/ACK exchange.
 
-Socket APIs shown here are part of the new socket release. Installing an older SDK successfully does not add those APIs. The [package plan](https://github.com/urnetwork/sdk/blob/main/PACKAGEMANAGERS.md) records package names, build outputs and first-publication gates.
+Apps use `URNETWORK_CLIENT_JWT` and a persisted `URNETWORK_INSTANCE_ID`; only the service backend holds `URNETWORK_ROOT_JWT`. See the [shared contract](../INTEGRATION_CONTRACT.md) and [official networking research](../NETWORK_EXAMPLES.md).
+
+Use an SDK release containing the required APIs. The [package plan](https://github.com/urnetwork/sdk/blob/main/PACKAGEMANAGERS.md) records package names, build outputs and publication gates.
 
 ## References
 
