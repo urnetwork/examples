@@ -10,7 +10,7 @@ JavaScript wraps sdk/js (Go/WASM) and uses async Conn objects and Web Streams. I
 npm install @urnetwork/sdk
 ```
 
-The canonical name is awaiting its first publication. Its preview builds use `npm install @urnetwork/sdk@nightly`; the unqualified command above requires a release on the `latest` tag. The existing package is `@urnetwork/sdk-js`. npm, pnpm, Yarn and Bun all consume the same package.
+The canonical name is awaiting its first publication. Its preview builds use `npm install @urnetwork/sdk@nightly`; the unqualified command above requires a release on the `latest` tag. npm, pnpm, Yarn and Bun all consume the same package.
 
 ## Supported platforms
 

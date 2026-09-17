@@ -10,7 +10,7 @@ TypeScript uses sdk/js. Conn provides typed async reads/writes and Web Streams a
 npm install @urnetwork/sdk
 ```
 
-Uses the same package as JavaScript, including TypeScript declarations. No separate @types package is needed. pnpm, Yarn and Bun are alternative installers. The canonical package's first publication is pending; @urnetwork/sdk-js is the existing name.
+Uses the same package as JavaScript, including TypeScript declarations. No separate @types package is needed. pnpm, Yarn and Bun are alternative installers. The canonical package's first publication is pending.
 
 For preview builds, use `npm install @urnetwork/sdk@nightly`. The unqualified command selects the `latest` tag once a release is published there.
 
