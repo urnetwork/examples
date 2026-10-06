@@ -7,16 +7,19 @@
 //
 // It serves two routes on its numeric loopback address, both authorized by
 // URNETWORK_COMPANION_TOKEN like the messaging routes:
-//   - /device-rpc: the SDK device rpc (getProvideEnabled, the contract view
-//     controllers), served only once the provider has connected to the
-//     platform. The JavaScript SDK does not bind GetProviderConnected, so a
-//     served rpc tells the app that the provider connected. Until then the
-//     route answers 503 and the SDK's DeviceRemote dials again.
-//   - /provider-status: json with the device values that the JavaScript SDK
-//     does not bind (the provide mode, the provider connection and the client
-//     limit status) and whether /device-rpc is served. It answers from the
-//     start, so the app can show "client limit" and "starting" while the
-//     provider is not connected.
+//   - /provider-status: json with every status value of the contract, read
+//     in process with the full SDK: the provide mode, enabled and paused
+//     state, the provider connection, the client limit status, the provider
+//     packet stats, the clients served (provider_clients.go) and whether
+//     /device-rpc is served. The JavaScript SDK binds neither the provider
+//     connection nor the client limit status, and its remotes run in browser
+//     state only mode, which gets no provider packet stats or provider
+//     contract details over the device rpc, so the app reads the status here.
+//     It answers from the start, so the app can show "client limit" and
+//     "starting" while the provider is not connected.
+//   - /device-rpc: the SDK device rpc, served only once the provider has
+//     connected to the platform, for what a browser state remote does get.
+//     Until then the route answers 503 and the SDK's DeviceRemote dials again.
 //
 // The companion waits for the provider without a time limit: under the client
 // limit hold the SDK keeps the provider off for 15 to 20 minutes and then
@@ -235,6 +238,9 @@ type providerCompanion struct {
 
 	// set once the device rpc is started, after the provider first connected
 	deviceRpcStarted atomic.Bool
+
+	// counted from the provider contract details listeners since the start
+	clientsServed *clientsServed
 }
 
 // Creates the provider device with the installation's identity and the
@@ -286,14 +292,17 @@ func newProviderCompanion(config *providerConfig) (*providerCompanion, error) {
 	}
 
 	companion := &providerCompanion{
-		config:  config,
-		manager: manager,
-		device:  device,
-		logout:  make(chan struct{}),
+		config:        config,
+		manager:       manager,
+		device:        device,
+		logout:        make(chan struct{}),
+		clientsServed: newClientsServed(clientsServedLimit),
 	}
 	companion.subs = []sdk.Sub{
 		device.AddJwtRefreshListener(&jwtRefreshListener{companion: companion}),
 		device.AddAuthLogoutListener(&authLogoutListener{companion: companion}),
+		device.AddProviderIngressContractDetailsChangeListener(&contractDetailsListener{clientsServed: companion.clientsServed, receive: true}),
+		device.AddProviderEgressContractDetailsChangeListener(&contractDetailsListener{clientsServed: companion.clientsServed, receive: false}),
 	}
 	device.SetProvideMode(sdk.ProvideModePublic)
 	return companion, nil
@@ -305,7 +314,7 @@ func newProviderCompanion(config *providerConfig) (*providerCompanion, error) {
 func (self *providerCompanion) Serve(ctx context.Context, listener net.Listener, settings *providerCompanionSettings) int {
 	deviceRpc := sdk.NewHostedDeviceRpcListener(ctx)
 	httpServer := &http.Server{
-		Handler:           newProviderHttpHandler(self.device, deviceRpc, self.deviceRpcStarted.Load, settings.token, settings.origin),
+		Handler:           newProviderHttpHandler(self.device, self.clientsServed, deviceRpc, self.deviceRpcStarted.Load, settings.token, settings.origin),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
@@ -393,22 +402,49 @@ func (self *authLogoutListener) AuthLogout() {
 // The device values behind /provider-status. *sdk.DeviceLocal has them.
 type providerStatusSource interface {
 	GetProvideMode() sdk.ProvideMode
+	GetProvideEnabled() bool
+	GetProvidePaused() bool
 	GetProviderConnected() bool
 	GetClientLimitStatus() *sdk.ClientLimitStatus
+	GetProviderPacketStats() *sdk.PacketStats
+}
+
+// The provider packet stats on /provider-status: the two byte counts of the
+// SDK's PacketStats that data provided adds up (PROVIDER_CONTRACT.md,
+// "Status"), with the SDK's Go field names. The full PacketStats also nests
+// per-transport stats, which the app does not show.
+type providerPacketStatsResponse struct {
+	RemoteEgressByteCount  int64 `json:"RemoteEgressByteCount"`
+	RemoteIngressByteCount int64 `json:"RemoteIngressByteCount"`
 }
 
 // The /provider-status body, with the SDK's Go field names as the C ABI uses
 // them (PROVIDER_CONTRACT.md, "App lifecycle"), for example
-// {"ProvideMode":3,"ProviderConnected":true,"ClientLimitStatus":{"Status":"","RetryTime":0},"DeviceRpcStarted":true}.
+// {"ProvideMode":3,"ProvideEnabled":true,"ProvidePaused":false,"ProviderConnected":true,
+// "ClientLimitStatus":{"Status":"","RetryTime":0},"ProviderPacketStats":{"RemoteEgressByteCount":5,
+// "RemoteIngressByteCount":7},"ClientsServed":3,"ClientsServedAtLimit":false,"DeviceRpcStarted":true}.
 type providerStatusResponse struct {
 	// sdk.ProvideModePublic (3) while providing publicly
 	ProvideMode sdk.ProvideMode `json:"ProvideMode"`
+	// GetProvideEnabled: the device has a provider
+	ProvideEnabled bool `json:"ProvideEnabled"`
+	// GetProvidePaused
+	ProvidePaused bool `json:"ProvidePaused"`
 	// the provider's platform carrier has a registered route
 	ProviderConnected bool `json:"ProviderConnected"`
 	// Status "client_limit_exceeded" with the hold's end in RetryTime (unix
 	// milliseconds) while the SDK holds the client off for its network's
 	// client limit; Status "" and RetryTime 0 otherwise
 	ClientLimitStatus *sdk.ClientLimitStatus `json:"ClientLimitStatus"`
+	// the byte counts of GetProviderPacketStats; null without a provider. Data
+	// provided is RemoteEgressByteCount plus RemoteIngressByteCount: bytes
+	// relayed for clients since the start.
+	ProviderPacketStats *providerPacketStatsResponse `json:"ProviderPacketStats"`
+	// distinct client peers of provider contracts since the start, at most
+	// clientsServedLimit
+	ClientsServed int `json:"ClientsServed"`
+	// the count stopped at clientsServedLimit and is a lower bound
+	ClientsServedAtLimit bool `json:"ClientsServedAtLimit"`
 	// /device-rpc is served
 	DeviceRpcStarted bool `json:"DeviceRpcStarted"`
 }
@@ -417,6 +453,7 @@ type providerStatusResponse struct {
 // device rpc admits one app connection at a time.
 func newProviderHttpHandler(
 	statusSource providerStatusSource,
+	served *clientsServed,
 	deviceRpc *sdk.HostedDeviceRpcListener,
 	deviceRpcStarted func() bool,
 	token string,
@@ -435,11 +472,24 @@ func newProviderHttpHandler(
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		clientsServedCount, clientsServedAtLimit := served.Count()
+		var providerPacketStats *providerPacketStatsResponse
+		if packetStats := statusSource.GetProviderPacketStats(); packetStats != nil {
+			providerPacketStats = &providerPacketStatsResponse{
+				RemoteEgressByteCount:  packetStats.RemoteEgressByteCount,
+				RemoteIngressByteCount: packetStats.RemoteIngressByteCount,
+			}
+		}
 		providerStatus := &providerStatusResponse{
-			ProvideMode:       statusSource.GetProvideMode(),
-			ProviderConnected: statusSource.GetProviderConnected(),
-			ClientLimitStatus: statusSource.GetClientLimitStatus(),
-			DeviceRpcStarted:  deviceRpcStarted(),
+			ProvideMode:          statusSource.GetProvideMode(),
+			ProvideEnabled:       statusSource.GetProvideEnabled(),
+			ProvidePaused:        statusSource.GetProvidePaused(),
+			ProviderConnected:    statusSource.GetProviderConnected(),
+			ClientLimitStatus:    statusSource.GetClientLimitStatus(),
+			ProviderPacketStats:  providerPacketStats,
+			ClientsServed:        clientsServedCount,
+			ClientsServedAtLimit: clientsServedAtLimit,
+			DeviceRpcStarted:     deviceRpcStarted(),
 		}
 		body, err := json.Marshal(providerStatus)
 		if err != nil {
