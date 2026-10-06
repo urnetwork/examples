@@ -110,6 +110,8 @@ status: providing | clients served: 3 | data provided: 12.4 MiB | payout wallet:
 
 SDK errors also appear on stderr; the SDK's full log is in `logs/` in the state directory.
 
+While providing, the SDK also runs the provider extender role: it listens on TCP 443 and UDP 443, 53 and 4053 so that clients that cannot reach the platform directly can connect through this provider, and it prints those listeners on stderr. Windows and macOS may ask to allow incoming connections the first time; on Linux, without the privilege to bind these ports, providing continues without the role. See the [contract](../../PROVIDER_CONTRACT.md#app-lifecycle) to turn the role off.
+
 Ctrl-C stops providing and exits with code 0. Exit code 78 means a configuration or credential problem that a restart does not fix, such as a missing `client.jwt` or a credential the server rejected; issue a new scoped JWT from your backend. Exit code 1 is any other failure.
 
 ## Run in the background

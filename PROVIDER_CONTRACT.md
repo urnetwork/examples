@@ -131,6 +131,8 @@ C ABI callbacks run on SDK threads: copy what they carry before returning, keep 
 
 Where a binding cannot read the wallet through the SDK, read `GET /sn/wallet` with the scoped client JWT: its `wallet` is the effective wallet, with `client_id` set only for the client's own mapping.
 
+**Extender role.** While it provides, the device also runs the provider extender role by default: it listens on TCP 443 and on UDP 443, 53 and 4053 so that clients that cannot reach the platform directly can connect through this provider, and it logs those listeners on stderr. Windows and macOS may ask the user to allow incoming connections the first time; on Linux an unprivileged process cannot bind these ports, and providing continues without the role. The examples keep this default and their READMEs say so. An app that must not open these ports creates the device with the device setting `ProvideExtenderEnabled` off (Go: `NewDeviceLocal` with `DefaultDeviceLocalSettings()`; C ABI: the settings JSON of `urnet_new_device_local`); `SetProvideExtender(false)` has no effect on a network space without storage.
+
 ## Status
 
 Every example shows these four fields with these exact rules. Console examples print one status line when the state, the clients-served count or the payout wallet changes, and otherwise once a minute; GUI and Android apps show the same fields as labeled values.
@@ -200,7 +202,7 @@ Each `<platform>/provider/README.md` follows the [Go provider README](go/provide
 4. Build and self-test: exact commands for Windows (PowerShell), macOS and Linux, and the SDK version or local build it needs.
 5. Backend: provisioning with the language's allocator, and the [wallet mapping](#payout-wallet-mapping) via the Go wallet tool or curl.
 6. Configure the installation: creating the private state directory and `client.jwt` on each OS.
-7. Run: per-OS commands, a sample status line, the field table and the exit codes.
+7. Run: per-OS commands, a sample status line, the field table, the extender role's listeners and the exit codes.
 8. Run in the background: the example's values for the [background templates](background/README.md), or the platform pattern.
 
 ## Platform notes
