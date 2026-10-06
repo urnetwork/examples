@@ -14,6 +14,8 @@
 // Exit codes, for supervisors: 0 stopped on request, 78 configuration or
 // credential problem (restarting does not help), 1 any other failure.
 
+import {realpathSync} from "node:fs";
+import {fileURLToPath} from "node:url";
 import {checkCompanionPath, companionPath, companionVersion} from "./companion.mjs";
 import {runSelfTest} from "./selftest.mjs";
 import {ProviderSession, defaultApiUrl, exitConfig, exitFailure, exitStopped} from "./session.mjs";
@@ -94,6 +96,16 @@ export async function run(args, {environment = process.env, log = writeLine, err
   }
 }
 
-if (import.meta.main) {
+// Whether the module of meta is the program's entry point. Node 24.2 and later
+// say so in import.meta.main; earlier Node 24 releases leave it undefined, so
+// the entry script's real path decides.
+export function isEntryPoint(meta, entryPath) {
+  if (typeof meta.main === "boolean") {
+    return meta.main;
+  }
+  return entryPath !== undefined && realpathSync(entryPath) === fileURLToPath(meta.url);
+}
+
+if (isEntryPoint(import.meta, process.argv[1])) {
   process.exitCode = await run(process.argv.slice(2));
 }

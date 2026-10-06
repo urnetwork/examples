@@ -9,8 +9,9 @@ import {createServer} from "node:http";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {test} from "node:test";
+import {fileURLToPath} from "node:url";
 import {CompanionProcess, companionEnvironment, freeLoopbackAddress, readCompanionStatus} from "./companion.ts";
-import {run} from "./main.ts";
+import {isEntryPoint, run} from "./main.ts";
 import {selfTestChecks, selfTestJwt} from "./selftest.ts";
 import {companionExitCode} from "./session.ts";
 import {clientJwtFileName, writePrivateFile} from "./state.ts";
@@ -81,6 +82,17 @@ async function waitForCompanionStatus(address: string, token: string): Promise<C
     }
   }
 }
+
+test("the program runs as the entry point without import.meta.main", () => {
+  const url = new URL("./main.ts", import.meta.url).href;
+  const path = fileURLToPath(url);
+  assert.equal(isEntryPoint({main: true, url}, undefined), true);
+  assert.equal(isEntryPoint({main: false, url}, path), false);
+  // Node 24.0 and 24.1 have no import.meta.main
+  assert.equal(isEntryPoint({url}, path), true);
+  assert.equal(isEntryPoint({url}, fileURLToPath(new URL("./status.ts", import.meta.url))), false);
+  assert.equal(isEntryPoint({url}, undefined), false);
+});
 
 test("a usage error exits with 78", async () => {
   const errors: string[] = [];
