@@ -1,0 +1,22 @@
+{
+  "name": "urnetwork-electron-provider",
+  "productName": "URnetwork Provider",
+  "version": "0.1.0",
+  "description": "URnetwork provider example for Electron",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test --test-timeout=60000 test/*.test.mjs"
+  },
+  "dependencies": {
+    "@urnetwork/sdk": "nightly"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

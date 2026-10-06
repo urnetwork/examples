@@ -1,0 +1,6 @@
+# the companion binaries built for this app, per <platform>-<arch>
+bin/
+# packaged apps
+out/
+# npm install resolves @urnetwork/sdk at the nightly tag; the example pins no release
+package-lock.json

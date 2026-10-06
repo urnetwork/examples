@@ -1,0 +1,43 @@
+<!doctype html>
+<!-- The provider window: the consent disclaimer next to Start, the four status
+     fields, Stop, and the installation's configuration. It loads no remote
+     content; renderer.js talks to the main process only through the preload
+     script's window.urnetworkProvider. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>URnetwork Provider</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="renderer.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>URnetwork provider</h1>
+    <section class="start" aria-label="Start providing">
+      <p id="disclaimer" class="disclaimer">Consent disclaimer: an app that integrates a URnetwork provider must collect the user's consent before it provides.
+Providing shares the user's internet connection: other URnetwork users' traffic exits through the user's device and IP address.
+This example starts providing without asking, because the consent screen belongs to your app.</p>
+      <button id="start" type="button">Start providing</button>
+    </section>
+    <dl class="fields" aria-label="Provider status">
+      <dt>Status</dt>
+      <dd id="status">stopped</dd>
+      <dt>Clients served</dt>
+      <dd id="clients-served">0</dd>
+      <dt>Data provided</dt>
+      <dd id="data-provided">0 B</dd>
+      <dt>Payout wallet</dt>
+      <dd id="payout-wallet">checking</dd>
+    </dl>
+    <button id="stop" type="button">Stop providing</button>
+    <p id="message" class="message" role="status" aria-live="polite"></p>
+    <section class="setup" aria-label="Installation">
+      <button id="import-client-jwt" type="button">Import client JWT…</button>
+      <label class="start-at-login"><input id="start-at-login" type="checkbox"> Start providing at login</label>
+      <p class="state-dir">State directory: <code id="state-dir"></code></p>
+    </section>
+  </main>
+</body>
+</html>
