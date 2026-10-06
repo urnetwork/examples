@@ -20,3 +20,4 @@
 **/device.json
 **/.env
 .DS_Store
+rust/provider/Cargo.lock
