@@ -25,6 +25,7 @@ SwiftPM requires Package.swift at the repository root. The proposed sdk-swift re
 - [Integration](integration/README.md): service provisioning, scoped client credentials and Device lifecycle.
 - [Sockets](socket/README.md): TCP/UDP, TLS/DTLS and HTTP client adapters.
 - [Messages](messages/README.md): live peer discovery and interoperable text/ACK exchange.
+- [Provider](provider/README.md): a provider client of your network with the consent disclaimer, status, payout wallet display and background run, on the SDK's C ABI for Windows, macOS and Linux.
 
 Apps use `URNETWORK_CLIENT_JWT` and a persisted `URNETWORK_INSTANCE_ID`; only the service backend holds `URNETWORK_ROOT_JWT`. See the [shared contract](../INTEGRATION_CONTRACT.md) and [official networking research](../NETWORK_EXAMPLES.md).
 

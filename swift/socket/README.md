@@ -1,6 +1,6 @@
 # Swift sockets, URLSession and Alamofire
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [main.swift](Sources/SocketExample/main.swift) is a runnable **macOS 14+ command-line example**. It uses the gomobile XCFramework's portable Socket API directly, and shows URLSession/Alamofire routing through an HTTP CONNECT proxy.
 
