@@ -115,8 +115,10 @@ export function checkFormatByteCount() {
     [13002342, "12.4 MiB"],
     [5 * 1024 * 1024 * 1024, "5.0 GiB"],
     [3 * 1024 * 1024 * 1024 * 1024, "3.0 TiB"],
-    // exact ties round to the even tenth, as Go's %.1f does
+    // exact ties round to the even tenth, as Go's %.1f does (the contract's
+    // tie vectors 1280 and 1792); toFixed(1) alone would give "1.3 KiB"
     [1280, "1.2 KiB"],
+    [1792, "1.8 KiB"],
     [2304, "2.2 KiB"],
     // 1023.94 KiB stays, 1023.95 KiB rounds to 1024.0 and moves on
     [1048524, "1023.9 KiB"],
