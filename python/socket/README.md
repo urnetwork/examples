@@ -1,6 +1,6 @@
 # Python sockets, HTTPX and Requests
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [main.py](main.py) is a complete local-Device program. [ur_http.py](ur_http.py) implements a synchronous HTTPcore network backend and adapters for HTTPX and Requests over `urnetwork.Conn`.
 
