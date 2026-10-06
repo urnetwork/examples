@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -45,14 +46,32 @@ func testStateDir(t *testing.T) string {
 
 // Fixed device values for the /provider-status route.
 type fixedProviderStatusSource struct {
-	provideMode       sdk.ProvideMode
-	providerConnected bool
-	clientLimitStatus *sdk.ClientLimitStatus
+	provideMode         sdk.ProvideMode
+	provideEnabled      bool
+	providePaused       bool
+	providerConnected   bool
+	clientLimitStatus   *sdk.ClientLimitStatus
+	providerPacketStats *sdk.PacketStats
 }
 
 // The fixed provide mode.
 func (self *fixedProviderStatusSource) GetProvideMode() sdk.ProvideMode {
 	return self.provideMode
+}
+
+// The fixed provide enabled state.
+func (self *fixedProviderStatusSource) GetProvideEnabled() bool {
+	return self.provideEnabled
+}
+
+// The fixed provide paused state.
+func (self *fixedProviderStatusSource) GetProvidePaused() bool {
+	return self.providePaused
+}
+
+// The fixed provider packet stats.
+func (self *fixedProviderStatusSource) GetProviderPacketStats() *sdk.PacketStats {
+	return self.providerPacketStats
 }
 
 // The fixed provider connection.
@@ -63,6 +82,24 @@ func (self *fixedProviderStatusSource) GetProviderConnected() bool {
 // The fixed client limit status.
 func (self *fixedProviderStatusSource) GetClientLimitStatus() *sdk.ClientLimitStatus {
 	return self.clientLimitStatus
+}
+
+// A synthetic id from its text.
+func testId(t *testing.T, text string) *sdk.Id {
+	id, err := sdk.ParseId(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// Synthetic provider contract details; nil ids are absent.
+func testContract(t *testing.T, contractId string, sourceId *sdk.Id, destinationId *sdk.Id, streamId *sdk.Id) *sdk.ContractDetails {
+	return &sdk.ContractDetails{
+		ContractId:           testId(t, contractId),
+		ContractTransferPath: sdk.NewTransferPath(sourceId, destinationId, streamId),
+		Status:               sdk.ContractStatusOpen,
+	}
 }
 
 // Only an unset or "public" URNETWORK_COMPANION_PROVIDE selects a mode.
@@ -318,7 +355,8 @@ func TestProviderConfig(t *testing.T) {
 }
 
 // /provider-status needs the token and serves the device values, including
-// the client limit hold, while the provider is not connected.
+// the client limit hold while the provider is not connected, with the
+// contract's status fields under the SDK's Go field names.
 func TestProviderStatusRoute(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -330,8 +368,9 @@ func TestProviderStatusRoute(t *testing.T) {
 		// 2026-10-06 19:05:00.000 UTC
 		clientLimitStatus: &sdk.ClientLimitStatus{Status: sdk.ClientLimitStatusExceeded, RetryTime: 1791313500000},
 	}
+	served := newClientsServed(clientsServedLimit)
 	deviceRpcStarted := false
-	handler := newProviderHttpHandler(statusSource, deviceRpc, func() bool { return deviceRpcStarted }, testCompanionToken, "")
+	handler := newProviderHttpHandler(statusSource, served, deviceRpc, func() bool { return deviceRpcStarted }, testCompanionToken, "")
 	get := func(target string, origin string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodGet, target, nil)
 		if origin != "" {
@@ -361,20 +400,118 @@ func TestProviderStatusRoute(t *testing.T) {
 		t.Fatalf("status %d for a post", postRecorder.Code)
 	}
 
-	// the client limit hold is served while the provider is not connected
+	// the client limit hold is served while the provider is not connected,
+	// before the device has provider stats
 	w := get("http://127.0.0.1/provider-status?token="+testCompanionToken, "")
-	body := `{"ProvideMode":3,"ProviderConnected":false,"ClientLimitStatus":{"Status":"client_limit_exceeded","RetryTime":1791313500000},"DeviceRpcStarted":false}`
+	body := `{"ProvideMode":3,"ProvideEnabled":false,"ProvidePaused":false,"ProviderConnected":false,"ClientLimitStatus":{"Status":"client_limit_exceeded","RetryTime":1791313500000},"ProviderPacketStats":null,"ClientsServed":0,"ClientsServedAtLimit":false,"DeviceRpcStarted":false}`
 	if w.Code != http.StatusOK || w.Body.String() != body || w.Header().Get("Content-Type") != "application/json" {
 		t.Fatalf("status %d %q %q", w.Code, w.Body.String(), w.Header().Get("Content-Type"))
 	}
 
+	// providing: two clients, bytes in both directions
+	statusSource.provideEnabled = true
 	statusSource.providerConnected = true
 	statusSource.clientLimitStatus = &sdk.ClientLimitStatus{Status: sdk.ClientLimitStatusNone, RetryTime: 0}
+	statusSource.providerPacketStats = &sdk.PacketStats{RemoteEgressPacketCount: 9, RemoteEgressByteCount: 13002335, RemoteIngressByteCount: 7}
+	provider := testId(t, "11111111-1111-1111-1111-111111111111")
+	served.Add(testContract(t, "55555555-5555-5555-5555-555555555555", testId(t, "22222222-2222-2222-2222-222222222222"), provider, nil), true)
+	served.Add(testContract(t, "66666666-6666-6666-6666-666666666666", provider, testId(t, "33333333-3333-3333-3333-333333333333"), nil), false)
 	deviceRpcStarted = true
 	w = get("http://127.0.0.1/provider-status?token="+testCompanionToken, "")
-	body = `{"ProvideMode":3,"ProviderConnected":true,"ClientLimitStatus":{"Status":"","RetryTime":0},"DeviceRpcStarted":true}`
-	if w.Code != http.StatusOK || w.Body.String() != body {
+	if w.Code != http.StatusOK {
 		t.Fatalf("status %d %q", w.Code, w.Body.String())
+	}
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(w.Body.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	fieldNames := []string{"ProvideMode", "ProvideEnabled", "ProvidePaused", "ProviderConnected", "ClientLimitStatus", "ProviderPacketStats", "ClientsServed", "ClientsServedAtLimit", "DeviceRpcStarted"}
+	if len(fields) != len(fieldNames) {
+		t.Fatalf("status fields %q", w.Body.String())
+	}
+	for _, fieldName := range fieldNames {
+		if _, ok := fields[fieldName]; !ok {
+			t.Fatalf("status has no %s: %q", fieldName, w.Body.String())
+		}
+	}
+	var providerStatus struct {
+		ProvideMode       int
+		ProvideEnabled    bool
+		ProvidePaused     bool
+		ProviderConnected bool
+		ClientLimitStatus struct {
+			Status    string
+			RetryTime int64
+		}
+		ProviderPacketStats  map[string]int64
+		ClientsServed        int
+		ClientsServedAtLimit bool
+		DeviceRpcStarted     bool
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &providerStatus); err != nil {
+		t.Fatal(err)
+	}
+	packetStats := providerStatus.ProviderPacketStats
+	if providerStatus.ProvideMode != sdk.ProvideModePublic || !providerStatus.ProvideEnabled || providerStatus.ProvidePaused ||
+		!providerStatus.ProviderConnected || providerStatus.ClientLimitStatus.Status != "" || providerStatus.ClientLimitStatus.RetryTime != 0 ||
+		packetStats["RemoteEgressByteCount"] != 13002335 || packetStats["RemoteIngressByteCount"] != 7 || packetStats["RemoteEgressPacketCount"] != 9 ||
+		providerStatus.ClientsServed != 2 || providerStatus.ClientsServedAtLimit || !providerStatus.DeviceRpcStarted {
+		t.Fatalf("providing status %q", w.Body.String())
+	}
+}
+
+// Contract peers resolve by direction with the contract's fallbacks
+// (PROVIDER_CONTRACT.md, peer vectors).
+func TestContractPeerKey(t *testing.T) {
+	provider := testId(t, "11111111-1111-1111-1111-111111111111")
+	clientA := testId(t, "22222222-2222-2222-2222-222222222222")
+	stream := testId(t, "44444444-4444-4444-4444-444444444444")
+	zero := testId(t, zeroIdString)
+	cases := []struct {
+		details *sdk.ContractDetails
+		receive bool
+		peerKey string
+	}{
+		{details: testContract(t, "55555555-5555-5555-5555-555555555555", clientA, provider, nil), receive: true, peerKey: "22222222-2222-2222-2222-222222222222"},
+		{details: testContract(t, "66666666-6666-6666-6666-666666666666", provider, clientA, nil), receive: false, peerKey: "22222222-2222-2222-2222-222222222222"},
+		{details: testContract(t, "77777777-7777-7777-7777-777777777777", zero, provider, stream), receive: true, peerKey: "stream:44444444-4444-4444-4444-444444444444"},
+		{details: &sdk.ContractDetails{ContractId: testId(t, "88888888-8888-8888-8888-888888888888"), Status: sdk.ContractStatusOpen}, receive: true, peerKey: "contract:88888888-8888-8888-8888-888888888888"},
+		{details: &sdk.ContractDetails{Status: sdk.ContractStatusOpen}, receive: true, peerKey: ""},
+	}
+	for _, c := range cases {
+		if peerKey := contractPeerKey(c.details, c.receive); peerKey != c.peerKey {
+			t.Fatalf("contract peer key %q, want %q", peerKey, c.peerKey)
+		}
+	}
+}
+
+// Both directions of one client count once, a second client counts two, and
+// the count stops at the limit; the listeners feed it by direction.
+func TestClientsServed(t *testing.T) {
+	provider := testId(t, "11111111-1111-1111-1111-111111111111")
+	clientA := testId(t, "22222222-2222-2222-2222-222222222222")
+	clientB := testId(t, "33333333-3333-3333-3333-333333333333")
+	stream := testId(t, "44444444-4444-4444-4444-444444444444")
+	zero := testId(t, zeroIdString)
+	served := newClientsServed(2)
+	ingress := &contractDetailsListener{clientsServed: served, receive: true}
+	egress := &contractDetailsListener{clientsServed: served, receive: false}
+
+	ingress.ContractDetailsChanged(testContract(t, "55555555-5555-5555-5555-555555555555", clientA, provider, nil))
+	egress.ContractDetailsChanged(testContract(t, "66666666-6666-6666-6666-666666666666", provider, clientA, nil))
+	ingress.ContractDetailsChanged(testContract(t, "99999999-9999-9999-9999-999999999999", clientA, provider, nil))
+	ingress.ContractDetailsChanged(nil)
+	if count, atLimit := served.Count(); count != 1 || atLimit {
+		t.Fatalf("one client counted as %d (at limit %t)", count, atLimit)
+	}
+	ingress.ContractDetailsChanged(testContract(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", clientB, provider, nil))
+	if count, atLimit := served.Count(); count != 2 || atLimit {
+		t.Fatalf("two clients counted as %d (at limit %t)", count, atLimit)
+	}
+	// a third distinct peer reaches the limit of 2
+	ingress.ContractDetailsChanged(testContract(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", zero, provider, stream))
+	if count, atLimit := served.Count(); count != 2 || !atLimit {
+		t.Fatalf("limited count %d (at limit %t)", count, atLimit)
 	}
 }
 
@@ -388,7 +525,7 @@ func TestDeviceRpcRouteWaitsForProvider(t *testing.T) {
 		provideMode:       sdk.ProvideModePublic,
 		clientLimitStatus: &sdk.ClientLimitStatus{Status: sdk.ClientLimitStatusNone},
 	}
-	handler := newProviderHttpHandler(statusSource, deviceRpc, func() bool { return false }, testCompanionToken, "")
+	handler := newProviderHttpHandler(statusSource, newClientsServed(clientsServedLimit), deviceRpc, func() bool { return false }, testCompanionToken, "")
 
 	r := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/device-rpc?token="+testCompanionToken, nil)
 	w := httptest.NewRecorder()
