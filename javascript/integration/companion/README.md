@@ -132,7 +132,7 @@ The companion prints the consent disclaimer, creates its device with the install
 - `/device-rpc`: the SDK device RPC, only once the provider has connected; until then it answers 503 and the SDK's `DeviceRemote` dials again. A JavaScript SDK remote runs in browser state only mode: over this RPC it gets no provider packet stats and no provider contract details, and it cannot change the provide settings. The provider examples therefore do not use it; it stays for apps that need what a browser state remote does get.
 
 ```json
-{"ProvideMode":3,"ProvideEnabled":true,"ProvidePaused":false,"ProviderConnected":true,"ClientLimitStatus":{"Status":"","RetryTime":0},"ProviderPacketStats":{"RemoteEgressPacketCount":9,"RemoteEgressByteCount":13002335,"RemoteIngressPacketCount":4,"RemoteIngressByteCount":7,"...":0},"ClientsServed":2,"ClientsServedAtLimit":false,"DeviceRpcStarted":true}
+{"ProvideMode":3,"ProvideEnabled":true,"ProvidePaused":false,"ProviderConnected":true,"ClientLimitStatus":{"Status":"","RetryTime":0},"ProviderPacketStats":{"RemoteEgressByteCount":13002335,"RemoteIngressByteCount":7},"ClientsServed":2,"ClientsServedAtLimit":false,"DeviceRpcStarted":true}
 ```
 
 | `/provider-status` field | Meaning |
@@ -142,7 +142,7 @@ The companion prints the consent disclaimer, creates its device with the install
 | `ProvidePaused` | `GetProvidePaused`. |
 | `ProviderConnected` | `GetProviderConnected`: the provider's platform carrier is connected. |
 | `ClientLimitStatus` | `GetClientLimitStatus`: `Status` is `""` or `"client_limit_exceeded"`, `RetryTime` is the end of the hold in unix milliseconds, 0 without a hold. |
-| `ProviderPacketStats` | `GetProviderPacketStats` with every field of the SDK's `PacketStats`, `null` without a provider. Data provided is `RemoteEgressByteCount` plus `RemoteIngressByteCount`. |
+| `ProviderPacketStats` | The byte counts of `GetProviderPacketStats`, `RemoteEgressByteCount` and `RemoteIngressByteCount`, or `null` without a provider. Data provided is their sum: bytes relayed for clients, both directions, since the companion started. |
 | `ClientsServed` | Distinct client peers of provider contracts since the companion started, counted from the provider ingress and egress contract details listeners with the contract's peer rules (the source of a receive contract, the destination of a send contract, else `stream:` and then `contract:` keys), at most 100,000. |
 | `ClientsServedAtLimit` | The count stopped at 100,000 and is a lower bound (show `100000+`). |
 | `DeviceRpcStarted` | `/device-rpc` is served. |

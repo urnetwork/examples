@@ -409,11 +409,20 @@ type providerStatusSource interface {
 	GetProviderPacketStats() *sdk.PacketStats
 }
 
+// The provider packet stats on /provider-status: the two byte counts of the
+// SDK's PacketStats that data provided adds up (PROVIDER_CONTRACT.md,
+// "Status"), with the SDK's Go field names. The full PacketStats also nests
+// per-transport stats, which the app does not show.
+type providerPacketStatsResponse struct {
+	RemoteEgressByteCount  int64 `json:"RemoteEgressByteCount"`
+	RemoteIngressByteCount int64 `json:"RemoteIngressByteCount"`
+}
+
 // The /provider-status body, with the SDK's Go field names as the C ABI uses
 // them (PROVIDER_CONTRACT.md, "App lifecycle"), for example
 // {"ProvideMode":3,"ProvideEnabled":true,"ProvidePaused":false,"ProviderConnected":true,
-// "ClientLimitStatus":{"Status":"","RetryTime":0},"ProviderPacketStats":{"RemoteEgressPacketCount":4,
-// "RemoteEgressByteCount":5,...},"ClientsServed":3,"ClientsServedAtLimit":false,"DeviceRpcStarted":true}.
+// "ClientLimitStatus":{"Status":"","RetryTime":0},"ProviderPacketStats":{"RemoteEgressByteCount":5,
+// "RemoteIngressByteCount":7},"ClientsServed":3,"ClientsServedAtLimit":false,"DeviceRpcStarted":true}.
 type providerStatusResponse struct {
 	// sdk.ProvideModePublic (3) while providing publicly
 	ProvideMode sdk.ProvideMode `json:"ProvideMode"`
@@ -427,10 +436,10 @@ type providerStatusResponse struct {
 	// milliseconds) while the SDK holds the client off for its network's
 	// client limit; Status "" and RetryTime 0 otherwise
 	ClientLimitStatus *sdk.ClientLimitStatus `json:"ClientLimitStatus"`
-	// GetProviderPacketStats, with every field of sdk.PacketStats; null without
-	// a provider. Data provided is RemoteEgressByteCount plus
-	// RemoteIngressByteCount: bytes relayed for clients since the start.
-	ProviderPacketStats *sdk.PacketStats `json:"ProviderPacketStats"`
+	// the byte counts of GetProviderPacketStats; null without a provider. Data
+	// provided is RemoteEgressByteCount plus RemoteIngressByteCount: bytes
+	// relayed for clients since the start.
+	ProviderPacketStats *providerPacketStatsResponse `json:"ProviderPacketStats"`
 	// distinct client peers of provider contracts since the start, at most
 	// clientsServedLimit
 	ClientsServed int `json:"ClientsServed"`
@@ -464,13 +473,20 @@ func newProviderHttpHandler(
 			return
 		}
 		clientsServedCount, clientsServedAtLimit := served.Count()
+		var providerPacketStats *providerPacketStatsResponse
+		if packetStats := statusSource.GetProviderPacketStats(); packetStats != nil {
+			providerPacketStats = &providerPacketStatsResponse{
+				RemoteEgressByteCount:  packetStats.RemoteEgressByteCount,
+				RemoteIngressByteCount: packetStats.RemoteIngressByteCount,
+			}
+		}
 		providerStatus := &providerStatusResponse{
 			ProvideMode:          statusSource.GetProvideMode(),
 			ProvideEnabled:       statusSource.GetProvideEnabled(),
 			ProvidePaused:        statusSource.GetProvidePaused(),
 			ProviderConnected:    statusSource.GetProviderConnected(),
 			ClientLimitStatus:    statusSource.GetClientLimitStatus(),
-			ProviderPacketStats:  statusSource.GetProviderPacketStats(),
+			ProviderPacketStats:  providerPacketStats,
 			ClientsServed:        clientsServedCount,
 			ClientsServedAtLimit: clientsServedAtLimit,
 			DeviceRpcStarted:     deviceRpcStarted(),

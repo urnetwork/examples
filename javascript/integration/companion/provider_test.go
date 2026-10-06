@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -418,45 +417,10 @@ func TestProviderStatusRoute(t *testing.T) {
 	served.Add(testContract(t, "66666666-6666-6666-6666-666666666666", provider, testId(t, "33333333-3333-3333-3333-333333333333"), nil), false)
 	deviceRpcStarted = true
 	w = get("http://127.0.0.1/provider-status?token="+testCompanionToken, "")
-	if w.Code != http.StatusOK {
+	// only the byte counts of the packet stats are served, not the packet counts
+	body = `{"ProvideMode":3,"ProvideEnabled":true,"ProvidePaused":false,"ProviderConnected":true,"ClientLimitStatus":{"Status":"","RetryTime":0},"ProviderPacketStats":{"RemoteEgressByteCount":13002335,"RemoteIngressByteCount":7},"ClientsServed":2,"ClientsServedAtLimit":false,"DeviceRpcStarted":true}`
+	if w.Code != http.StatusOK || w.Body.String() != body {
 		t.Fatalf("status %d %q", w.Code, w.Body.String())
-	}
-	fields := map[string]json.RawMessage{}
-	if err := json.Unmarshal(w.Body.Bytes(), &fields); err != nil {
-		t.Fatal(err)
-	}
-	fieldNames := []string{"ProvideMode", "ProvideEnabled", "ProvidePaused", "ProviderConnected", "ClientLimitStatus", "ProviderPacketStats", "ClientsServed", "ClientsServedAtLimit", "DeviceRpcStarted"}
-	if len(fields) != len(fieldNames) {
-		t.Fatalf("status fields %q", w.Body.String())
-	}
-	for _, fieldName := range fieldNames {
-		if _, ok := fields[fieldName]; !ok {
-			t.Fatalf("status has no %s: %q", fieldName, w.Body.String())
-		}
-	}
-	var providerStatus struct {
-		ProvideMode       int
-		ProvideEnabled    bool
-		ProvidePaused     bool
-		ProviderConnected bool
-		ClientLimitStatus struct {
-			Status    string
-			RetryTime int64
-		}
-		ProviderPacketStats  map[string]int64
-		ClientsServed        int
-		ClientsServedAtLimit bool
-		DeviceRpcStarted     bool
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &providerStatus); err != nil {
-		t.Fatal(err)
-	}
-	packetStats := providerStatus.ProviderPacketStats
-	if providerStatus.ProvideMode != sdk.ProvideModePublic || !providerStatus.ProvideEnabled || providerStatus.ProvidePaused ||
-		!providerStatus.ProviderConnected || providerStatus.ClientLimitStatus.Status != "" || providerStatus.ClientLimitStatus.RetryTime != 0 ||
-		packetStats["RemoteEgressByteCount"] != 13002335 || packetStats["RemoteIngressByteCount"] != 7 || packetStats["RemoteEgressPacketCount"] != 9 ||
-		providerStatus.ClientsServed != 2 || providerStatus.ClientsServedAtLimit || !providerStatus.DeviceRpcStarted {
-		t.Fatalf("providing status %q", w.Body.String())
 	}
 }
 
