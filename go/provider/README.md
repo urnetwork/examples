@@ -49,7 +49,7 @@ export URNETWORK_CLIENT_MAP='/absolute/path/to/private-service-state/providers.j
 
 The allocator prints `client_id` and `by_client_jwt`. Your backend delivers `by_client_jwt` to that installation as its `client.jwt`.
 
-The payout wallet is your fixed Bittensor coldkey. The backend maps each provider client to it once, with a consent message that the coldkey owner signs offline with their own wallet tool; the coldkey never touches the backend or the app. The wallet tool in [server/](server/main.go) runs those steps for one client at a time and uses only the standard library:
+The payout wallet is your fixed Bittensor coldkey. The coldkey owner signs a consent message offline with their own wallet tool; the coldkey never touches the backend or the app. One **network consent** covers every provider client of your network, including the ones you provision later; a **per-provider consent** covers one client and takes precedence over the network consent for it. The wallet tool in [server/](server/main.go) runs both and uses only the standard library:
 
 ```sh
 cd server
@@ -60,12 +60,12 @@ mkdir -p /absolute/path/to/private-service-state/wallet
 export URNETWORK_WALLET_DIR='/absolute/path/to/private-service-state/wallet'
 export URNETWORK_PAYOUT_COLDKEY='5...your-coldkey-ss58-address'
 export URNETWORK_ROOT_JWT='backend-root-jwt-from-your-secret-store'
-./wallet challenge 11111111-1111-1111-1111-111111111111
-./wallet accept 11111111-1111-1111-1111-111111111111 '0x...128-hex-character-signature'
+./wallet network-challenge
+./wallet network-accept '0x...128-hex-character-signature'
 ./wallet show
 ```
 
-`challenge` saves the exact consent message as `consent-<client-id>.txt` in the wallet directory. The coldkey owner signs those exact bytes within five minutes (sr25519, "substrate" context, as btcli, polkadot.js and subkey sign) and returns the 64-byte hex signature; `accept` submits it and saves a receipt. `show` lists the network's mapped wallets. The [provider contract](../../PROVIDER_CONTRACT.md#payout-wallet-mapping) gives the same steps with curl and the signing format.
+`network-challenge` saves the exact consent message as `network-consent.txt` in the wallet directory, after checking that it names your network (from the root JWT) and the coldkey. The coldkey owner signs those exact bytes within five minutes (sr25519, "substrate" context, as btcli, polkadot.js and subkey sign) and returns the 64-byte hex signature; `network-accept` submits it and saves a receipt. For one client, `./wallet challenge <client-id>` and `./wallet accept <client-id> <signature>` do the same with `consent-<client-id>.txt`. `show` lists the network consent, the network wallet and each client's wallet, with the epochs each consent pays. The [provider contract](../../PROVIDER_CONTRACT.md#payout-wallet-mapping) gives the same steps with curl, the signing format and the precedence rules.
 
 ## Configure the installation
 
@@ -110,7 +110,7 @@ status: providing | clients served: 3 | data provided: 12.4 MiB | payout wallet:
 
 SDK errors also appear on stderr; the SDK's full log is in `logs/` in the state directory.
 
-While providing, the SDK also runs the provider extender role: it listens on TCP 443 and UDP 443, 53 and 4053 so that clients that cannot reach the platform directly can connect through this provider, and it prints those listeners on stderr. Windows and macOS may ask to allow incoming connections the first time; on Linux, without the privilege to bind these ports, providing continues without the role. See the [contract](../../PROVIDER_CONTRACT.md#app-lifecycle) to turn the role off.
+While providing, the SDK also runs the provider extender role, on by default: it listens on TCP 443 and UDP 443, 53 and 4053 so that clients that cannot reach the platform directly can connect through this provider, and it prints those listeners on stderr. Windows and macOS may ask to allow incoming connections the first time; on Linux, without the privilege to bind these ports, providing continues without the role. One device setting, `DefaultProvideExtender`, turns the default off; see the [contract](../../PROVIDER_CONTRACT.md#app-lifecycle).
 
 Ctrl-C stops providing and exits with code 0. Exit code 78 means a configuration or credential problem that a restart does not fix, such as a missing `client.jwt` or a credential the server rejected; issue a new scoped JWT from your backend. Exit code 1 is any other failure.
 

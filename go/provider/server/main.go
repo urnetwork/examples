@@ -1,7 +1,11 @@
-// SERVER ONLY: the backend tool that maps a provider client of the developer's
-// network to the fixed Bittensor payout coldkey through the signed consent
-// flow (PROVIDER_CONTRACT.md, "Payout wallet mapping"):
+// SERVER ONLY: the backend tool that maps the developer's provider clients to
+// the fixed Bittensor payout coldkey through the signed consent flow
+// (PROVIDER_CONTRACT.md, "Payout wallet mapping"). A network consent covers
+// every provider client of the network with one signature; a per-provider
+// consent covers one client and takes precedence over the network consent:
 //
+//	wallet network-challenge                   POST /sn/wallet/network-consent; saves the exact message to sign
+//	wallet network-accept <signature-hex>      POST /sn/wallet with the saved network message and its signature
 //	wallet challenge <client-id>               POST /sn/wallet/consent; saves the exact message to sign
 //	wallet accept <client-id> <signature-hex>  POST /sn/wallet with the saved message and its signature
 //	wallet show                                GET /sn/wallet; the network's mapped wallets
@@ -19,6 +23,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -37,8 +42,21 @@ import (
 
 const defaultApiUrl = "https://api.bringyour.com"
 
-// The server issues consent messages with this first line.
+// The server issues per-provider consent messages with this first line.
 const consentPrefix = "Approve URnetwork provider wallet mapping\n"
+
+// The server issues network consent messages with this first line.
+const networkConsentPrefix = "Approve URnetwork network wallet mapping\n"
+
+// the scope field of a network consent message
+const networkConsentScope = "network"
+
+// the saved network consent message and its receipt in the wallet directory
+const networkConsentFile = "network-consent.txt"
+const networkConsentReceiptFile = "network-consent.accepted.json"
+
+// the command forms
+const usage = "usage: wallet network-challenge | network-accept <signature-hex> | challenge <client-id> | accept <client-id> <signature-hex> | show | --self-test"
 
 // A consent covers at most 65,536 epochs (about 1,256 years of 7-day epochs).
 const consentEpochCount = 65536
@@ -51,7 +69,8 @@ const byteLimit = 1024 * 1024
 
 const httpTimeout = 30 * time.Second
 
-var clientIdPattern = regexp.MustCompile(`^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`)
+// a lowercase uuid, as client and network ids are written
+var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`)
 var signaturePattern = regexp.MustCompile(`^[0-9a-fA-F]{128}$`)
 
 // Sends one api request: the method, the path below the api origin and an
@@ -64,6 +83,8 @@ type walletTool struct {
 	// the coldkey's 32-byte public key, decoded from coldkeySs58
 	coldkey   [32]byte
 	walletDir string
+	// the network of the root JWT, which a network consent must name
+	networkId string
 	transport apiTransport
 	out       io.Writer
 }
@@ -78,9 +99,22 @@ type consentStatement struct {
 	ExpiresAt    int64    `json:"expires_at"`
 }
 
-// The receipt saved after the server accepts a consent.
+// The fields of a network consent message that this tool checks before the
+// coldkey owner signs it. A network consent names no client.
+type networkConsentStatement struct {
+	Scope        string   `json:"scope"`
+	NetworkId    [16]byte `json:"network_id"`
+	Coldkey      [32]byte `json:"coldkey"`
+	FromEpoch    uint64   `json:"from_epoch"`
+	ThroughEpoch uint64   `json:"through_epoch"`
+	ExpiresAt    int64    `json:"expires_at"`
+}
+
+// The receipt saved after the server accepts a consent. ClientId is empty for
+// a network consent.
 type consentReceipt struct {
-	ClientId          string `json:"client_id"`
+	ClientId          string `json:"client_id,omitempty"`
+	NetworkId         string `json:"network_id,omitempty"`
 	ColdkeySs58       string `json:"coldkey_ss58"`
 	Message           string `json:"message"`
 	Signature         string `json:"signature"`
@@ -106,7 +140,7 @@ func run(args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return errors.New("usage: wallet challenge <client-id> | accept <client-id> <signature-hex> | show | --self-test")
+		return errors.New(usage)
 	}
 	apiUrl := os.Getenv("URNETWORK_API_URL")
 	if apiUrl == "" {
@@ -129,13 +163,50 @@ func run(args []string) error {
 		return err
 	}
 	switch {
+	case (args[0] == "network-challenge" && len(args) == 1) || (args[0] == "network-accept" && len(args) == 2):
+		tool.networkId, err = jwtNetworkId(rootJwt)
+		if err != nil {
+			return err
+		}
+		if args[0] == "network-challenge" {
+			return tool.NetworkChallenge()
+		}
+		return tool.NetworkAccept(args[1])
 	case args[0] == "challenge" && len(args) == 2:
 		return tool.Challenge(args[1])
 	case args[0] == "accept" && len(args) == 3:
 		return tool.Accept(args[1], args[2])
 	default:
-		return errors.New("usage: wallet challenge <client-id> | accept <client-id> <signature-hex> | show | --self-test")
+		return errors.New(usage)
 	}
+}
+
+// The network_id claim of a network JWT. The claims are read only to check
+// the consent message; the server verifies the token. A client JWT (with a
+// client_id claim) cannot request a network consent.
+func jwtNetworkId(jwt string) (string, error) {
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		return "", errors.New("URNETWORK_ROOT_JWT is not a JWT")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return "", errors.New("URNETWORK_ROOT_JWT is not a JWT")
+	}
+	var claims struct {
+		NetworkId string  `json:"network_id"`
+		ClientId  *string `json:"client_id"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", errors.New("URNETWORK_ROOT_JWT is not a JWT")
+	}
+	if claims.ClientId != nil {
+		return "", errors.New("URNETWORK_ROOT_JWT is a client JWT; a network consent needs the network JWT")
+	}
+	if !uuidPattern.MatchString(claims.NetworkId) {
+		return "", errors.New("URNETWORK_ROOT_JWT has no network_id claim")
+	}
+	return claims.NetworkId, nil
 }
 
 // Validates the coldkey and the private consent directory.
@@ -166,21 +237,13 @@ func newWalletTool(coldkeySs58 string, walletDir string, transport apiTransport,
 // Requests a consent message for one provider client and saves its exact
 // bytes for the coldkey owner to sign.
 func (self *walletTool) Challenge(clientId string) error {
-	if !clientIdPattern.MatchString(clientId) {
+	if !uuidPattern.MatchString(clientId) {
 		return errors.New("expected a provider client id (lowercase uuid)")
 	}
-	status, body, err := self.transport(http.MethodGet, "/sn/epoch", nil)
-	if err := apiResult(status, body, err); err != nil {
-		return fmt.Errorf("read the subnet epoch: %w", err)
+	fromEpoch, throughEpoch, err := self.consentEpochs()
+	if err != nil {
+		return err
 	}
-	var epoch struct {
-		Epoch *uint64 `json:"epoch"`
-	}
-	if err := json.Unmarshal(body, &epoch); err != nil || epoch.Epoch == nil {
-		return errors.New("read the subnet epoch: unexpected response")
-	}
-	fromEpoch := *epoch.Epoch + 1
-	throughEpoch := *epoch.Epoch + consentEpochCount
 	request, err := json.Marshal(map[string]any{
 		"client_id":     clientId,
 		"coldkey_ss58":  self.coldkeySs58,
@@ -190,7 +253,7 @@ func (self *walletTool) Challenge(clientId string) error {
 	if err != nil {
 		return err
 	}
-	status, body, err = self.transport(http.MethodPost, "/sn/wallet/consent", request)
+	status, body, err := self.transport(http.MethodPost, "/sn/wallet/consent", request)
 	if err := apiResult(status, body, err); err != nil {
 		return fmt.Errorf("request the consent message: %w", err)
 	}
@@ -226,7 +289,7 @@ func (self *walletTool) Challenge(clientId string) error {
 // Submits the saved consent message with the coldkey owner's signature. A
 // retry with the same signature replays the same consent.
 func (self *walletTool) Accept(clientId string, signature string) error {
-	if !clientIdPattern.MatchString(clientId) {
+	if !uuidPattern.MatchString(clientId) {
 		return errors.New("expected a provider client id (lowercase uuid)")
 	}
 	normalizedSignature, err := normalizeSignature(signature)
@@ -249,9 +312,167 @@ func (self *walletTool) Accept(clientId string, signature string) error {
 	if err != nil {
 		return err
 	}
+	mappingHash, mappingGeneration, err := self.submitConsent(request)
+	if err != nil {
+		return err
+	}
+	receipt, err := json.Marshal(&consentReceipt{
+		ClientId:          clientId,
+		ColdkeySs58:       self.coldkeySs58,
+		Message:           string(message),
+		Signature:         normalizedSignature,
+		MappingHash:       mappingHash,
+		MappingGeneration: mappingGeneration,
+	})
+	if err != nil {
+		return err
+	}
+	if err := writePrivateFile(filepath.Join(self.walletDir, "consent-"+clientId+".accepted.json"), receipt); err != nil {
+		return err
+	}
+	fmt.Fprintf(self.out, "mapped provider client %s to %s (mapping generation %d, hash %s)\n", clientId, self.coldkeySs58, mappingGeneration, mappingHash)
+	return nil
+}
+
+// The next 65,536 epochs from the current epoch.
+func (self *walletTool) consentEpochs() (uint64, uint64, error) {
+	status, body, err := self.transport(http.MethodGet, "/sn/epoch", nil)
+	if err := apiResult(status, body, err); err != nil {
+		return 0, 0, fmt.Errorf("read the subnet epoch: %w", err)
+	}
+	var epoch struct {
+		Epoch *uint64 `json:"epoch"`
+	}
+	if err := json.Unmarshal(body, &epoch); err != nil || epoch.Epoch == nil {
+		return 0, 0, errors.New("read the subnet epoch: unexpected response")
+	}
+	return *epoch.Epoch + 1, *epoch.Epoch + consentEpochCount, nil
+}
+
+// Requests the network consent message, which covers every provider client
+// of the network, and saves its exact bytes for the coldkey owner to sign.
+func (self *walletTool) NetworkChallenge() error {
+	fromEpoch, throughEpoch, err := self.consentEpochs()
+	if err != nil {
+		return err
+	}
+	request, err := json.Marshal(map[string]any{
+		"coldkey_ss58":  self.coldkeySs58,
+		"from_epoch":    fromEpoch,
+		"through_epoch": throughEpoch,
+	})
+	if err != nil {
+		return err
+	}
+	status, body, err := self.transport(http.MethodPost, "/sn/wallet/network-consent", request)
+	if err := apiResult(status, body, err); err != nil {
+		return fmt.Errorf("request the network consent message: %w", err)
+	}
+	var challenge struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &challenge); err != nil || challenge.Message == "" {
+		return errors.New("request the network consent message: unexpected response")
+	}
+	statement, err := self.checkNetworkConsent(challenge.Message)
+	if err != nil {
+		return err
+	}
+	if statement.FromEpoch != fromEpoch || statement.ThroughEpoch != throughEpoch {
+		return errors.New("the network consent message names other epochs than requested")
+	}
+	path := filepath.Join(self.walletDir, networkConsentFile)
+	if err := writePrivateFile(path, []byte(challenge.Message)); err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		self.out,
+		"saved the network consent message for network %s to %s\nsign its exact bytes with coldkey %s before %s, then run: wallet network-accept <signature-hex>\n",
+		self.networkId,
+		path,
+		self.coldkeySs58,
+		time.Unix(statement.ExpiresAt, 0).UTC().Format(time.RFC3339),
+	)
+	return nil
+}
+
+// Submits the saved network consent message with the coldkey owner's
+// signature, without a client id. A retry replays the same consent.
+func (self *walletTool) NetworkAccept(signature string) error {
+	normalizedSignature, err := normalizeSignature(signature)
+	if err != nil {
+		return err
+	}
+	message, err := readPrivateFile(filepath.Join(self.walletDir, networkConsentFile))
+	if err != nil {
+		return fmt.Errorf("read the saved network consent message (run wallet network-challenge first): %w", err)
+	}
+	if _, err := self.checkNetworkConsent(string(message)); err != nil {
+		return err
+	}
+	request, err := json.Marshal(map[string]any{
+		"coldkey_ss58": self.coldkeySs58,
+		"message":      string(message),
+		"signature":    normalizedSignature,
+	})
+	if err != nil {
+		return err
+	}
+	mappingHash, mappingGeneration, err := self.submitConsent(request)
+	if err != nil {
+		return err
+	}
+	receipt, err := json.Marshal(&consentReceipt{
+		NetworkId:         self.networkId,
+		ColdkeySs58:       self.coldkeySs58,
+		Message:           string(message),
+		Signature:         normalizedSignature,
+		MappingHash:       mappingHash,
+		MappingGeneration: mappingGeneration,
+	})
+	if err != nil {
+		return err
+	}
+	if err := writePrivateFile(filepath.Join(self.walletDir, networkConsentReceiptFile), receipt); err != nil {
+		return err
+	}
+	fmt.Fprintf(self.out, "mapped network %s to %s for every provider client without its own consent (mapping generation %d, hash %s)\n", self.networkId, self.coldkeySs58, mappingGeneration, mappingHash)
+	return nil
+}
+
+// Checks that a network consent message names this network and coldkey and
+// no client.
+func (self *walletTool) checkNetworkConsent(message string) (*networkConsentStatement, error) {
+	if !strings.HasPrefix(message, networkConsentPrefix) {
+		return nil, errors.New("the consent message does not start with the network wallet mapping line")
+	}
+	raw := []byte(message[len(networkConsentPrefix):])
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, errors.New("the consent message is not a network wallet mapping statement")
+	}
+	if _, ok := fields["client_id"]; ok {
+		return nil, errors.New("the network consent message names a provider client")
+	}
+	statement := &networkConsentStatement{}
+	if err := json.Unmarshal(raw, statement); err != nil || statement.Scope != networkConsentScope {
+		return nil, errors.New("the consent message is not a network wallet mapping statement")
+	}
+	networkIdBytes, err := hex.DecodeString(strings.ReplaceAll(self.networkId, "-", ""))
+	if err != nil || !bytes.Equal(statement.NetworkId[:], networkIdBytes) {
+		return nil, errors.New("the network consent message names another network")
+	}
+	if statement.Coldkey != self.coldkey {
+		return nil, errors.New("the consent message names another coldkey")
+	}
+	return statement, nil
+}
+
+// Posts a signed consent to POST /sn/wallet. Returns the confirmed mapping.
+func (self *walletTool) submitConsent(request []byte) (string, uint64, error) {
 	status, body, err := self.transport(http.MethodPost, "/sn/wallet", request)
 	if err := apiResult(status, body, err); err != nil {
-		return fmt.Errorf("submit the consent: %w", err)
+		return "", 0, fmt.Errorf("submit the consent: %w", err)
 	}
 	var result struct {
 		Error *struct {
@@ -262,33 +483,18 @@ func (self *walletTool) Accept(clientId string, signature string) error {
 		MappingGeneration uint64 `json:"mapping_generation"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return errors.New("submit the consent: unexpected response")
+		return "", 0, errors.New("submit the consent: unexpected response")
 	}
 	if result.Error != nil {
 		if result.Error.Code != "" {
-			return fmt.Errorf("the server refused the consent (%s): %s", result.Error.Code, oneLine(result.Error.Message))
+			return "", 0, fmt.Errorf("the server refused the consent (%s): %s", result.Error.Code, oneLine(result.Error.Message))
 		}
-		return fmt.Errorf("the server refused the consent: %s", oneLine(result.Error.Message))
+		return "", 0, fmt.Errorf("the server refused the consent: %s", oneLine(result.Error.Message))
 	}
 	if len(result.MappingHash) != 64 || result.MappingGeneration == 0 {
-		return errors.New("submit the consent: the server did not confirm a mapping")
+		return "", 0, errors.New("submit the consent: the server did not confirm a mapping")
 	}
-	receipt, err := json.Marshal(&consentReceipt{
-		ClientId:          clientId,
-		ColdkeySs58:       self.coldkeySs58,
-		Message:           string(message),
-		Signature:         normalizedSignature,
-		MappingHash:       result.MappingHash,
-		MappingGeneration: result.MappingGeneration,
-	})
-	if err != nil {
-		return err
-	}
-	if err := writePrivateFile(filepath.Join(self.walletDir, "consent-"+clientId+".accepted.json"), receipt); err != nil {
-		return err
-	}
-	fmt.Fprintf(self.out, "mapped provider client %s to %s (mapping generation %d, hash %s)\n", clientId, self.coldkeySs58, result.MappingGeneration, result.MappingHash)
-	return nil
+	return result.MappingHash, result.MappingGeneration, nil
 }
 
 // Checks that a consent message names this client and coldkey.
@@ -315,7 +521,8 @@ func (self *walletTool) consentPath(clientId string) string {
 	return filepath.Join(self.walletDir, "consent-"+clientId+".txt")
 }
 
-// Prints the network wallet and every provider client's wallet.
+// Prints the network consent, the network wallet and every provider client's
+// wallet. Consents show the epochs they pay.
 func showWallets(transport apiTransport, out io.Writer) error {
 	status, body, err := transport(http.MethodGet, "/sn/wallet", nil)
 	if err := apiResult(status, body, err); err != nil {
@@ -323,8 +530,11 @@ func showWallets(transport apiTransport, out io.Writer) error {
 	}
 	var result struct {
 		Wallets []struct {
-			ColdkeySs58 string `json:"coldkey_ss58"`
-			ClientId    string `json:"client_id"`
+			ColdkeySs58  string `json:"coldkey_ss58"`
+			ClientId     string `json:"client_id"`
+			ConsentScope string `json:"consent_scope"`
+			FromEpoch    uint64 `json:"from_epoch"`
+			ThroughEpoch uint64 `json:"through_epoch"`
 		} `json:"wallets"`
 		Error *struct {
 			Message string `json:"message"`
@@ -341,9 +551,14 @@ func showWallets(transport apiTransport, out io.Writer) error {
 		return nil
 	}
 	for _, wallet := range result.Wallets {
-		if wallet.ClientId == "" {
+		switch {
+		case wallet.ClientId == "" && wallet.ConsentScope == networkConsentScope:
+			fmt.Fprintf(out, "network consent: %s (epochs %d-%d, every provider client without its own consent)\n", wallet.ColdkeySs58, wallet.FromEpoch, wallet.ThroughEpoch)
+		case wallet.ClientId == "":
 			fmt.Fprintf(out, "network wallet: %s\n", wallet.ColdkeySs58)
-		} else {
+		case wallet.ConsentScope != "":
+			fmt.Fprintf(out, "provider client %s: %s (consent, epochs %d-%d)\n", wallet.ClientId, wallet.ColdkeySs58, wallet.FromEpoch, wallet.ThroughEpoch)
+		default:
 			fmt.Fprintf(out, "provider client %s: %s\n", wallet.ClientId, wallet.ColdkeySs58)
 		}
 	}
