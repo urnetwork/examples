@@ -19,9 +19,10 @@ This console app runs a URnetwork provider inside your application on Windows, m
 
 ## Build and self-test
 
-Use Go 1.26.7 or later. The module pins an SDK release with the provider status, client limit and extender APIs; dependency download may need network access the first time. From `go/provider`:
+Use Go 1.26.7 or later. `go.mod` requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query rather than a pin: `go mod tidy` resolves it to the latest 2026 SDK release and records that version, so run it first (and again to move to a newer release). It needs network access. From `go/provider`:
 
 ```sh
+go mod tidy
 go build -o provider .
 go test ./...
 ./provider --self-test

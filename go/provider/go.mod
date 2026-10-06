@@ -2,7 +2,7 @@ module github.com/urnetwork/examples/go/provider
 
 go 1.26.7
 
-require github.com/urnetwork/sdk/v2026 v2026.9.26-1056505490
+require github.com/urnetwork/sdk/v2026 v2026
 
 require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
