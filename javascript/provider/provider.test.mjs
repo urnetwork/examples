@@ -49,7 +49,8 @@ process.stdin.on("end", () => process.exit(0));
 process.stdin.resume();
 `;
 
-const clientLimitStatusBody = '{"ProvideMode":3,"ProviderConnected":false,"ClientLimitStatus":{"Status":"client_limit_exceeded","RetryTime":1791313500000},"DeviceRpcStarted":false}';
+const clientLimitStatusBody = '{"ProvideMode":3,"ProvideEnabled":true,"ProvidePaused":false,"ProviderConnected":false,"ClientLimitStatus":{"Status":"client_limit_exceeded","RetryTime":1791313500000},"ProviderPacketStats":null,"ClientsServed":0,"ClientsServedAtLimit":false,"DeviceRpcStarted":false}';
+const providingStatusBody = '{"ProvideMode":3,"ProvideEnabled":true,"ProvidePaused":false,"ProviderConnected":true,"ClientLimitStatus":{"Status":"","RetryTime":0},"ProviderPacketStats":{"RemoteEgressByteCount":13002335,"RemoteIngressByteCount":7},"ClientsServed":3,"ClientsServedAtLimit":false,"DeviceRpcStarted":true}';
 
 // A private state directory with a synthetic client.jwt, and the stand-in
 // companion beside it; remove deletes both.
@@ -135,9 +136,12 @@ test("the companion stops when its standard input closes", {skip: process.platfo
   }
 });
 
-test("a credential problem reported by the companion exits the run with 78", {skip: process.platform === "win32"}, async () => {
+// Runs the program against the stand-in companion serving companionStatus, which
+// exits with exitCode after its second status read, and a local stand-in for
+// GET /sn/wallet, so the run never reaches the network. Resolves with the exit
+// code, the output lines and the wallet requests' authorization headers.
+async function runWithFakeCompanion(companionStatus, exitCode) {
   const installation = await fakeInstallation();
-  // a local stand-in for GET /sn/wallet, so the run never reaches the network
   const walletAuthorizations = [];
   const walletServer = createServer((request, response) => {
     walletAuthorizations.push(request.headers.authorization);
@@ -152,20 +156,34 @@ test("a credential problem reported by the companion exits the run with 78", {sk
       ...process.env,
       URNETWORK_PROVIDER_STATE_DIR: installation.stateDir,
       URNETWORK_COMPANION_PATH: installation.companionPath,
-      FAKE_PROVIDER_STATUS: clientLimitStatusBody,
-      FAKE_EXIT_CODE: "78",
+      FAKE_PROVIDER_STATUS: companionStatus,
+      FAKE_EXIT_CODE: String(exitCode),
     };
     const apiUrl = `http://127.0.0.1:${walletServer.address().port}`;
-    assert.equal(await run([], {environment, log, error: log, apiUrl}), 78);
-    const output = lines.join("\n");
-    assert.match(output, /^Consent disclaimer: /);
-    assert.match(output, /^provider client 11111111-1111-1111-1111-111111111111, instance [0-9a-f-]{36}$/m);
-    assert.match(output, /^status: client limit, retry at 19:05 UTC \| clients served: 0 \| data provided: 0 B \| payout wallet: /m);
-    assert.match(output, /the native companion exited \(78\)/);
-    assert.match(output, /^status: stopped$/m);
-    assert.deepEqual(walletAuthorizations, [`Bearer ${selfTestJwt('{"client_id":"11111111-1111-1111-1111-111111111111"}')}`]);
+    const code = await run([], {environment, log, error: log, apiUrl});
+    return {code, output: lines.join("\n"), walletAuthorizations};
   } finally {
     await new Promise(resolve => walletServer.close(resolve));
     await installation.remove();
   }
+}
+
+test("a credential problem reported by the companion exits the run with 78", {skip: process.platform === "win32"}, async () => {
+  const {code, output, walletAuthorizations} = await runWithFakeCompanion(clientLimitStatusBody, 78);
+  assert.equal(code, 78);
+  assert.match(output, /^Consent disclaimer: /);
+  assert.match(output, /^provider client 11111111-1111-1111-1111-111111111111, instance [0-9a-f-]{36}$/m);
+  assert.match(output, /^status: client limit, retry at 19:05 UTC \| clients served: 0 \| data provided: 0 B \| payout wallet: /m);
+  assert.match(output, /the native companion exited \(78\)/);
+  assert.match(output, /^status: stopped$/m);
+  assert.deepEqual(walletAuthorizations, [`Bearer ${selfTestJwt('{"client_id":"11111111-1111-1111-1111-111111111111"}')}`]);
+});
+
+test("the status line shows the companion's clients served and data provided", {skip: process.platform === "win32"}, async () => {
+  const {code, output} = await runWithFakeCompanion(providingStatusBody, 1);
+  // a companion that fails exits the run with 1
+  assert.equal(code, 1);
+  assert.match(output, /^status: providing \| clients served: 3 \| data provided: 12\.4 MiB \| payout wallet: /m);
+  assert.match(output, /the native companion exited \(1\)/);
+  assert.match(output, /^status: stopped$/m);
 });

@@ -5,7 +5,7 @@
 // installation; the payout wallet is mapped by the backend and is only
 // displayed here. The JavaScript SDK cannot provide by itself, so the native
 // companion (../integration/companion, provider mode) owns the provider device
-// as this program's child process (session.mjs).
+// as this program's child process and serves the status (session.mjs).
 //
 // Usage: node main.mjs [run] | --self-test | --version. All installation state
 // is in the private directory named by URNETWORK_PROVIDER_STATE_DIR
@@ -22,14 +22,9 @@ import {ProviderSession, defaultApiUrl, exitConfig, exitFailure, exitStopped} fr
 import {ConfigurationError, loadProviderConfig} from "./state.mjs";
 import {consentDisclaimer} from "./status.mjs";
 
-// Writes one line to stdout, which carries this program's own lines only.
-function writeLine(line) {
-  process.stdout.write(`${line}\n`);
-}
-
 // Runs one command and returns the exit code. The options replace the process
 // environment and console, and the API origin of the wallet read, for tests.
-export async function run(args, {environment = process.env, log = writeLine, error = console.error, apiUrl = defaultApiUrl} = {}) {
+export async function run(args, {environment = process.env, log = console.log, error = console.error, apiUrl = defaultApiUrl} = {}) {
   if (args.length === 1 && args[0] === "--self-test") {
     try {
       await runSelfTest();
@@ -75,11 +70,6 @@ export async function run(args, {environment = process.env, log = writeLine, err
   const stop = () => controller.abort();
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
-  // the WASM SDK prints its log lines with console.log: keep stdout for the
-  // status lines and send the SDK's lines to stderr, where the other bindings
-  // copy theirs
-  const consoleLog = console.log;
-  console.log = console.error;
   const session = new ProviderSession(config, {companionPath: path, apiUrl, log, error});
   try {
     await session.start(environment);
@@ -90,7 +80,6 @@ export async function run(args, {environment = process.env, log = writeLine, err
     return exitFailure;
   } finally {
     await session.close();
-    console.log = consoleLog;
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
   }

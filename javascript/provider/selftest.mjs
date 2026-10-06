@@ -1,9 +1,10 @@
 // The credential-free self-test (PROVIDER_CONTRACT.md, "Self-test"). It checks
 // the disclaimer, the status text, the providing state, the payout wallet, the
-// clients-served count, the companion's status and exit codes, and the
-// installation state files without a network, credentials, the native
-// companion or the SDK runtime. `--self-test` runs every check;
-// provider.test.mjs runs each one as a test.
+// companion's status route (with the clients served it counts) and exit
+// codes, and the installation state files without a network, credentials or
+// the native companion. The companion's Go tests check the contract's peer
+// and clients-served vectors, since the companion counts the clients.
+// `--self-test` runs every check; provider.test.mjs runs each one as a test.
 
 import {createHash} from "node:crypto";
 import {chmod, lstat, mkdtemp, rm, stat, symlink} from "node:fs/promises";
@@ -23,11 +24,10 @@ import {
   writePrivateFile,
 } from "./state.mjs";
 import {
-  ClientsServed,
   clientLimitStatusExceeded,
   clientsServedLimit,
   consentDisclaimer,
-  contractRowPeerKeys,
+  dataProvidedByteCount,
   formatByteCount,
   parseCompanionStatus,
   payoutWalletChecking,
@@ -45,6 +45,7 @@ import {
   providerStateProviding,
   providerStateStarting,
   providerStateStopped,
+  providerStatus,
   providerStatusText,
   snWalletConsentScopeHotkey,
   statusKey,
@@ -60,8 +61,6 @@ const walletA = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
 
 const provider = "11111111-1111-1111-1111-111111111111";
 const clientA = "22222222-2222-2222-2222-222222222222";
-const clientB = "33333333-3333-3333-3333-333333333333";
-const zeroId = "00000000-0000-0000-0000-000000000000";
 
 // the SDK's ProvideModeNone and ProvideModeNetwork
 const provideModeNone = 0;
@@ -264,65 +263,81 @@ export function checkPayoutWallet() {
   }
 }
 
-// Provider contract rows count once per client, up to the limit. The rows are
-// the ones the SDK's provider contract details view controller makes for the
-// contract's peer vectors.
-export function checkClientsServed() {
-  const row = (clientId, sendContractIds, receiveContractIds) => ({
-    clientId,
-    sendContracts: sendContractIds.map(contractId => ({contractId, usedByteCount: 0, totalByteCount: 0, bitRate: 0, hasStream: clientId === zeroId})),
-    receiveContracts: receiveContractIds.map(contractId => ({contractId, usedByteCount: 0, totalByteCount: 0, bitRate: 0, hasStream: clientId === zeroId})),
-    sendByteCount: 0,
-    receiveByteCount: 0,
-    lastActivityMillis: 0,
-    closing: false,
+// The companion's /provider-status body, with every device value of the
+// status and the clients served it counts, as the companion serves it.
+function companionStatusBody(fields) {
+  return JSON.stringify({
+    ProvideMode: provideModePublic,
+    ProvideEnabled: true,
+    ProvidePaused: false,
+    ProviderConnected: true,
+    ClientLimitStatus: {Status: "", RetryTime: 0},
+    ProviderPacketStats: null,
+    ClientsServed: 0,
+    ClientsServedAtLimit: false,
+    DeviceRpcStarted: true,
+    ...fields,
   });
-  const keyCases = [
-    // receive: SourceId 2222, DestinationId 1111
-    [row(clientA, [], ["55555555-5555-5555-5555-555555555555"]), [clientA]],
-    // send: SourceId 1111, DestinationId 2222
-    [row(clientA, ["66666666-6666-6666-6666-666666666666"], []), [clientA]],
-    // receive: SourceId 0000, StreamId 4444; the rows carry no stream id, so
-    // the contract id is the key
-    [row(zeroId, [], ["77777777-7777-7777-7777-777777777777"]), ["contract:77777777-7777-7777-7777-777777777777"]],
-    // no path: the sdk keys the row by the contract id
-    [row("88888888-8888-8888-8888-888888888888", [], ["88888888-8888-8888-8888-888888888888"]), ["contract:88888888-8888-8888-8888-888888888888"]],
-    // upper case ids are the same peer
-    [row(clientA.toUpperCase(), [], ["99999999-9999-9999-9999-999999999999"]), [clientA]],
-  ];
-  for (const [contractRow, peerKeys] of keyCases) {
-    const keys = contractRowPeerKeys(contractRow);
-    check(JSON.stringify(keys) === JSON.stringify(peerKeys), `contract row peer keys ${JSON.stringify(keys)}, want ${JSON.stringify(peerKeys)}`);
-  }
-
-  // both directions of one client count once
-  const served = new ClientsServed(2);
-  served.addRows([row(clientA, ["66666666-6666-6666-6666-666666666666"], ["55555555-5555-5555-5555-555555555555"])]);
-  served.addRows([row(clientA, [], ["99999999-9999-9999-9999-999999999999"])]);
-  let {count, atLimit} = served.count();
-  check(count === 1 && !atLimit, `one client counted as ${count} (at limit ${atLimit})`);
-  served.addRows([row(clientB, [], ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"])]);
-  ({count, atLimit} = served.count());
-  check(count === 2 && !atLimit, `two clients counted as ${count} (at limit ${atLimit})`);
-  // a third distinct peer reaches the limit of 2
-  served.addRows([row(zeroId, [], ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"])]);
-  ({count, atLimit} = served.count());
-  check(count === 2 && atLimit, `limited count ${count} (at limit ${atLimit})`);
 }
 
-// The companion's status route is read strictly, and the companion's exit
-// maps to this program's exit code.
-export function checkCompanion() {
-  const companionStatus = parseCompanionStatus('{"ProvideMode":3,"ProviderConnected":false,"ClientLimitStatus":{"Status":"client_limit_exceeded","RetryTime":1791313500000},"DeviceRpcStarted":false}');
-  check(companionStatus.provideMode === provideModePublic && !companionStatus.providerConnected &&
-    companionStatus.clientLimitStatus === clientLimitStatusExceeded && companionStatus.clientLimitRetryTime === 1791313500000 &&
-    !companionStatus.deviceRpcStarted, `companion status ${JSON.stringify(companionStatus)}`);
+// The companion's status route is read strictly and maps to the status line:
+// the state rules over its device values, its clients served and the data
+// provided from its provider packet stats.
+export function checkCompanionStatus() {
+  const clientLimit = parseCompanionStatus(companionStatusBody({
+    ProvideEnabled: false,
+    ProviderConnected: false,
+    ClientLimitStatus: {Status: "client_limit_exceeded", RetryTime: 1791313500000},
+    DeviceRpcStarted: false,
+  }));
+  check(clientLimit.provideMode === provideModePublic && !clientLimit.provideEnabled && !clientLimit.providePaused &&
+    !clientLimit.providerConnected && clientLimit.clientLimitStatus === clientLimitStatusExceeded &&
+    clientLimit.clientLimitRetryTime === 1791313500000 && clientLimit.providerPacketStats === null &&
+    clientLimit.clientsServed === 0 && !clientLimit.clientsServedAtLimit && !clientLimit.deviceRpcStarted,
+  `companion status ${JSON.stringify(clientLimit)}`);
+
+  const cases = [
+    // before the companion answers
+    [null, "status: starting | clients served: 0 | data provided: 0 B | payout wallet: checking"],
+    [clientLimit, "status: client limit, retry at 19:05 UTC | clients served: 0 | data provided: 0 B | payout wallet: checking"],
+    [
+      parseCompanionStatus(companionStatusBody({
+        ProviderPacketStats: {RemoteEgressByteCount: 13002335, RemoteIngressByteCount: 7},
+        ClientsServed: 3,
+      })),
+      "status: providing | clients served: 3 | data provided: 12.4 MiB | payout wallet: checking",
+    ],
+    [
+      parseCompanionStatus(companionStatusBody({ProvidePaused: true, ClientsServed: clientsServedLimit, ClientsServedAtLimit: true, ProviderPacketStats: {RemoteEgressByteCount: 1024, RemoteIngressByteCount: 512}})),
+      "status: paused | clients served: 100000+ | data provided: 1.5 KiB | payout wallet: checking",
+    ],
+    // a provider that is enabled but not connected yet
+    [parseCompanionStatus(companionStatusBody({ProviderConnected: false})), "status: starting | clients served: 0 | data provided: 0 B | payout wallet: checking"],
+    [parseCompanionStatus(companionStatusBody({ProvideMode: provideModeNone, ProvideEnabled: false})), "status: stopped | clients served: 0 | data provided: 0 B | payout wallet: checking"],
+  ];
+  for (const [companionStatus, line] of cases) {
+    const statusTextLine = statusLine(providerStatus(companionStatus, payoutWalletChecking, ""));
+    check(statusTextLine === line, `status line "${statusTextLine}" for ${JSON.stringify(companionStatus)}, want "${line}"`);
+  }
+
+  // data provided is both remote directions; no stats is 0
+  check(dataProvidedByteCount({RemoteEgressByteCount: 5, RemoteIngressByteCount: 7}) === 12, "data provided is not egress plus ingress");
+  check(dataProvidedByteCount(null) === 0, "data provided without stats is not 0");
+
   const invalidBodies = [
     "",
     "{}",
-    '{"ProvideMode":3,"ProviderConnected":false,"DeviceRpcStarted":false}',
-    '{"ProvideMode":"3","ProviderConnected":false,"ClientLimitStatus":{"Status":"","RetryTime":0},"DeviceRpcStarted":false}',
-    '{"ProvideMode":3,"ProviderConnected":false,"ClientLimitStatus":{"Status":"","RetryTime":0.5},"DeviceRpcStarted":false}',
+    '{"ProvideMode":3,"ProviderConnected":false,"ClientLimitStatus":{"Status":"","RetryTime":0},"DeviceRpcStarted":false}',
+    companionStatusBody({ProvideMode: "3"}),
+    companionStatusBody({ProvideEnabled: undefined}),
+    companionStatusBody({ProvidePaused: "false"}),
+    companionStatusBody({ClientLimitStatus: {Status: "", RetryTime: 0.5}}),
+    companionStatusBody({ProviderPacketStats: {RemoteEgressByteCount: 5}}),
+    companionStatusBody({ProviderPacketStats: {RemoteEgressByteCount: -1, RemoteIngressByteCount: 7}}),
+    companionStatusBody({ClientsServed: -1}),
+    companionStatusBody({ClientsServed: 1.5}),
+    companionStatusBody({ClientsServedAtLimit: undefined}),
+    companionStatusBody({DeviceRpcStarted: undefined}),
   ];
   for (const body of invalidBodies) {
     let refused = false;
@@ -333,7 +348,11 @@ export function checkCompanion() {
     }
     check(refused, `companion status ${JSON.stringify(body)} accepted`);
   }
+}
 
+// The companion's exit maps to this program's exit code, and its environment
+// selects provider mode with this launch's settings.
+export function checkCompanion() {
   const exitCases = [
     [{code: 0, signal: null, error: null}, exitStopped],
     [{code: 78, signal: null, error: null}, exitConfig],
@@ -472,7 +491,7 @@ export const selfTestChecks = [
   checkStatusKey,
   checkProviderState,
   checkPayoutWallet,
-  checkClientsServed,
+  checkCompanionStatus,
   checkCompanion,
   checkClientJwtClaims,
   checkStateFiles,

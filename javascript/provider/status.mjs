@@ -2,7 +2,9 @@
 // rules of PROVIDER_CONTRACT.md ("Status"): providing state, clients served,
 // data provided and the payout wallet, read only. These functions mirror the
 // Go provider's status.go and are pure, so the self-test checks them without a
-// network, credentials, the native companion or the SDK.
+// network, credentials or the native companion. The companion counts the
+// clients served with the contract's peer rules and serves every device value
+// on its /provider-status route.
 
 // Shown once at start, and in every example's README. The app that integrates
 // a provider owns the consent screen; this example starts without asking.
@@ -39,11 +41,10 @@ export const clientLimitStatusExceeded = "client_limit_exceeded";
 // labels the entry.
 export const snWalletConsentScopeHotkey = "hotkey";
 
-// Distinct clients are counted up to this many; beyond it the count is a lower
-// bound, shown with a trailing "+".
+// The companion counts distinct clients up to this many; beyond it the count is
+// a lower bound, shown with a trailing "+".
 export const clientsServedLimit = 100 * 1000;
 
-const zeroId = "00000000-0000-0000-0000-000000000000";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // The lowercase form of a UUID, or "" for anything else.
@@ -150,63 +151,14 @@ export function payoutWalletFromResult(result, clientId) {
   };
 }
 
-// The peers of one row of the SDK's provider contract details view
-// controller. The SDK groups a row by the contract's peer as the contract
-// resolves it: the source of a receive (ingress) contract and the destination
-// of a send (egress) contract, so both directions of one client share a row.
-// A path without a peer gives the all-zero id, or, without a path, the
-// contract id as the row's id. The JavaScript SDK does not expose the transfer
-// path's stream id, so such a row counts each of its contracts as
-// "contract:<id>", the contract's last fallback, instead of "stream:<id>".
-export function contractRowPeerKeys(row) {
-  const contractIds = [...(row?.sendContracts ?? []), ...(row?.receiveContracts ?? [])]
-    .map(entry => normalizeId(entry?.contractId))
-    .filter(contractId => contractId !== "");
-  const clientId = normalizeId(row?.clientId);
-  if (clientId !== "" && clientId !== zeroId && !contractIds.includes(clientId)) {
-    return [clientId];
+// Data provided: the bytes relayed for clients in both directions since the
+// device started, RemoteEgressByteCount + RemoteIngressByteCount of the
+// provider packet stats; 0 when the stats are null.
+export function dataProvidedByteCount(providerPacketStats) {
+  if (providerPacketStats === null || providerPacketStats === undefined) {
+    return 0;
   }
-  return contractIds.map(contractId => "contract:" + contractId);
-}
-
-// The distinct clients that held a contract with this provider since the app
-// started. The count stops at the limit and is then a lower bound.
-export class ClientsServed {
-  #limit;
-  // set of contractRowPeerKeys values
-  #peerKeys = new Set();
-  #atLimit = false;
-
-  // An empty count that keeps at most limit distinct peers.
-  constructor(limit = clientsServedLimit) {
-    this.#limit = limit;
-  }
-
-  // Counts the peers of the current provider contract rows.
-  addRows(rows) {
-    for (const row of rows ?? []) {
-      for (const peerKey of contractRowPeerKeys(row)) {
-        this.add(peerKey);
-      }
-    }
-  }
-
-  // Counts one peer.
-  add(peerKey) {
-    if (!peerKey || this.#peerKeys.has(peerKey)) {
-      return;
-    }
-    if (this.#limit <= this.#peerKeys.size) {
-      this.#atLimit = true;
-      return;
-    }
-    this.#peerKeys.add(peerKey);
-  }
-
-  // The distinct count, and whether the count stopped at the limit.
-  count() {
-    return {count: this.#peerKeys.size, atLimit: this.#atLimit};
-  }
+  return providerPacketStats.RemoteEgressByteCount + providerPacketStats.RemoteIngressByteCount;
 }
 
 // The status line, for example
@@ -235,21 +187,57 @@ export function statusKey(status) {
 }
 
 // The companion's /provider-status body (javascript/integration/companion,
-// provider mode), checked: the provide mode, the provider's platform
-// connection, the client limit status and whether the device rpc is served.
+// provider mode), checked: every device value of the status, with the SDK's Go
+// field names, the clients served that the companion counts, and whether its
+// device rpc is served.
 export function parseCompanionStatus(text) {
   const body = JSON.parse(text);
   const clientLimitStatus = body?.ClientLimitStatus;
-  if (!Number.isInteger(body?.ProvideMode) || typeof body.ProviderConnected !== "boolean" ||
-      typeof body.DeviceRpcStarted !== "boolean" || typeof clientLimitStatus?.Status !== "string" ||
-      !Number.isSafeInteger(clientLimitStatus.RetryTime)) {
+  const providerPacketStats = body?.ProviderPacketStats;
+  const byteCount = value => Number.isSafeInteger(value) && 0 <= value;
+  const validPacketStats = providerPacketStats === null || (typeof providerPacketStats === "object" &&
+    byteCount(providerPacketStats.RemoteEgressByteCount) && byteCount(providerPacketStats.RemoteIngressByteCount));
+  if (!Number.isInteger(body?.ProvideMode) || typeof body.ProvideEnabled !== "boolean" || typeof body.ProvidePaused !== "boolean" ||
+      typeof body.ProviderConnected !== "boolean" || typeof clientLimitStatus?.Status !== "string" ||
+      !Number.isSafeInteger(clientLimitStatus.RetryTime) || !validPacketStats || !byteCount(body.ClientsServed) ||
+      typeof body.ClientsServedAtLimit !== "boolean" || typeof body.DeviceRpcStarted !== "boolean") {
     throw new Error("the companion answered an unexpected provider status");
   }
   return {
     provideMode: body.ProvideMode,
+    provideEnabled: body.ProvideEnabled,
+    providePaused: body.ProvidePaused,
     providerConnected: body.ProviderConnected,
     clientLimitStatus: clientLimitStatus.Status,
     clientLimitRetryTime: clientLimitStatus.RetryTime,
+    providerPacketStats,
+    clientsServed: body.ClientsServed,
+    clientsServedAtLimit: body.ClientsServedAtLimit,
     deviceRpcStarted: body.DeviceRpcStarted,
+  };
+}
+
+// The status from the companion's last /provider-status read (null before the
+// first one, which shows "starting") and the payout wallet read.
+export function providerStatus(companionStatus, payoutWallet, payoutWalletScope) {
+  if (companionStatus === null) {
+    return {
+      state: providerStateStarting,
+      clientLimitRetryTime: 0,
+      clientsServed: 0,
+      clientsServedAtLimit: false,
+      dataProvidedByteCount: 0,
+      payoutWallet,
+      payoutWalletScope,
+    };
+  }
+  return {
+    state: providerState(companionStatus),
+    clientLimitRetryTime: companionStatus.clientLimitRetryTime,
+    clientsServed: companionStatus.clientsServed,
+    clientsServedAtLimit: companionStatus.clientsServedAtLimit,
+    dataProvidedByteCount: dataProvidedByteCount(companionStatus.providerPacketStats),
+    payoutWallet,
+    payoutWalletScope,
   };
 }

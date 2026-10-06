@@ -5,8 +5,8 @@
 // installation; the payout wallet is mapped by the backend and is only
 // displayed here. The JavaScript SDK cannot provide by itself, so the native
 // companion (javascript/integration/companion, provider mode) owns the
-// provider device as this program's child process (session.ts). Node runs
-// this file directly with type stripping.
+// provider device as this program's child process and serves the status
+// (session.ts). Node runs this file directly with type stripping.
 //
 // Usage: node main.ts [run] | --self-test | --version. All installation state
 // is in the private directory named by URNETWORK_PROVIDER_STATE_DIR
@@ -37,15 +37,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-// Writes one line to stdout, which carries this program's own lines only.
-function writeLine(line: string): void {
-  process.stdout.write(`${line}\n`);
-}
-
 // Runs one command and returns the exit code.
 export async function run(args: string[], options: RunOptions = {}): Promise<number> {
   const environment = options.environment ?? process.env;
-  const log = options.log ?? writeLine;
+  const log = options.log ?? ((line: string) => console.log(line));
   const error = options.error ?? ((line: string) => console.error(line));
   if (args.length === 1 && args[0] === "--self-test") {
     try {
@@ -92,11 +87,6 @@ export async function run(args: string[], options: RunOptions = {}): Promise<num
   const stop = () => controller.abort();
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
-  // the WASM SDK prints its log lines with console.log: keep stdout for the
-  // status lines and send the SDK's lines to stderr, where the other bindings
-  // copy theirs
-  const consoleLog = console.log;
-  console.log = console.error;
   const session = new ProviderSession(config, {companionPath: path, apiUrl: options.apiUrl ?? defaultApiUrl, log, error});
   try {
     await session.start(environment);
@@ -107,7 +97,6 @@ export async function run(args: string[], options: RunOptions = {}): Promise<num
     return exitFailure;
   } finally {
     await session.close();
-    console.log = consoleLog;
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
   }

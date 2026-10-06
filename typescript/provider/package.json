@@ -12,9 +12,6 @@
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   },
-  "dependencies": {
-    "@urnetwork/sdk": "file:../../../sdk/js"
-  },
   "engines": {
     "node": ">=24"
   }

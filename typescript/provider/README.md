@@ -2,7 +2,7 @@
 
 [Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](README.md)
 
-This typed Node 24 console app runs a URnetwork provider inside your application on Windows, macOS and Linux. It provides publicly as a provider client of your network and shows the provider status: providing state, clients served, data provided and the payout wallet, read only. The JavaScript SDK cannot provide by itself, so the app starts the [native companion](../../javascript/integration/companion/README.md#provider-mode) in provider mode as its child process: the companion owns the provider device and the installation state, and the app reads the status through the SDK's device RPC and the companion's status route. It follows the [provider contract](../../PROVIDER_CONTRACT.md), mirrors the [Go provider](../../go/provider/README.md), and behaves like the [JavaScript provider](../../javascript/provider/README.md). Node 24 runs the `.ts` files directly with type stripping.
+This typed Node 24 console app runs a URnetwork provider inside your application on Windows, macOS and Linux. It provides publicly as a provider client of your network and shows the provider status: providing state, clients served, data provided and the payout wallet, read only. The JavaScript SDK cannot provide by itself, so the app starts the [native companion](../../javascript/integration/companion/README.md#provider-mode) in provider mode as its child process: the companion owns the provider device and the installation state, reads the status with the full SDK, and serves it to the app on its status route. It follows the [provider contract](../../PROVIDER_CONTRACT.md), mirrors the [Go provider](../../go/provider/README.md), and behaves like the [JavaScript provider](../../javascript/provider/README.md). Node 24 runs the `.ts` files directly with type stripping.
 
 **Consent disclaimer:** an app that integrates a URnetwork provider must collect the user's consent before it provides. Providing shares the user's internet connection: other URnetwork users' traffic exits through the user's device and IP address. This example starts providing without asking, because the consent screen belongs to your app.
 
@@ -11,24 +11,20 @@ This typed Node 24 console app runs a URnetwork provider inside your application
 | File | Purpose |
 | --- | --- |
 | [main.ts](main.ts) | Commands and exit codes. |
-| [session.ts](session.ts) | Provider lifecycle: the companion child process, the SDK's `DeviceRemote` and contract view controllers, the payout wallet read, status lines, stop. |
+| [session.ts](session.ts) | Provider lifecycle: the companion child process, its status route, the payout wallet read, status lines, stop. |
 | [companion.ts](companion.ts) | Starting, reading and stopping the native companion in provider mode. |
 | [status.ts](status.ts) | Status fields, status line text and the clients-served count. |
 | [state.ts](state.ts) | The private installation state directory. |
 | [selftest.ts](selftest.ts), [provider.test.ts](provider.test.ts) | Credential-free self-test; `npm test` runs it and also tests the exit codes and the companion child process against a stand-in companion. |
-| [package.json](package.json), [tsconfig.json](tsconfig.json) | Scripts, the SDK dependency and the type-check settings. |
-| [../integration/companion.mjs](../integration/companion.mjs) | The shared loopback transport of the SDK's device RPC, with its [declarations](../integration/companion.d.mts). |
+| [package.json](package.json), [tsconfig.json](tsconfig.json) | Scripts, the type-check packages and settings; the app has no runtime package dependencies. |
 | [javascript/integration/companion/](../../javascript/integration/companion/README.md#provider-mode) | The native companion (Go) that owns the provider device. |
 
 ## Build and self-test
 
-Use Node 24 or later, Go 1.26.7 or later, npm and make. The app needs two builds from the [sibling checkouts](../../javascript/integration/companion/README.md#build-from-sibling-checkouts) (`examples`, `sdk`, `connect`, `glog`, `goidenticons`, `gvisor`): the SDK's JavaScript package, which this package links as `file:../../../sdk/js`, and the native companion. The companion's `go.mod` requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query: `go mod tidy` resolves it to the latest 2026 SDK release, which needs network access. Providing needs the first SDK release after sdk `c638dfa8` (provider intent, client limit status, extender settings). From `workspace/` on macOS or Linux:
+Use Node 24 or later and Go 1.26.7 or later. The app needs the native companion built, and `npm ci` installs only the type-check packages (TypeScript and the Node types). The companion's `go.mod` requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query: `go mod tidy` resolves it to the latest 2026 SDK release, which needs network access. Providing needs the first SDK release after sdk `c638dfa8` (provider intent, client limit status, extender settings). From `examples` on macOS or Linux:
 
 ```sh
-npm --prefix sdk/js ci
-make -C sdk/js build_wasm
-npm --prefix sdk/js run build
-cd examples/javascript/integration/companion
+cd javascript/integration/companion
 go mod tidy
 go test .
 go build -o bin/ur-companion .
@@ -40,7 +36,7 @@ npm test
 node main.ts --version
 ```
 
-On Windows the `sdk/js` build uses make and a POSIX shell: run its three commands in Git Bash or WSL. Then, in PowerShell from `examples`:
+On Windows, in PowerShell from `examples`:
 
 ```powershell
 cd javascript\integration\companion
@@ -57,7 +53,7 @@ node main.ts --version
 
 `npm run build` type-checks with `tsc` and writes no files; there is no compiled entry point. The app runs the companion from `javascript/integration/companion/bin/ur-companion` (`ur-companion.exe` on Windows); set `URNETWORK_COMPANION_PATH` to its absolute path to use another location. The companion is pure Go, so any host builds every desktop target, for example `GOOS=windows GOARCH=amd64 go build -o bin/ur-companion.exe .`.
 
-`node main.ts --self-test` needs no credentials, no network, no companion and no installed packages. It checks the disclaimer text, the status line format and the client limit status text, the providing state rules and their order, the payout wallet labels and the wallet read, the clients-served count, the companion's status route and exit codes, and the state-file handling (private permissions, atomic replacement, instance ID and identity checks). `npm test` type-checks, runs the same checks and tests the exit codes and the companion child process with a stand-in companion script (macOS and Linux). `--version` prints the companion's version line, which names the SDK it was built with.
+`node main.ts --self-test` needs no credentials, no network, no companion and no installed packages. It checks the disclaimer text, the status line format and the client limit status text, the providing state rules and their order, the payout wallet labels and the wallet read, the companion's status route (with the clients served and the data provided it reports) and exit codes, and the state-file handling (private permissions, atomic replacement, instance ID and identity checks). The companion counts the clients served, so its Go tests check the contract's peer and clients-served vectors. `npm test` type-checks, runs the same checks and tests the exit codes and the companion child process with a stand-in companion script (macOS and Linux). `--version` prints the companion's version line, which names the SDK it was built with.
 
 ## Backend: provision and map the payout wallet
 
@@ -142,13 +138,13 @@ status: providing | clients served: 3 | data provided: 12.4 MiB | payout wallet:
 
 `client limit` means the platform disconnected this client because your network reached its plan's concurrent client limit and this installation has not qualified as a provider. The SDK retries by itself after about 15 to 20 minutes, at the time the status shows. A provider install that qualifies as a provider (providing publicly, passing its egress probe and reliable) is exempt from the limit and does not get this status.
 
-How the app reads each field: the companion's `/provider-status` gives the provide mode, the provider's platform connection and the client limit status, which the JavaScript SDK does not bind; the SDK's `getProvidePaused()` and `getProvideEnabled()` come over the device RPC, which the companion serves once the provider has connected; data provided is the contract view controller's `getProviderPacketStats()`; clients served counts the provider contract details view controller's rows; the wallet is `GET /sn/wallet` with the scoped JWT.
+How the app reads each field: the companion's [`/provider-status`](../../javascript/integration/companion/README.md#provider-mode) serves the provide mode, enabled and paused state, the provider's platform connection, the client limit status, the provider packet stats (data provided) and the clients served, which the companion counts from the provider contract listeners with the contract's peer rules. The app applies the contract's status rules to them; the wallet is `GET /sn/wallet` with the scoped JWT. The app does not load the JavaScript SDK: the SDK binds neither the provider connection nor the client limit status, and its remotes run in browser state only mode, which gets no provider packet stats or contract details over the companion's device RPC.
 
-SDK errors appear on stderr: the companion's, and the JavaScript SDK's log lines, which the app moves from stdout to stderr. The companion's full SDK log is in `logs/` in the state directory.
+SDK errors appear on stderr from the companion; its full SDK log is in `logs/` in the state directory.
 
 While providing, the companion also runs the provider extender role, on by default: it listens on TCP 443 and UDP 443, 53 and 4053 so that clients that cannot reach the platform directly can connect through this provider, and it prints those listeners on stderr. Windows and macOS may ask to allow incoming connections for `ur-companion` the first time; on Linux, without the privilege to bind these ports, providing continues without the role. The companion creates its device with `NewDeviceLocalWithProvideExtender` and both extender settings on; passing `false` for `defaultProvideExtender` there turns the default off (see the [contract](../../PROVIDER_CONTRACT.md#app-lifecycle)).
 
-Ctrl-C stops providing and exits with code 0: the app closes the SDK objects and the companion's standard input, and the companion sets the provide mode to none and exits. If the app itself dies, the companion's input closes and it stops too. Exit code 78 means a configuration or credential problem that a restart does not fix, such as a missing `client.jwt`, a companion that is not built, or a credential the server rejected; issue a new scoped JWT from your backend. Exit code 1 is any other failure.
+Ctrl-C stops providing and exits with code 0: the app closes the companion's standard input, and the companion sets the provide mode to none, closes the device and exits. If the app itself dies, the companion's input closes and it stops too. Exit code 78 means a configuration or credential problem that a restart does not fix, such as a missing `client.jwt`, a companion that is not built, or a credential the server rejected; issue a new scoped JWT from your backend. Exit code 1 is any other failure.
 
 ## Run in the background
 

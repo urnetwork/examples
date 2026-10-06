@@ -1,28 +1,22 @@
 // A running provider: the native companion child process that owns the
-// provider device, the SDK's DeviceRemote over the companion's device rpc with
-// the provider's contract view controllers, and the payout wallet read. The
-// status combines the companion's /provider-status (the provide mode, the
-// provider's platform connection and the client limit status, which the
-// JavaScript SDK does not bind) with the SDK getters (provide paused and
-// enabled), the provider packet stats (data provided) and the provider
-// contract rows (clients served). Mirrors the Go provider's session.go.
+// provider device, its /provider-status route, and the payout wallet read.
+// The companion reads every status value in process with the full SDK and
+// counts the clients served; this program does not load the JavaScript SDK,
+// whose remotes run in browser state only mode and get no provider packet
+// stats or provider contract details over the companion's device rpc.
+// Mirrors the Go provider's session.go.
 
 import {randomBytes} from "node:crypto";
 import {setTimeout as sleep} from "node:timers/promises";
-import type {ContractDetailsViewController, ContractViewController, DeviceRemote, URNetwork} from "@urnetwork/sdk";
-import {companionTransport} from "../integration/companion.mjs";
 import {type CompanionExit, CompanionProcess, type Environment, companionEnvironment, freeLoopbackAddress, readCompanionStatus} from "./companion.ts";
 import {type ProviderConfig, loadClientJwt} from "./state.ts";
 import {
-  ClientsServed,
   type CompanionStatus,
   type ProviderStatus,
-  clientsServedLimit,
   payoutWalletChecking,
   payoutWalletFromResult,
   payoutWalletUnavailable,
-  providerState,
-  providerStateStarting,
+  providerStatus,
   statusKey,
   statusLine,
 } from "./status.ts";
@@ -32,10 +26,9 @@ export const exitFailure = 1;
 // sysexits EX_CONFIG
 export const exitConfig = 78;
 
-// The companion's network space (ur.network, main), for the SDK's remote and
-// the wallet read.
+// The API of the companion's network space (ur.network, main), for the wallet
+// read.
 export const defaultApiUrl = "https://api.bringyour.com";
-export const platformUrl = "wss://connect.bringyour.com";
 
 // How often the status is read, and the longest gap between status lines.
 const statusPollIntervalMillis = 1000;
@@ -71,16 +64,9 @@ export class ProviderSession {
   // authorizes this launch's requests to the companion; never stored
   #token = randomBytes(32).toString("hex");
   #address = "";
-  #urNetwork: typeof URNetwork | null = null;
   #companion: CompanionProcess | null = null;
   // the last /provider-status read, null until the first one
   #companionStatus: CompanionStatus | null = null;
-  #sdk: URNetwork | null = null;
-  #device: DeviceRemote | null = null;
-  #contractViewController: ContractViewController | null = null;
-  #contractDetailsViewController: ContractDetailsViewController | null = null;
-  #unsubscribes: (() => void)[] = [];
-  #clientsServed = new ClientsServed(clientsServedLimit);
   // payoutWalletChecking, payoutWalletUnavailable, payoutWalletNotSet or the
   // mapped coldkey
   #payoutWallet = payoutWalletChecking;
@@ -98,10 +84,9 @@ export class ProviderSession {
     this.#error = options.error;
   }
 
-  // Loads the SDK, then starts the companion in provider mode on a free
-  // loopback port. The companion starts providing publicly.
+  // Starts the companion in provider mode on a free loopback port. The
+  // companion starts providing publicly.
   async start(environment: Environment): Promise<void> {
-    ({URNetwork: this.#urNetwork} = await import("@urnetwork/sdk"));
     this.#address = await freeLoopbackAddress();
     this.#companion = new CompanionProcess(this.#companionPath, companionEnvironment(environment, {
       stateDir: this.#config.stateDir,
@@ -110,73 +95,15 @@ export class ProviderSession {
     }));
   }
 
-  // Reads the status: the companion's device values, then the SDK's once the
-  // companion serves its device rpc, which it does only after the provider
-  // connected.
+  // Reads the status from the companion. Until its first answer the status is
+  // "starting"; when a read fails the last one stays.
   async status(): Promise<ProviderStatus> {
     try {
       this.#companionStatus = await readCompanionStatus(this.#address, this.#token);
     } catch {
       // not listening yet, or gone; run reports a companion that exited
     }
-    if (this.#companionStatus?.deviceRpcStarted && this.#device === null) {
-      await this.#openDevice();
-    }
-    const device = this.#device;
-    const remoteConnected = device?.getRemoteConnected() ?? false;
-    const companionStatus = this.#companionStatus;
-    const state = companionStatus === null ? providerStateStarting : providerState({
-      provideMode: companionStatus.provideMode,
-      clientLimitStatus: companionStatus.clientLimitStatus,
-      providePaused: remoteConnected && device !== null && device.getProvidePaused(),
-      provideEnabled: remoteConnected && device !== null && device.getProvideEnabled(),
-      providerConnected: companionStatus.providerConnected,
-    });
-    // the rows listener counts every change; this read also counts rows that
-    // were already open when the controller started
-    this.#clientsServed.addRows(this.#contractDetailsViewController?.getContractRows());
-    const packetStats = this.#contractViewController?.getProviderPacketStats() ?? null;
-    // bytes relayed for clients, in both directions, since the device started
-    const dataProvidedByteCount = packetStats === null ? 0 : packetStats.remoteEgressByteCount + packetStats.remoteIngressByteCount;
-    const {count, atLimit} = this.#clientsServed.count();
-    return {
-      state,
-      clientLimitRetryTime: companionStatus?.clientLimitRetryTime ?? 0,
-      clientsServed: count,
-      clientsServedAtLimit: atLimit,
-      dataProvidedByteCount,
-      payoutWallet: this.#payoutWallet,
-      payoutWalletScope: this.#payoutWalletScope,
-    };
-  }
-
-  // Connects the SDK's DeviceRemote to the companion's device rpc and opens the
-  // provider's contract view controllers. The companion serves the rpc with
-  // the provide setters disabled: the app reads the provider but cannot change
-  // it.
-  async #openDevice(): Promise<void> {
-    if (this.#urNetwork === null) {
-      throw new Error("the SDK is not loaded");
-    }
-    const sdk = await this.#urNetwork.init();
-    this.#sdk = sdk;
-    const device = sdk.createExtensionDeviceRemote({
-      apiUrl: this.#apiUrl,
-      platformUrl,
-      byJwt: this.#config.clientJwt,
-      instanceId: this.#config.instanceId,
-      transport: companionTransport(`ws://${this.#address}/device-rpc`, this.#token),
-    });
-    this.#device = device;
-    const contractViewController = device.openContractViewController();
-    this.#contractViewController = contractViewController;
-    contractViewController.start();
-    const contractDetailsViewController = device.openProviderContractDetailsViewController();
-    this.#contractDetailsViewController = contractDetailsViewController;
-    this.#unsubscribes.push(contractDetailsViewController.addContractRowsListener(() => {
-      this.#clientsServed.addRows(contractDetailsViewController.getContractRows());
-    }));
-    contractDetailsViewController.start();
+    return providerStatus(this.#companionStatus, this.#payoutWallet, this.#payoutWalletScope);
   }
 
   // Reads the payout wallet (GET /sn/wallet with the client credential, which
@@ -249,16 +176,9 @@ export class ProviderSession {
     }
   }
 
-  // Stops providing: closes the SDK objects, then stops the companion, which
-  // sets the provide mode to none and closes the device.
+  // Stops providing: the companion sets the provide mode to none, closes the
+  // device and exits.
   async close(): Promise<void> {
-    for (const unsubscribe of this.#unsubscribes.splice(0)) {
-      unsubscribe();
-    }
-    await this.#contractDetailsViewController?.close();
-    await this.#contractViewController?.close();
-    await this.#device?.close();
-    this.#sdk?.close();
     await this.#companion?.stop();
     this.#log("status: stopped");
   }
