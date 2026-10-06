@@ -196,7 +196,8 @@ func (self *providerSession) Run(ctx context.Context) int {
 	}
 }
 
-// Stops providing and releases the device, then the manager.
+// Stops providing and releases the device, then the manager. The final flush
+// keeps a short run's last SDK log lines in the logs directory.
 func (self *providerSession) Close() {
 	self.device.SetProvideMode(sdk.ProvideModeNone)
 	for _, sub := range self.subs {
@@ -204,6 +205,7 @@ func (self *providerSession) Close() {
 	}
 	self.device.Close()
 	self.manager.Close()
+	sdk.FlushGlog()
 	fmt.Println("status: stopped")
 }
 
