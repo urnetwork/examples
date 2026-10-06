@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+Debug builds only: adb imports the scoped client JWT into the installation state for local testing.
+Release builds have no import path; an app delivers the token through its own sign-in flow. Only the
+shell and the system hold the DUMP permission, so other apps cannot send this broadcast.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <receiver
+            android:name=".DebugClientJwtReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+    </application>
+</manifest>
