@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "The main window calls the app's provider commands and listens to the provider-view event.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app's labels. The consent disclaimer is in ProviderStatus.kt, where the unit tests check it. -->
+<resources>
+    <string name="app_name">URnetwork provider</string>
+    <string name="start">Start providing</string>
+    <string name="stop">Stop</string>
+    <string name="status_label">Status</string>
+    <string name="clients_served_label">Clients served</string>
+    <string name="data_provided_label">Data provided</string>
+    <string name="payout_wallet_label">Payout wallet</string>
+    <string name="sdk_version">URnetwork SDK %1$s</string>
+    <string name="notification_channel">Providing</string>
+    <string name="notification_title">URnetwork provider</string>
+</resources>

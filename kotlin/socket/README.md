@@ -1,6 +1,6 @@
 # Kotlin sockets and Ktor
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [src/main/kotlin/Main.kt](src/main/kotlin/Main.kt) is a runnable desktop Kotlin/JVM program using the Java SDK. Its local Device and SocketFactory helpers are included under `src/main/java`.
 

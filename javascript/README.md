@@ -20,13 +20,14 @@ The package loader runs in current browsers and Node; executable Node examples u
 
 npm supports Git dependencies, but this repository's package is under js/. Use a published .tgz release asset, or clone sdk and run `make -C sdk/js package check-package` and install its tarball from `sdk/js/release/artifacts`. repository.directory is not a Git subdirectory installer.
 
-The new messaging RPC capability requires the current SDK source. Its [companion build guide](integration/companion/README.md#build-from-sibling-checkouts) lists the `examples`, `sdk`, `connect`, `glog` and `goidenticons` sibling layout and exact commands. The message package uses `file:../../../sdk/js` so its JavaScript bundle and WASM come from that build.
+The new messaging RPC capability requires the current SDK source. Its [companion build guide](integration/companion/README.md#build-from-sibling-checkouts) lists the `examples`, `sdk`, `connect`, `glog`, `goidenticons` and `gvisor` sibling layout and exact commands. The message package uses `file:../../../sdk/js` so its JavaScript bundle and WASM come from that build.
 
 ## Examples
 
 - [Integration](integration/README.md): service provisioning, scoped client credentials and Device lifecycle.
 - [Sockets](socket/README.md): TCP/UDP, TLS/DTLS and HTTP client adapters.
 - [Messages](messages/README.md): live peers, targeted URMS text/ACK messages and offline codec tests through a native companion.
+- [Provider](provider/README.md): a provider client of your network through the native companion, with the consent disclaimer, status, payout wallet display and background run.
 
 Apps use `URNETWORK_CLIENT_JWT` and a persisted `URNETWORK_INSTANCE_ID`; only the service backend holds `URNETWORK_ROOT_JWT`. See the [shared contract](../INTEGRATION_CONTRACT.md) and [official networking research](../NETWORK_EXAMPLES.md).
 

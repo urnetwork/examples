@@ -1,0 +1,25 @@
+# systemd user unit for a URnetwork provider example (PROVIDER_CONTRACT.md).
+# Install as ~/.config/systemd/user/urnetwork-provider.service, replace the two
+# @...@ values, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now urnetwork-provider.service
+#   loginctl enable-linger "$USER"    # keep running after logout and start at boot
+# Logs: journalctl --user -u urnetwork-provider.service -f
+
+[Unit]
+Description=URnetwork provider example
+
+[Service]
+Type=simple
+# the private installation state directory (chmod 700); it holds client.jwt
+Environment=URNETWORK_PROVIDER_STATE_DIR=@STATE_DIR@
+# the example's run command, with absolute paths
+ExecStart=@COMMAND@
+# exit 0 is a requested stop; exit 78 is a configuration or credential problem
+# that a restart does not fix; anything else restarts after 30 seconds
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=78
+
+[Install]
+WantedBy=default.target

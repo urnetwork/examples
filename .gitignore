@@ -20,3 +20,7 @@
 **/device.json
 **/.env
 .DS_Store
+rust/provider/Cargo.lock
+tauri/provider/src-tauri/Cargo.lock
+tauri/provider/src-tauri/gen/
+tauri/provider/src-tauri/icons/

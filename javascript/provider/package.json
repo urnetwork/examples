@@ -1,0 +1,13 @@
+{
+  "name": "urnetwork-javascript-provider",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node main.mjs",
+    "self-test": "node main.mjs --self-test",
+    "test": "node --test provider.test.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

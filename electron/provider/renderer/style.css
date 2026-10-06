@@ -1,0 +1,111 @@
+/* The provider window's layout, in the system's light or dark appearance. */
+:root {
+  color-scheme: light dark;
+  --text: #1d1d1f;
+  --muted: #5f6368;
+  --surface: #f5f5f7;
+  --border: #d2d2d7;
+  --accent: #2f7ae0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #f5f5f7;
+    --muted: #a1a1a6;
+    --surface: #2c2c2e;
+    --border: #48484a;
+    --accent: #5b9bf0;
+  }
+}
+
+body {
+  margin: 0;
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--text);
+}
+
+main {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 20px 24px;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0 0 16px;
+}
+
+.start {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.disclaimer {
+  flex: 1;
+  margin: 0;
+  white-space: pre-line;
+  color: var(--muted);
+}
+
+button {
+  font: inherit;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+#start {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+button:disabled {
+  opacity: 0.5;
+}
+
+.fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 20px 0;
+}
+
+.fields dt {
+  color: var(--muted);
+}
+
+.fields dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.message {
+  min-height: 1.45em;
+  color: var(--muted);
+}
+
+.setup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.state-dir {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}

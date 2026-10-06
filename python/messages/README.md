@@ -1,6 +1,6 @@
 # Python peer messages
 
-[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](README.md)
+[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](README.md) · [Provider](../provider/README.md)
 
 This local Device example discovers real-time peers and exchanges text over subprotocol **4096** using the shared [URMS v1 TEXT/ACK format](../../MESSAGES_PROTOCOL.md). Its files are [main.py](main.py), [codec.py](codec.py) and [requirements.txt](requirements.txt); the Device bootstrap is described in [Integration](../integration/README.md).
 

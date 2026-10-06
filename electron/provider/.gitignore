@@ -1,0 +1,4 @@
+# the companion binaries built for this app, per <platform>-<arch>
+bin/
+# packaged apps
+out/

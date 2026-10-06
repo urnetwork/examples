@@ -1,6 +1,6 @@
 # JavaScript peer messages
 
-[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](README.md)
+[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](README.md) · [Provider](../provider/README.md)
 
 This Node 24 program discovers live network peers and exchanges [URMS v1](../../MESSAGES_PROTOCOL.md) text and ACK frames. A [native companion](../integration/companion/README.md) owns the provider-capable `DeviceLocal`; the JavaScript application owns the binary codec, selected destination, receive handling and acknowledgements through extension RPC. Hosted socket proxies remain ineligible for messaging.
 

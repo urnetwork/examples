@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The dark theme, used while the system is in dark mode. -->
+<resources>
+    <style name="Theme.Provider" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

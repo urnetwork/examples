@@ -1,6 +1,6 @@
 # C sockets and libcurl
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [main.c](main.c) demonstrates the C ABI directly: create a Device, dial a verified TLS connection, exchange bytes, and release the connection handle. It also contains UDP, DTLS and libcurl modes. [ur_session.h](ur_session.h) handles Device bootstrap and ownership.
 

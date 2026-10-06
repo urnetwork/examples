@@ -1,0 +1,26 @@
+[package]
+name = "urnetwork-tauri-provider-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "urnetwork-tauri-provider"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# placeholder icons on the first build (build.rs); tauri-build already uses both
+png = "0.17"
+ico = "0.5"
+
+[dependencies]
+# the provider core shared with the Rust console app, without its console signal handling
+urnetwork-provider-example = { path = "../../../rust/provider", default-features = false }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

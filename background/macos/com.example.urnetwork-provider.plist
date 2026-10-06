@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+launchd agent for a URnetwork provider example (PROVIDER_CONTRACT.md).
+Use your own reverse-DNS label, install as
+~/Library/LaunchAgents/<label>.plist, replace the @...@ values, then:
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+Stop and remove:
+  launchctl bootout gui/$(id -u)/<label>
+The agent starts at login and restarts after a failure (non-zero exit), at
+most once a minute. After a configuration or credential error (exit 78), fix
+the state directory, then bootout and bootstrap again.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.urnetwork-provider</string>
+  <key>ProgramArguments</key>
+  <array>
+    <!-- the example's run command, one array element per argument, absolute paths -->
+    <string>@COMMAND@</string>
+    <string>@ARGUMENT@</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- the private installation state directory (chmod 700); it holds client.jwt -->
+    <key>URNETWORK_PROVIDER_STATE_DIR</key>
+    <string>@STATE_DIR@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>@LOG_DIR@/urnetwork-provider.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG_DIR@/urnetwork-provider.log</string>
+</dict>
+</plist>
