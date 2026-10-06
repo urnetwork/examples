@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/urnetwork/sdk"
+	sdk "github.com/urnetwork/sdk/v2026"
 )
 
 func allowedRequest(r *http.Request, token, origin string) bool {
