@@ -1,14 +1,16 @@
-# Native companion for JavaScript and TypeScript messages
+# Native companion for JavaScript and TypeScript
 
-[JavaScript integration](../README.md) · [JavaScript messages](../../messages/README.md) · [TypeScript integration](../../../typescript/integration/README.md) · [TypeScript messages](../../../typescript/messages/README.md)
+[JavaScript integration](../README.md) · [JavaScript messages](../../messages/README.md) · [JavaScript provider](../../provider/README.md) · [TypeScript integration](../../../typescript/integration/README.md) · [TypeScript messages](../../../typescript/messages/README.md) · [TypeScript provider](../../../typescript/provider/README.md)
 
 The companion owns a provider-capable native `DeviceLocal` connected to URnetwork. The Node application uses the real SDK WASM `DeviceRemote` through its extension RPC transport and handles peer selection, URMS encoding/decoding, incoming messages and ACKs. The loopback WebSocket carries SDK RPC; peer traffic uses native Device subprotocol messages with preserved boundaries.
 
 The current browser WASM platform transport cannot run a connected provider by itself. Hosted proxy devices also remain excluded from the visible peer list and reject the new subprotocol RPC. This companion keeps those boundaries intact. It is an app-side process using a scoped client JWT; the service backend alone holds `URNETWORK_ROOT_JWT`.
 
+The same binary is also the provider of the JavaScript, TypeScript and Electron provider examples: see [Provider mode](#provider-mode). Without `URNETWORK_COMPANION_PROVIDE` it is the messaging companion described first.
+
 ## Build from sibling checkouts
 
-Use **Node 24+**, **Go 1.26.5+**, npm and make. The new RPC API requires the current SDK source. Keep these repositories as siblings:
+Use **Node 24+**, **Go 1.26.7+**, npm and make. The companion's [go.mod](go.mod) requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query rather than a pin: `go mod tidy` resolves it to the latest 2026 SDK release and records that version, so run it first (and again to move to a newer release). It needs network access. The message packages depend on `file:../../../sdk/js`, the SDK's JavaScript bundle and WASM built from an sdk checkout, which needs its Go siblings; the provider programs need only the companion. Keep these repositories as siblings:
 
 ```text
 workspace/
@@ -17,14 +19,16 @@ workspace/
   connect/
   glog/
   goidenticons/
+  gvisor/
 ```
 
-The companion's [go.mod](go.mod) points to those source trees. Both message packages depend on `file:../../../sdk/js`; build the JavaScript bundle and its matching WASM before installing either package. From `workspace/`:
+Build the JavaScript bundle and its matching WASM before installing a message package, then the companion. From `workspace/`:
 
 ```sh
 npm --prefix sdk/js ci
 make -C sdk/js build_wasm
 npm --prefix sdk/js run build
+go -C examples/javascript/integration/companion mod tidy
 go -C examples/javascript/integration/companion test .
 mkdir -p examples/javascript/integration/companion/bin
 go -C examples/javascript/integration/companion build -o bin/ur-companion .
@@ -107,6 +111,44 @@ Observe `subscription.closed`. It resolves after normal unsubscribe and rejects 
 
 The RPC bounds each session to 16 registrations, each raw frame to 65535 bytes, and each receive queue to 64 messages or 1 MiB. Overflow fails the subscription; frames are not coalesced. URMS enforces its smaller 4112-byte frame limit. The application's ACK confirms valid TEXT parsing/acceptance, not durable storage or human readership.
 
+## Provider mode
+
+The JavaScript SDK cannot provide by itself, so the [provider examples](../../../PROVIDER_CONTRACT.md#javascript-and-typescript) run this companion with `URNETWORK_COMPANION_PROVIDE=public`. It then owns the provider device and the installation's state directory, provides publicly as the installation's provider client, and the app shows the status. The [JavaScript](../../provider/README.md) and [TypeScript](../../../typescript/provider/README.md) provider programs and the Electron provider start it as a child process; you do not start it yourself. Source: [provider.go](provider.go) and [provider_state.go](provider_state.go); tests: [provider_test.go](provider_test.go).
+
+**Consent disclaimer:** an app that integrates a URnetwork provider must collect the user's consent before it provides. Providing shares the user's internet connection: other URnetwork users' traffic exits through the user's device and IP address. This example starts providing without asking, because the consent screen belongs to your app.
+
+| Setting | Meaning |
+| --- | --- |
+| `URNETWORK_COMPANION_PROVIDE` | `public` selects provider mode. Any other non-empty value is refused. |
+| `URNETWORK_PROVIDER_STATE_DIR` | Required absolute path of the installation's private state directory (`chmod 700`), holding the scoped `client.jwt` from your backend ([installation state](../../../PROVIDER_CONTRACT.md#installation-state)). The companion creates `instance-id` and `identity.json` on first run, saves each refreshed `client.jwt`, and the SDK keeps its bounded log files in `logs/`. |
+| `URNETWORK_COMPANION_TOKEN` | Required random token of at least 32 characters. The app generates a new one for each launch and passes it to the companion and to its own requests. |
+| `URNETWORK_COMPANION_ADDRESS` | Numeric loopback address, default `127.0.0.1:8787`; the provider programs pass a free port. |
+| `URNETWORK_COMPANION_ORIGIN` | Optional exact browser Origin, as in messaging mode. |
+| `URNETWORK_COMPANION_STOP_ON_STDIN_CLOSE` | `1` when an app starts the companion as a child process and keeps a pipe to its standard input. Closing the pipe stops providing, and so does the app exiting for any reason, so the provider never outlives the app that shows it. |
+
+The companion prints the consent disclaimer, creates its device with the installation's identity and the extender role on, sets the public provide mode and waits for the provider's platform connection without a time limit: on a network over its client limit, the SDK holds a provider that has not qualified off for 15 to 20 minutes and then retries by itself. It serves two routes on its address, both authorized by `?token=` like messaging mode:
+
+- `/provider-status`: every status value of the [contract](../../../PROVIDER_CONTRACT.md#status), read in process with the full SDK, from the start, as JSON with the SDK's Go field names. The provider examples read their whole status here.
+- `/device-rpc`: the SDK device RPC, only once the provider has connected; until then it answers 503 and the SDK's `DeviceRemote` dials again. A JavaScript SDK remote runs in browser state only mode: over this RPC it gets no provider packet stats and no provider contract details, and it cannot change the provide settings. The provider examples therefore do not use it; it stays for apps that need what a browser state remote does get.
+
+```json
+{"ProvideMode":3,"ProvideEnabled":true,"ProvidePaused":false,"ProviderConnected":true,"ClientLimitStatus":{"Status":"","RetryTime":0},"ProviderPacketStats":{"RemoteEgressByteCount":13002335,"RemoteIngressByteCount":7},"ClientsServed":2,"ClientsServedAtLimit":false,"DeviceRpcStarted":true}
+```
+
+| `/provider-status` field | Meaning |
+| --- | --- |
+| `ProvideMode` | The SDK's provide mode (`GetProvideMode`); 3 is public. |
+| `ProvideEnabled` | `GetProvideEnabled`: the device has a provider. |
+| `ProvidePaused` | `GetProvidePaused`. |
+| `ProviderConnected` | `GetProviderConnected`: the provider's platform carrier is connected. |
+| `ClientLimitStatus` | `GetClientLimitStatus`: `Status` is `""` or `"client_limit_exceeded"`, `RetryTime` is the end of the hold in unix milliseconds, 0 without a hold. |
+| `ProviderPacketStats` | The byte counts of `GetProviderPacketStats`, `RemoteEgressByteCount` and `RemoteIngressByteCount`, or `null` without a provider. Data provided is their sum: bytes relayed for clients, both directions, since the companion started. |
+| `ClientsServed` | Distinct client peers of provider contracts since the companion started, counted from the provider ingress and egress contract details listeners with the contract's peer rules (the source of a receive contract, the destination of a send contract, else `stream:` and then `contract:` keys), at most 100,000. |
+| `ClientsServedAtLimit` | The count stopped at 100,000 and is a lower bound (show `100000+`). |
+| `DeviceRpcStarted` | `/device-rpc` is served. |
+
+While providing, the extender role listens on TCP 443 and UDP 443, 53 and 4053 and logs those listeners on stderr. Ctrl-C, SIGTERM and a closed standard input stop providing. Exit codes: **0** after a requested stop, **78** for a configuration or credential problem that a restart does not fix (a missing or invalid state directory or token, a network JWT, or the server rejecting the client credential), and **1** for any other failure.
+
 ## Validation
 
 From `workspace/`, after the SDK build:
@@ -115,4 +157,4 @@ From `workspace/`, after the SDK build:
 UR_SUBPROTOCOL_WASM_TEST=1 go -C sdk test . -run '^TestSubprotocolWasmCompanionRoundTrip$' -count=1
 ```
 
-This credential-free test runs the packaged Node WASM against a native DeviceLocal RPC session whose subprotocol client is connected to a second real network client in memory. It verifies exact URMS TEXT/ACK frames in both directions, protocol discovery, a live peer snapshot, identity pairing and unsubscribe. It does not contact the production URnetwork service. The native companion tests cover token and Origin validation; both language message directories also provide offline codec tests. Live service checks need separately provisioned clients and network connectivity.
+This credential-free test runs the packaged Node WASM against a native DeviceLocal RPC session whose subprotocol client is connected to a second real network client in memory. It verifies exact URMS TEXT/ACK frames in both directions, protocol discovery, a live peer snapshot, identity pairing and unsubscribe. It does not contact the production URnetwork service. The native companion tests cover token and Origin validation and, for provider mode, the mode and settings checks, the installation state files, the two routes, the contract's peer and clients-served vectors and the stop on a closed standard input, without a device or network; both language message directories also provide offline codec tests. Live service checks need separately provisioned clients and network connectivity.

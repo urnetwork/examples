@@ -1,6 +1,6 @@
 # TypeScript peer messages
 
-[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](README.md)
+[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](README.md) · [Provider](../provider/README.md)
 
 This Node 24 program uses the SDK's typed subprotocol API to discover live peers and exchange [URMS v1](../../MESSAGES_PROTOCOL.md) TEXT/ACK frames. It supplies its own typed codec to the shared command controller. The [native companion](../../javascript/integration/companion/README.md) owns a full provider-capable `DeviceLocal`; TypeScript owns application message processing through extension RPC. Hosted socket proxies remain ineligible for messaging.
 

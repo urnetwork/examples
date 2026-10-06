@@ -1,6 +1,6 @@
 # TypeScript sockets
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [main.ts](main.ts) is a runnable, typed Node 24+ application. It imports `Conn` and `DeviceRemote` from `@urnetwork/sdk`, sends optional TCP/UDP echoes through Direct Sockets, and configures Undici and Axios to open UR SDK connections.
 

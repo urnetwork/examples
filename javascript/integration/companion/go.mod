@@ -1,10 +1,10 @@
 module github.com/urnetwork/examples/javascript/integration/companion
 
-go 1.26.5
+go 1.26.7
 
 require (
 	github.com/gorilla/websocket v1.5.3
-	github.com/urnetwork/sdk v0.0.0
+	github.com/urnetwork/sdk/v2026 v2026
 )
 
 require (
@@ -71,9 +71,9 @@ require (
 	github.com/quic-go/quic-go v0.61.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
-	github.com/urnetwork/connect v0.0.0 // indirect
-	github.com/urnetwork/glog v0.0.0 // indirect
-	github.com/urnetwork/goidenticons v0.0.0 // indirect
+	github.com/urnetwork/connect/v2026 v2026.9.26-1056505490 // indirect
+	github.com/urnetwork/glog/v2026 v2026.9.26-1056505490 // indirect
+	github.com/urnetwork/goidenticons/v2026 v2026.9.26-1056505490 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp v0.0.0-20260727155853-b88d891fe743 // indirect
@@ -84,16 +84,8 @@ require (
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gvisor.dev/gvisor v0.0.0-20260909230408-9b1144b679cb // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 	src.agwa.name/tlshacks v0.0.4 // indirect
 )
-
-// This companion needs the current additive subprotocol RPC capability.
-replace github.com/urnetwork/sdk => ../../../../sdk
-
-replace github.com/urnetwork/connect => ../../../../connect
-
-replace github.com/urnetwork/glog => ../../../../glog
-
-replace github.com/urnetwork/goidenticons => ../../../../goidenticons
