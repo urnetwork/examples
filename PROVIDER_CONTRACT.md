@@ -208,7 +208,7 @@ Every example shows these four fields with these exact rules. Console examples p
 | Data provided | `RemoteEgressByteCount + RemoteIngressByteCount` of the provider packet stats: bytes relayed for clients in both directions since the device started; 0 when the stats are null. |
 | Payout wallet | `checking` until the first wallet read; `unavailable` if that read fails (a later failure keeps the last value); `not set` when no wallet is mapped; otherwise the coldkey ss58 address with its scope, checking the wallet's `consent_scope` first: `(hotkey)` when `consent_scope` is `hotkey`; otherwise `(this provider)` when the wallet's `client_id` is this client, `(network)` when it has none, `(another provider)` otherwise. |
 
-Bytes use binary units with one decimal: below 1024 `N B`, otherwise `KiB`, `MiB`, `GiB`, `TiB`, `PiB`, `EiB`, moving to the next unit when the rounded value reaches 1024.0. The console status line is:
+Bytes use binary units with one decimal: below 1024 `N B`, otherwise `KiB`, `MiB`, `GiB`, `TiB`, `PiB`, `EiB`, moving to the next unit when the rounded value reaches 1024.0. Round to the nearest tenth with ties to even, as Go's `%.1f` does: an exact half such as 1280 bytes (1.25 KiB) shows `1.2 KiB` and 1792 bytes (1.75 KiB) shows `1.8 KiB`. Formatters that round ties up (JavaScript `toFixed`, Java and Kotlin `String.format`) need an explicit tie rule. The console status line is:
 
 ```text
 status: <status> | clients served: <count> | data provided: <bytes> | payout wallet: <wallet>
@@ -219,6 +219,7 @@ Golden vectors for self-tests:
 | Input | Text |
 | --- | --- |
 | 0, 1023, 1024, 1536 bytes | `0 B`, `1023 B`, `1.0 KiB`, `1.5 KiB` |
+| 1280, 1792 bytes (exact halves, ties to even) | `1.2 KiB`, `1.8 KiB` |
 | 1048575, 13002342 bytes | `1.0 MiB`, `12.4 MiB` |
 | 5×1024³, 3×1024⁴ bytes | `5.0 GiB`, `3.0 TiB` |
 | starting, 0 clients, 0 bytes, wallet checking | `status: starting \| clients served: 0 \| data provided: 0 B \| payout wallet: checking` |
