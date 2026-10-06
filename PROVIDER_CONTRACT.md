@@ -29,45 +29,59 @@ Self-tests check the text by its SHA-256 over the UTF-8 bytes, with LF line brea
 | `client.jwt` | The installation's private state | The scoped client JWT from the backend. The SDK refreshes it and the app saves the refreshed token. A bearer secret. |
 | `instance-id`, `identity.json` | The installation's private state | Created by the app on first run; see [Installation state](#installation-state). |
 
-Apps never call `POST /sn/wallet/consent` or `POST /sn/wallet`, never hold the root JWT and never handle USDC payout settings: payouts are subnet payouts, and `/account/payout-wallet` is not part of this contract. Apps read the payout wallet only to display it.
+Apps never call `POST /sn/wallet/network-consent`, `POST /sn/wallet/consent` or `POST /sn/wallet`, never hold the root JWT and never handle USDC payout settings: payouts are subnet payouts, and `/account/payout-wallet` is not part of this contract. Apps read the payout wallet only to display it.
 
 ## Backend: provision provider clients
 
 The backend provisions one provider client per installation with `POST /network/auth-client`, exactly as the [integration contract](INTEGRATION_CONTRACT.md#backend-provisioning) describes for a top-level client: root JWT, `description` and `device_spec`, no `client_id` and no `source_client_id` for a new client; the stored `client_id` for a reissue. Each language's existing [allocator](INTEGRATION_CONTRACT.md#runnable-backend-allocators) does this without changes. Keep provider installations in their own private map (for example `providers.json`) and key them per installation, for example `user:alice:laptop-1`. A provider is an ordinary client at provisioning time: the app makes it a provider by setting the public provide mode.
 
-The backend delivers `by_client_jwt` to the installation as its `client.jwt`. A client that has not connected for 30 days is deactivated, and its reissue then fails with `Client does not exist.`; remove that mapping and provision a new client, which also needs its own [wallet mapping](#payout-wallet-mapping).
+The backend delivers `by_client_jwt` to the installation as its `client.jwt`. A client that has not connected for 30 days is deactivated, and its reissue then fails with `Client does not exist.`; remove that mapping and provision a new client. The [network consent](#payout-wallet-mapping) already covers the new client; with per-provider consents it needs its own.
+
+Provision each installation as a top-level client. A child client (one provisioned with a `source_client_id`) can connect and set the public provide mode, but the server never offers child clients to other users as providers: provider selection counts only top-level clients, on purpose, because child clients are a consumer's short-lived connection identities. A child client would provide nothing and earn nothing.
 
 ## Payout wallet mapping
 
-The payout wallet is the developer's fixed Bittensor coldkey. The server records the mapping **per provider client**: a signed consent names the network, the provider client and the coldkey, so the backend maps each provisioned provider client once, always to the same coldkey. The coldkey owner signs each consent offline with their own wallet tool (btcli, the polkadot.js extension or apps, subkey); the coldkey never touches the backend or the app. The backend uses the root JWT and names the client.
+The payout wallet is the developer's fixed Bittensor coldkey. The server pays a provider client only through a **wallet mapping consent** that the coldkey owner signed, offline, with their own wallet tool (btcli, the polkadot.js extension or apps, subkey); the coldkey never touches the backend or the app. The backend requests each consent message with the root JWT and submits the signature. There are two kinds:
+
+| Mode | One signature covers | Use it for |
+| --- | --- | --- |
+| **Network consent** | Every provider client of the network: the ones provisioned now and every one provisioned later. | Apps that embed a provider: the coldkey owner signs once per network, and no key ships in any app. |
+| **Per-provider consent** | One provider client. | A client that must earn to a different coldkey, for example one run by an independent signer. |
+
+For each provider client and each epoch, a per-provider consent in force at that epoch wins; otherwise the network consent pays. A consent is in force from its `from_epoch` through its `through_epoch` (at most 65,536 epochs), and only looking forward: it never pays an epoch that started before its message expired. To change the coldkey, sign a new consent of the same kind; it starts at a later epoch than the one it replaces, and earlier epochs keep the earlier coldkey. There is no unsigned revocation. A client returns to the network consent when its own consent ends, or from the first epoch of a replacement consent for that client signed with the network's coldkey.
+
+**Network consent** (the root JWT is the network's credential and names no client):
 
 1. Read the current epoch: `GET /sn/epoch` (no authentication) returns `{"epoch": E, ...}`.
-2. Request the consent message: `POST /sn/wallet/consent` with `{"client_id", "coldkey_ss58", "from_epoch": E+1, "through_epoch": E+65536}`. The answer is `{"message": "..."}`, starting with the line `Approve URnetwork provider wallet mapping`. 65,536 epochs is the longest interval one consent covers.
+2. Request the consent message: `POST /sn/wallet/network-consent` with `{"coldkey_ss58", "from_epoch": E+1, "through_epoch": E+65536}`. The answer is `{"message": "..."}`, starting with the line `Approve URnetwork network wallet mapping`. A client JWT is refused.
 3. The coldkey owner signs the **exact** message bytes within five minutes: an sr25519 signature in the `substrate` signing context over the UTF-8 text, either raw or wrapped as `<Bytes>…</Bytes>` (what a Polkadot extension `signRaw` of type `bytes` signs). The signature is 64 bytes, sent as hex with an optional `0x`.
-4. Submit it: `POST /sn/wallet` with `{"coldkey_ss58", "client_id", "message", "signature"}`. Success returns `mapping_hash` and `mapping_generation`. A well-formed signature from another key returns `error.code` `signature_mismatch`. Retrying the same message and signature returns the same mapping; an expired message needs a new step 2.
-5. Check: `GET /sn/wallet` lists the network's wallet (no `client_id`) and each provider client's wallet.
+4. Submit it: `POST /sn/wallet` with `{"coldkey_ss58", "message", "signature"}` and no `client_id`. Success returns `mapping_hash` and `mapping_generation`. A well-formed signature from another key returns `error.code` `signature_mismatch`. Retrying the same message and signature returns the same mapping; an expired message needs a new step 2.
+5. Check: `GET /sn/wallet` lists the network consent with `"consent_scope": "network"` and no `client_id`.
 
-The [Go wallet tool](go/provider/README.md#backend-provision-and-map-the-payout-wallet) runs steps 1–5 (`challenge`, `accept`, `show`), checks that the message names the requested client and coldkey before saving it for the signer, and keeps a receipt. The same steps with curl and jq (jq keeps the message bytes exact):
+**Per-provider consent**: the same steps with `POST /sn/wallet/consent` and `{"client_id", "coldkey_ss58", "from_epoch", "through_epoch"}` in step 2 (the message starts with `Approve URnetwork provider wallet mapping`), and the same `client_id` in step 4. `GET /sn/wallet` lists it with the client's `client_id` and `"consent_scope": "provider"`. A wallet listed without `consent_scope` was set by an older login proof or is the network-level copy; settlement does not pay it.
+
+The [Go wallet tool](go/provider/README.md#backend-provision-and-map-the-payout-wallet) runs both: `network-challenge` and `network-accept` for the network consent, `challenge` and `accept` for one client, and `show`. It checks that each message names the network (or client) and the coldkey it requested before saving it for the signer, and keeps a receipt. The network consent with curl and jq (jq keeps the message bytes exact):
 
 ```sh
 API=https://api.bringyour.com
-CLIENT_ID='provider-client-id-from-your-allocator-map'
 COLDKEY='5...your-coldkey-ss58-address'
 EPOCH=$(curl -fsS "$API/sn/epoch" | jq -r .epoch)
-jq -n --arg client "$CLIENT_ID" --arg coldkey "$COLDKEY" --argjson epoch "$EPOCH" \
-  '{client_id: $client, coldkey_ss58: $coldkey, from_epoch: ($epoch + 1), through_epoch: ($epoch + 65536)}' \
-  | curl -fsS -X POST "$API/sn/wallet/consent" \
+jq -n --arg coldkey "$COLDKEY" --argjson epoch "$EPOCH" \
+  '{coldkey_ss58: $coldkey, from_epoch: ($epoch + 1), through_epoch: ($epoch + 65536)}' \
+  | curl -fsS -X POST "$API/sn/wallet/network-consent" \
       -H "Authorization: Bearer $URNETWORK_ROOT_JWT" -H 'Content-Type: application/json' --data-binary @- \
-  | jq -j .message > consent.txt
-# the coldkey owner signs the exact bytes of consent.txt offline and returns SIGNATURE
-jq -n --rawfile message consent.txt --arg client "$CLIENT_ID" --arg coldkey "$COLDKEY" --arg signature "$SIGNATURE" \
-  '{coldkey_ss58: $coldkey, client_id: $client, message: $message, signature: $signature}' \
+  | jq -j .message > network-consent.txt
+# the coldkey owner signs the exact bytes of network-consent.txt offline and returns SIGNATURE
+jq -n --rawfile message network-consent.txt --arg coldkey "$COLDKEY" --arg signature "$SIGNATURE" \
+  '{coldkey_ss58: $coldkey, message: $message, signature: $signature}' \
   | curl -fsS -X POST "$API/sn/wallet" \
       -H "Authorization: Bearer $URNETWORK_ROOT_JWT" -H 'Content-Type: application/json' --data-binary @-
 curl -fsS "$API/sn/wallet" -H "Authorization: Bearer $URNETWORK_ROOT_JWT"
 ```
 
-If the consent request answers that the wallet mapping authority is unavailable, the deployment has not enabled provider wallet mapping yet; retry later. Mapping a client to a new coldkey repeats the same steps; the new consent must start at a later epoch than the client's previous one.
+For one client, add `--arg client "$CLIENT_ID"` and `client_id: $client` to both jq objects and post the first to `$API/sn/wallet/consent`.
+
+If a consent request answers that the wallet mapping authority is unavailable, the deployment has not enabled wallet mapping yet; retry later. A server without network consents answers `POST /sn/wallet/network-consent` with 404; per-provider consents work there.
 
 ## Installation state
 
@@ -129,9 +143,18 @@ C ABI callbacks run on SDK threads: copy what they carry before returning, keep 
 {"coldkey_ss58": "5...", "client_id": "11111111-1111-1111-1111-111111111111", "set_at_millis": 1}
 ```
 
-Where a binding cannot read the wallet through the SDK, read `GET /sn/wallet` with the scoped client JWT: its `wallet` is the effective wallet, with `client_id` set only for the client's own mapping.
+Where a binding cannot read the wallet through the SDK, read `GET /sn/wallet` with the scoped client JWT: its `wallet` is the effective wallet in the order settlement pays (the client's own consent, else the network consent), with `client_id` set only for the client's own mapping.
 
-**Extender role.** While it provides, the device also runs the provider extender role by default: it listens on TCP 443 and on UDP 443, 53 and 4053 so that clients that cannot reach the platform directly can connect through this provider, and it logs those listeners on stderr. Windows and macOS may ask the user to allow incoming connections the first time; on Linux an unprivileged process cannot bind these ports, and providing continues without the role. The examples keep this default and their READMEs say so. An app that must not open these ports creates the device with the device setting `ProvideExtenderEnabled` off (Go: `NewDeviceLocal` with `DefaultDeviceLocalSettings()`; C ABI: the settings JSON of `urnet_new_device_local`); `SetProvideExtender(false)` has no effect on a network space without storage.
+**Extender role.** While it provides, the device also runs the provider extender role, which is on by default: it listens on TCP 443 and on UDP 443, 53 and 4053 so that clients that cannot reach the platform directly can connect through this provider, and it logs those listeners on stderr. Windows and macOS may ask the user to allow incoming connections the first time; on Linux an unprivileged process cannot bind these ports, and providing continues without the role. Android and iOS builds of the SDK do not include the role. The examples keep the default on and their READMEs say so.
+
+One device setting turns the default off: `DefaultProvideExtender` set to false. The user's own choice (`SetProvideExtender`) still overrides it, and the separate hard switch `ProvideExtenderEnabled` set to false means the role never runs. Both settings need an SDK that includes them (sdk branch `fix/provide-extender-default`, not yet in a release); the published SDK has only `ProvideExtenderEnabled`.
+
+| Binding | Default off |
+| --- | --- |
+| Go | `DeviceLocalSettings.DefaultProvideExtender = false` on `DefaultDeviceLocalSettings()` for `NewDeviceLocal`, or `NewDeviceLocalWithProvideExtender(…, provideExtenderEnabled true, defaultProvideExtender false)` |
+| gomobile | the same settings property, or `Sdk.newDeviceLocalWithProvideExtender` (Java, Kotlin) and `SdkNewDeviceLocalWithProvideExtender` (Swift) |
+| C ABI | `urnet_new_device_local_with_provide_extender(…, key_material, provide_extender_enabled true, default_provide_extender false, …)`, which also takes the installation's key material. `urnet_new_device_local` with the settings JSON `{"DefaultProvideExtender": false}` works too (omitted fields keep the defaults of `urnet_default_device_local_settings()`; durations are integer nanoseconds), but those settings carry no key material. |
+| C++ | `urnet::newDeviceLocalWithProvideExtender` |
 
 ## Status
 
@@ -200,7 +223,7 @@ Each `<platform>/provider/README.md` follows the [Go provider README](go/provide
 2. One paragraph on what the app does, linking this contract; the consent disclaimer.
 3. Files: a table of the example's files and their roles.
 4. Build and self-test: exact commands for Windows (PowerShell), macOS and Linux, and the SDK version or local build it needs.
-5. Backend: provisioning with the language's allocator, and the [wallet mapping](#payout-wallet-mapping) via the Go wallet tool or curl.
+5. Backend: provisioning with the language's allocator, and the [wallet mapping](#payout-wallet-mapping), network consent first, via the Go wallet tool or curl.
 6. Configure the installation: creating the private state directory and `client.jwt` on each OS.
 7. Run: per-OS commands, a sample status line, the field table, the extender role's listeners and the exit codes.
 8. Run in the background: the example's values for the [background templates](background/README.md), or the platform pattern.
@@ -227,4 +250,4 @@ The WebAssembly SDK cannot provide by itself. The [native companion](javascript/
 
 On macOS the gomobile XCFramework exposes the Go API. The Swift package has no Linux or Windows binary, so the cross-platform provider uses the C ABI header and library through a SwiftPM C module on all three OSes.
 
-These details were checked against the workspace sources of the SDK, the server and the subnet on 2026-10-06.
+These details were checked against the workspace sources of the SDK, the server and the subnet on 2026-10-06, including the network consent changes on their `fix/network-wallet-consent` branches and the extender settings on sdk `fix/provide-extender-default`.

@@ -24,6 +24,18 @@ func TestApiOrigin(t *testing.T) {
 	}
 }
 
+func TestJwtNetworkId(t *testing.T) {
+	if err := checkJwtNetworkId(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNetworkChallengeAndAccept(t *testing.T) {
+	if err := checkNetworkChallengeAndAccept(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestChallengeAndAccept(t *testing.T) {
 	if err := checkChallengeAndAccept(); err != nil {
 		t.Fatal(err)

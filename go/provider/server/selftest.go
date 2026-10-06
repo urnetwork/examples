@@ -1,10 +1,12 @@
 // The credential-free self-test: ss58 decoding, consent checks, signature
-// form, and the challenge, accept and show requests against a mock api. No
-// network or credentials are used.
+// form, the network JWT claim, and the network and per-provider challenge,
+// accept and show requests against a mock api. No network or credentials are
+// used.
 package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +25,8 @@ const selfTestAliceKeyHex = "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5
 const selfTestBobSs58 = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
 
 const selfTestClientId = "11111111-1111-1111-1111-111111111111"
+
+const selfTestNetworkId = "99999999-9999-9999-9999-999999999999"
 
 // One request seen by the mock api.
 type selfTestRequest struct {
@@ -82,12 +86,46 @@ func selfTestConsentMessage(clientId string, coldkeyHex string, fromEpoch uint64
 	return consentPrefix + string(statement)
 }
 
+// A network consent message in the server's form. extra fields are added to
+// the statement, to build messages the tool must refuse.
+func selfTestNetworkConsentMessage(networkId string, coldkeyHex string, fromEpoch uint64, throughEpoch uint64, extra map[string]any) string {
+	var networkIdBytes [16]byte
+	networkIdRaw, _ := hex.DecodeString(strings.ReplaceAll(networkId, "-", ""))
+	copy(networkIdBytes[:], networkIdRaw)
+	var coldkey [32]byte
+	coldkeyRaw, _ := hex.DecodeString(coldkeyHex)
+	copy(coldkey[:], coldkeyRaw)
+	fields := map[string]any{
+		"schema":        "urnetwork-network-wallet-mapping-consent-v1",
+		"scope":         "network",
+		"network_id":    networkIdBytes,
+		"coldkey":       coldkey,
+		"from_epoch":    fromEpoch,
+		"through_epoch": throughEpoch,
+		"issued_at":     1700000000,
+		"expires_at":    1700000300,
+	}
+	for key, value := range extra {
+		fields[key] = value
+	}
+	statement, _ := json.Marshal(fields)
+	return networkConsentPrefix + string(statement)
+}
+
+// An unsigned token with the given claims; only its claims are read.
+func selfTestJwt(claims string) string {
+	encode := base64.RawURLEncoding.EncodeToString
+	return encode([]byte(`{"alg":"none"}`)) + "." + encode([]byte(claims)) + "." + encode([]byte("signature"))
+}
+
 // Runs every check and returns the first failure.
 func runSelfTest() error {
 	checks := []func() error{
 		checkDecodeSs58,
 		checkNormalizeSignature,
 		checkApiOrigin,
+		checkJwtNetworkId,
+		checkNetworkChallengeAndAccept,
 		checkChallengeAndAccept,
 		checkRefusedConsent,
 		checkShowWallets,
@@ -147,6 +185,27 @@ func checkApiOrigin() error {
 	return nil
 }
 
+// A network JWT names its network; a client JWT, a token without a network
+// and a malformed token are refused.
+func checkJwtNetworkId() error {
+	networkId, err := jwtNetworkId(selfTestJwt(`{"network_id":"` + selfTestNetworkId + `","user_id":"22222222-2222-2222-2222-222222222222"}`))
+	if err != nil || networkId != selfTestNetworkId {
+		return fmt.Errorf("network JWT read as %q (%v)", networkId, err)
+	}
+	for _, invalid := range []string{
+		selfTestJwt(`{"network_id":"` + selfTestNetworkId + `","client_id":"` + selfTestClientId + `"}`),
+		selfTestJwt(`{"user_id":"22222222-2222-2222-2222-222222222222"}`),
+		selfTestJwt(`{"network_id":"NOT-A-UUID"}`),
+		selfTestJwt(`not json`),
+		"not-a-jwt",
+	} {
+		if _, err := jwtNetworkId(invalid); err == nil {
+			return fmt.Errorf("token %q accepted for a network consent", invalid)
+		}
+	}
+	return nil
+}
+
 // A private wallet directory for one check, and its cleanup.
 func selfTestWalletDir() (string, func(), error) {
 	walletDir, err := os.MkdirTemp("", "ur-wallet-self-test-")
@@ -161,6 +220,92 @@ func selfTestWalletDir() (string, func(), error) {
 		return "", nil, err
 	}
 	return walletDir, cleanup, nil
+}
+
+// Network challenge saves the exact network message for the network and
+// coldkey; network accept submits it without a client id.
+func checkNetworkChallengeAndAccept() error {
+	walletDir, cleanup, err := selfTestWalletDir()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	api := newSelfTestApi()
+	message := selfTestNetworkConsentMessage(selfTestNetworkId, selfTestAliceKeyHex, 101, 100+consentEpochCount, nil)
+	api.responses["GET /sn/epoch"] = []byte(`{"epoch":100,"start_block":1}`)
+	consentResponse, _ := json.Marshal(map[string]string{"message": message})
+	api.responses["POST /sn/wallet/network-consent"] = consentResponse
+	api.responses["POST /sn/wallet"] = []byte(`{"mapping_hash":"` + strings.Repeat("d", 64) + `","mapping_generation":1}`)
+	out := &bytes.Buffer{}
+	tool, err := newWalletTool(selfTestAliceSs58, walletDir, api.transport, out)
+	if err != nil {
+		return err
+	}
+	tool.networkId = selfTestNetworkId
+	if err := tool.NetworkChallenge(); err != nil {
+		return err
+	}
+	// the request names the coldkey and the next 65,536 epochs, and no client
+	var consentRequest map[string]any
+	if len(api.requests) != 2 || api.requests[1].path != "/sn/wallet/network-consent" || json.Unmarshal(api.requests[1].body, &consentRequest) != nil {
+		return errors.New("network challenge requests differ")
+	}
+	if _, named := consentRequest["client_id"]; named || consentRequest["coldkey_ss58"] != selfTestAliceSs58 || consentRequest["from_epoch"] != float64(101) || consentRequest["through_epoch"] != float64(100+consentEpochCount) {
+		return fmt.Errorf("network consent request %v", consentRequest)
+	}
+	path := filepath.Join(walletDir, networkConsentFile)
+	saved, err := readPrivateFile(path)
+	if err != nil || string(saved) != message {
+		return fmt.Errorf("saved network consent message differs (%v)", err)
+	}
+	signature := strings.Repeat("cd", 64)
+	if err := tool.NetworkAccept(signature); err != nil {
+		return err
+	}
+	var acceptRequest map[string]any
+	if len(api.requests) != 3 || api.requests[2].path != "/sn/wallet" || json.Unmarshal(api.requests[2].body, &acceptRequest) != nil {
+		return errors.New("network accept requests differ")
+	}
+	if _, named := acceptRequest["client_id"]; named || acceptRequest["message"] != message || acceptRequest["signature"] != "0x"+signature || acceptRequest["coldkey_ss58"] != selfTestAliceSs58 {
+		return fmt.Errorf("network accept request %v", acceptRequest)
+	}
+	if !strings.Contains(out.String(), "mapped network "+selfTestNetworkId) {
+		return fmt.Errorf("network accept output %q", out.String())
+	}
+	if _, err := readPrivateFile(filepath.Join(walletDir, networkConsentReceiptFile)); err != nil {
+		return fmt.Errorf("network receipt not saved (%v)", err)
+	}
+	// a message for another network, coldkey or interval, a per-provider
+	// message, a client field and another scope are refused before saving
+	providerMessage := selfTestConsentMessage(selfTestClientId, selfTestAliceKeyHex, 101, 100+consentEpochCount)
+	for _, wrongMessage := range []string{
+		selfTestNetworkConsentMessage("88888888-8888-8888-8888-888888888888", selfTestAliceKeyHex, 101, 100+consentEpochCount, nil),
+		selfTestNetworkConsentMessage(selfTestNetworkId, strings.Repeat("0", 64), 101, 100+consentEpochCount, nil),
+		selfTestNetworkConsentMessage(selfTestNetworkId, selfTestAliceKeyHex, 102, 101+consentEpochCount, nil),
+		selfTestNetworkConsentMessage(selfTestNetworkId, selfTestAliceKeyHex, 101, 100+consentEpochCount, map[string]any{"client_id": [16]byte{1}}),
+		selfTestNetworkConsentMessage(selfTestNetworkId, selfTestAliceKeyHex, 101, 100+consentEpochCount, map[string]any{"scope": "provider"}),
+		providerMessage,
+		networkConsentPrefix + strings.TrimPrefix(providerMessage, consentPrefix),
+	} {
+		response, _ := json.Marshal(map[string]string{"message": wrongMessage})
+		api.responses["POST /sn/wallet/network-consent"] = response
+		if err := tool.NetworkChallenge(); err == nil {
+			return fmt.Errorf("a network consent message that differs from the request was accepted: %q", wrongMessage)
+		}
+	}
+	saved, err = readPrivateFile(path)
+	if err != nil || string(saved) != message {
+		return errors.New("a refused network message replaced the saved one")
+	}
+	// the per-provider accept never submits a network message
+	if err := writePrivateFile(tool.consentPath(selfTestClientId), []byte(message)); err != nil {
+		return err
+	}
+	requests := len(api.requests)
+	if err := tool.Accept(selfTestClientId, signature); err == nil || !strings.Contains(err.Error(), "provider wallet mapping line") || len(api.requests) != requests {
+		return fmt.Errorf("a network consent was submitted as a per-provider consent (%v)", err)
+	}
+	return nil
 }
 
 // Challenge saves the exact message for the requested client and coldkey; accept submits it.
@@ -291,6 +436,13 @@ func checkShowWallets() error {
 	expected := "network wallet: " + selfTestAliceSs58 + "\nprovider client " + selfTestClientId + ": " + selfTestAliceSs58 + "\n"
 	if out.String() != expected {
 		return fmt.Errorf("show output %q", out.String())
+	}
+	// consents carry their scope and epochs
+	api.responses["GET /sn/wallet"] = []byte(`{"wallets":[{"coldkey_ss58":"` + selfTestAliceSs58 + `","consent_scope":"network","from_epoch":101,"through_epoch":65636,"set_at_millis":1},{"coldkey_ss58":"` + selfTestBobSs58 + `","client_id":"` + selfTestClientId + `","consent_scope":"provider","from_epoch":102,"through_epoch":65637,"set_at_millis":2}]}`)
+	out.Reset()
+	expected = "network consent: " + selfTestAliceSs58 + " (epochs 101-65636, every provider client without its own consent)\nprovider client " + selfTestClientId + ": " + selfTestBobSs58 + " (consent, epochs 102-65637)\n"
+	if err := showWallets(api.transport, out); err != nil || out.String() != expected {
+		return fmt.Errorf("consent show output %q (%v)", out.String(), err)
 	}
 	api.responses["GET /sn/wallet"] = []byte(`{"wallets":[]}`)
 	out.Reset()
