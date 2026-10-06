@@ -1,0 +1,43 @@
+<!doctype html>
+<!-- The provider window: the consent disclaimer next to the start control, the four status fields and start at
+login. The Rust core formats every value; main.js only shows them. No bundler: Tauri serves this folder as is. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>URnetwork provider</title>
+    <link rel="stylesheet" href="style.css">
+    <script type="module" src="main.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>URnetwork provider</h1>
+      <section class="consent">
+        <p id="consent-disclaimer">Consent disclaimer: an app that integrates a URnetwork provider must collect the user's consent before it provides.<br>
+Providing shares the user's internet connection: other URnetwork users' traffic exits through the user's device and IP address.<br>
+This example starts providing without asking, because the consent screen belongs to your app.</p>
+        <div class="controls">
+          <button id="start" type="button">Start providing</button>
+          <button id="stop" type="button" disabled>Stop providing</button>
+        </div>
+        <label class="start-at-login">
+          <input id="start-at-login" type="checkbox">
+          Start at login and keep providing in the background
+        </label>
+      </section>
+      <dl class="fields">
+        <dt>Status</dt>
+        <dd id="status">stopped</dd>
+        <dt>Clients served</dt>
+        <dd id="clients-served">0</dd>
+        <dt>Data provided</dt>
+        <dd id="data-provided">0 B</dd>
+        <dt>Payout wallet</dt>
+        <dd id="payout-wallet">checking</dd>
+      </dl>
+      <p id="message" class="message" hidden></p>
+      <p class="state-dir">Installation state: <code id="state-dir"></code></p>
+      <p class="note">Closing this window keeps providing; use Quit in the tray icon's menu to stop and exit.</p>
+    </main>
+  </body>
+</html>
