@@ -65,6 +65,7 @@ func (self *fixedProviderStatusSource) GetClientLimitStatus() *sdk.ClientLimitSt
 	return self.clientLimitStatus
 }
 
+// Only an unset or "public" URNETWORK_COMPANION_PROVIDE selects a mode.
 func TestCompanionMode(t *testing.T) {
 	cases := []struct {
 		provide string
@@ -90,6 +91,7 @@ func TestCompanionMode(t *testing.T) {
 	}
 }
 
+// Provider mode reads its settings with the defaults and refuses invalid ones.
 func TestProviderCompanionSettings(t *testing.T) {
 	stateDir := filepath.Join(string(filepath.Separator), "private", "provider-state")
 	getenv := func(environment map[string]string) func(string) string {
@@ -139,6 +141,7 @@ func TestProviderCompanionSettings(t *testing.T) {
 	}
 }
 
+// The disclaimer is the contract's exact text.
 func TestConsentDisclaimer(t *testing.T) {
 	digest := sha256.Sum256([]byte(consentDisclaimer))
 	if hex.EncodeToString(digest[:]) != consentDisclaimerSha256 {
@@ -146,6 +149,7 @@ func TestConsentDisclaimer(t *testing.T) {
 	}
 }
 
+// Only a JWT with a valid client_id claim is a client credential.
 func TestClientJwtClaims(t *testing.T) {
 	clientId, err := parseClientJwtClientId(testJwt(`{"client_id":"11111111-1111-1111-1111-111111111111","network_id":"22222222-2222-2222-2222-222222222222"}`))
 	if err != nil || clientId != "11111111-1111-1111-1111-111111111111" {
@@ -166,6 +170,8 @@ func TestClientJwtClaims(t *testing.T) {
 	}
 }
 
+// State files are private, replaced atomically, created once and bound to
+// their client.
 func TestStateFiles(t *testing.T) {
 	stateDir := testStateDir(t)
 
@@ -273,6 +279,8 @@ func TestStateFiles(t *testing.T) {
 	}
 }
 
+// A missing or incomplete installation state is refused; a first run loads
+// without an identity and a second start keeps the instance id.
 func TestProviderConfig(t *testing.T) {
 	if _, err := loadProviderConfig(""); err == nil {
 		t.Fatal("a missing state directory was accepted")
@@ -309,6 +317,8 @@ func TestProviderConfig(t *testing.T) {
 	}
 }
 
+// /provider-status needs the token and serves the device values, including
+// the client limit hold, while the provider is not connected.
 func TestProviderStatusRoute(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -368,6 +378,7 @@ func TestProviderStatusRoute(t *testing.T) {
 	}
 }
 
+// /device-rpc needs the token and answers 503 until the device rpc starts.
 func TestDeviceRpcRouteWaitsForProvider(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -395,6 +406,8 @@ func TestDeviceRpcRouteWaitsForProvider(t *testing.T) {
 	}
 }
 
+// The run stops when the parent app closes the companion's standard input,
+// and not before.
 func TestStopOnInputClose(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -420,6 +433,7 @@ func TestStopOnInputClose(t *testing.T) {
 	}
 }
 
+// Usage and configuration errors exit with 78 before any device is created.
 func TestProviderExitCodes(t *testing.T) {
 	if code := runProvider([]string{"--unknown"}); code != exitConfig {
 		t.Fatalf("usage error exit code %d, want %d", code, exitConfig)
