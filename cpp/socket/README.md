@@ -1,6 +1,6 @@
 # C++ sockets, Boost.Beast and CPR
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [main.cpp](main.cpp) demonstrates a local Device with verified TLS, UDP and DTLS. [ur_stream.hpp](ur_stream.hpp) implements Beast's synchronous read/write stream contract over the SDK's C ABI, preserving partial I/O, EOF and close.
 
