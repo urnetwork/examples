@@ -1,5 +1,9 @@
 // The native companion owns the connected DeviceLocal. JavaScript owns each
 // application's codec, receive callback, peer selection, and acknowledgments.
+//
+// URNETWORK_COMPANION_PROVIDE selects the mode: unset, this is the messaging
+// companion below; "public", it is the provider companion of the provider
+// examples (provider.go).
 package main
 
 import (
@@ -25,6 +29,30 @@ func allowedRequest(r *http.Request, token, origin string) bool {
 	return len(token) >= 32 && subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1 && (r.Header.Get("Origin") == "" || r.Header.Get("Origin") == origin)
 }
 
+// An allowed browser Origin must be an exact http(s) origin; "" allows none.
+func checkCompanionOrigin(origin string) error {
+	if origin == "" {
+		return nil
+	}
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return errors.New("URNETWORK_COMPANION_ORIGIN must be an exact http(s) origin without path")
+	}
+	return nil
+}
+
+// The numeric loopback address to bind, 127.0.0.1:8787 when unset.
+func companionAddress(address string) (string, error) {
+	if address == "" {
+		address = "127.0.0.1:8787"
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+		return "", errors.New("URNETWORK_COMPANION_ADDRESS must bind a numeric loopback address")
+	}
+	return address, nil
+}
+
 func run() error {
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
 		version := sdk.Version
@@ -44,19 +72,12 @@ func run() error {
 		return err
 	}
 	origin := os.Getenv("URNETWORK_COMPANION_ORIGIN")
-	if origin != "" {
-		u, err := url.Parse(origin)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-			return errors.New("URNETWORK_COMPANION_ORIGIN must be an exact http(s) origin without path")
-		}
+	if err := checkCompanionOrigin(origin); err != nil {
+		return err
 	}
-	address := os.Getenv("URNETWORK_COMPANION_ADDRESS")
-	if address == "" {
-		address = "127.0.0.1:8787"
-	}
-	host, _, err := net.SplitHostPort(address)
-	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
-		return errors.New("URNETWORK_COMPANION_ADDRESS must bind a numeric loopback address")
+	address, err := companionAddress(os.Getenv("URNETWORK_COMPANION_ADDRESS"))
+	if err != nil {
+		return err
 	}
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
@@ -129,7 +150,18 @@ func run() error {
 	return err
 }
 
+// Runs the mode that URNETWORK_COMPANION_PROVIDE selects. Messaging errors
+// exit with 1; provider mode exits with the provider exit codes (provider.go),
+// and so does a mode that is not one of the two.
 func main() {
+	mode, err := parseCompanionMode(os.Getenv("URNETWORK_COMPANION_PROVIDE"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(exitConfig)
+	}
+	if mode == companionModeProvider {
+		os.Exit(runProvider(os.Args[1:]))
+	}
 	if err := run(); err != nil {
 		log.Print(err)
 		os.Exit(1)
