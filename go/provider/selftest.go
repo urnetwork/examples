@@ -28,7 +28,9 @@ func runSelfTest() error {
 	checks := []func() error{
 		checkConsentDisclaimer,
 		checkFormatByteCount,
+		checkStatusText,
 		checkStatusLines,
+		checkStatusKey,
 		checkProviderState,
 		checkPayoutWalletScope,
 		checkClientsServed,
@@ -76,6 +78,32 @@ func checkFormatByteCount() error {
 	return nil
 }
 
+// The client limit status names the sdk's retry time in UTC, rounded up to the
+// next whole minute; other states never show it.
+func checkStatusText() error {
+	cases := []struct {
+		state                string
+		clientLimitRetryTime int64
+		text                 string
+	}{
+		// 2026-10-06 19:05:00.000 UTC, exactly on a minute
+		{state: providerStateClientLimit, clientLimitRetryTime: 1791313500000, text: "client limit, retry at 19:05 UTC"},
+		// 19:04:00.001 rounds up, so the shown time is never before the retry
+		{state: providerStateClientLimit, clientLimitRetryTime: 1791313440001, text: "client limit, retry at 19:05 UTC"},
+		// no retry time
+		{state: providerStateClientLimit, clientLimitRetryTime: 0, text: "client limit"},
+		// 23:59:00.001 rolls over the hour and the day
+		{state: providerStateClientLimit, clientLimitRetryTime: 1791331140001, text: "client limit, retry at 00:00 UTC"},
+		{state: providerStateStarting, clientLimitRetryTime: 1791313500000, text: "starting"},
+	}
+	for _, c := range cases {
+		if text := providerStatusText(c.state, c.clientLimitRetryTime); text != c.text {
+			return fmt.Errorf("status text %q for %q retrying at %d, want %q", text, c.state, c.clientLimitRetryTime, c.text)
+		}
+	}
+	return nil
+}
+
 // The status line matches the contract's golden lines.
 func checkStatusLines() error {
 	cases := []struct {
@@ -91,12 +119,20 @@ func checkStatusLines() error {
 			line:   "status: providing | clients served: 3 | data provided: 12.4 MiB | payout wallet: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY (network)",
 		},
 		{
+			status: providerStatus{state: providerStateProviding, clientsServed: 3, dataProvidedByteCount: 13002342, payoutWallet: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", payoutWalletScope: payoutWalletScopeHotkey},
+			line:   "status: providing | clients served: 3 | data provided: 12.4 MiB | payout wallet: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY (hotkey)",
+		},
+		{
 			status: providerStatus{state: providerStatePaused, clientsServed: clientsServedLimit, clientsServedAtLimit: true, dataProvidedByteCount: 1536, payoutWallet: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", payoutWalletScope: payoutWalletScopeProvider},
 			line:   "status: paused | clients served: 100000+ | data provided: 1.5 KiB | payout wallet: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY (this provider)",
 		},
 		{
 			status: providerStatus{state: providerStateStopped, payoutWallet: payoutWalletNotSet},
 			line:   "status: stopped | clients served: 0 | data provided: 0 B | payout wallet: not set",
+		},
+		{
+			status: providerStatus{state: providerStateClientLimit, clientLimitRetryTime: 1791313500000, payoutWallet: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", payoutWalletScope: payoutWalletScopeNetwork},
+			line:   "status: client limit, retry at 19:05 UTC | clients served: 0 | data provided: 0 B | payout wallet: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY (network)",
 		},
 	}
 	for _, c := range cases {
@@ -107,10 +143,30 @@ func checkStatusLines() error {
 	return nil
 }
 
-// The providing state follows the provide mode, pause, enable and connected rules.
+// A change of the status text prints a line at once, including a new client
+// limit retry time; the data counter alone does not.
+func checkStatusKey() error {
+	status := providerStatus{state: providerStateClientLimit, clientLimitRetryTime: 1791313500000, payoutWallet: payoutWalletChecking}
+	// 19:25 UTC
+	retried := status
+	retried.clientLimitRetryTime = 1791314700000
+	if status.key() == retried.key() {
+		return errors.New("a new client limit retry time does not print a status line")
+	}
+	counted := status
+	counted.dataProvidedByteCount = 1536
+	if status.key() != counted.key() {
+		return errors.New("the data counter alone prints a status line")
+	}
+	return nil
+}
+
+// The providing state follows the provide mode, client limit, pause, enable
+// and connected rules, in that order.
 func checkProviderState() error {
 	cases := []struct {
 		provideMode       int
+		clientLimitStatus string
 		providePaused     bool
 		provideEnabled    bool
 		providerConnected bool
@@ -122,29 +178,41 @@ func checkProviderState() error {
 		{provideMode: sdk.ProvideModePublic, provideEnabled: false, providerConnected: true, state: providerStateStarting},
 		{provideMode: sdk.ProvideModePublic, provideEnabled: true, providerConnected: true, state: providerStateProviding},
 		{provideMode: sdk.ProvideModePublic, providePaused: true, provideEnabled: true, providerConnected: true, state: providerStatePaused},
+		// the client limit comes after stopped and before every other state
+		{provideMode: sdk.ProvideModeNetwork, clientLimitStatus: sdk.ClientLimitStatusExceeded, provideEnabled: true, providerConnected: true, state: providerStateStopped},
+		{provideMode: sdk.ProvideModePublic, clientLimitStatus: sdk.ClientLimitStatusExceeded, providePaused: true, provideEnabled: true, providerConnected: true, state: providerStateClientLimit},
+		{provideMode: sdk.ProvideModePublic, clientLimitStatus: sdk.ClientLimitStatusExceeded, provideEnabled: false, providerConnected: false, state: providerStateClientLimit},
+		{provideMode: sdk.ProvideModePublic, clientLimitStatus: sdk.ClientLimitStatusNone, providePaused: true, provideEnabled: true, providerConnected: true, state: providerStatePaused},
 	}
 	for _, c := range cases {
-		if state := providerState(c.provideMode, c.providePaused, c.provideEnabled, c.providerConnected); state != c.state {
+		if state := providerState(c.provideMode, c.clientLimitStatus, c.providePaused, c.provideEnabled, c.providerConnected); state != c.state {
 			return fmt.Errorf("provider state %q for %+v", state, c)
 		}
 	}
 	return nil
 }
 
-// The payout wallet is labeled by the owner of its mapping.
+// The payout wallet is labeled by its consent scope first, then by the owner
+// of its mapping.
 func checkPayoutWalletScope() error {
 	clientId := "11111111-1111-1111-1111-111111111111"
 	cases := []struct {
-		walletClientId string
-		scope          string
+		walletConsentScope string
+		walletClientId     string
+		scope              string
 	}{
-		{walletClientId: "", scope: payoutWalletScopeNetwork},
-		{walletClientId: clientId, scope: payoutWalletScopeProvider},
-		{walletClientId: "22222222-2222-2222-2222-222222222222", scope: payoutWalletScopeAnotherProvider},
+		// a hotkey delegation is network-level but not the network's wallet
+		{walletConsentScope: snWalletConsentScopeHotkey, walletClientId: "", scope: payoutWalletScopeHotkey},
+		{walletConsentScope: snWalletConsentScopeHotkey, walletClientId: clientId, scope: payoutWalletScopeHotkey},
+		{walletConsentScope: sdk.SnWalletConsentScopeNetwork, walletClientId: "", scope: payoutWalletScopeNetwork},
+		{walletConsentScope: "", walletClientId: "", scope: payoutWalletScopeNetwork},
+		{walletConsentScope: sdk.SnWalletConsentScopeProvider, walletClientId: clientId, scope: payoutWalletScopeProvider},
+		{walletConsentScope: "", walletClientId: clientId, scope: payoutWalletScopeProvider},
+		{walletConsentScope: sdk.SnWalletConsentScopeProvider, walletClientId: "22222222-2222-2222-2222-222222222222", scope: payoutWalletScopeAnotherProvider},
 	}
 	for _, c := range cases {
-		if scope := payoutWalletScope(c.walletClientId, clientId); scope != c.scope {
-			return fmt.Errorf("payout wallet scope %q for %q", scope, c.walletClientId)
+		if scope := payoutWalletScope(c.walletConsentScope, c.walletClientId, clientId); scope != c.scope {
+			return fmt.Errorf("payout wallet scope %q for consent scope %q and client %q, want %q", scope, c.walletConsentScope, c.walletClientId, c.scope)
 		}
 	}
 	return nil
@@ -319,6 +387,10 @@ func checkStateFiles() error {
 	other, err := loadProviderIdentity(stateDir, "22222222-2222-2222-2222-222222222222")
 	if err != nil || other != nil {
 		return fmt.Errorf("another client's identity was used (%v)", err)
+	}
+	// without an identity the device gets no key material and makes a new identity
+	if keyMaterial := other.keyMaterial(); keyMaterial != nil {
+		return errors.New("a first run passes key material")
 	}
 	if err := writePrivateFile(filepath.Join(stateDir, identityFileName), []byte(`{"version":1}`)); err != nil {
 		return err

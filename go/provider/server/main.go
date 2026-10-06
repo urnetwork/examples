@@ -1,24 +1,27 @@
-// SERVER ONLY: the backend tool that maps the developer's provider clients to
-// the fixed Bittensor payout coldkey through the signed consent flow
-// (PROVIDER_CONTRACT.md, "Payout wallet mapping"). A network consent covers
-// every provider client of the network with one signature; a per-provider
-// consent covers one client and takes precedence over the network consent:
+// SERVER ONLY: the backend tool that provisions the developer's provider
+// installs (provision.go) and maps them to the fixed Bittensor payout coldkey
+// through the signed consent flow (PROVIDER_CONTRACT.md, "Payout wallet
+// mapping"). A network consent covers every provider client of the network
+// with one signature; a per-provider consent covers one client and takes
+// precedence over the network consent:
 //
-//	wallet network-challenge                   POST /sn/wallet/network-consent; saves the exact message to sign
-//	wallet network-accept <signature-hex>      POST /sn/wallet with the saved network message and its signature
-//	wallet challenge <client-id>               POST /sn/wallet/consent; saves the exact message to sign
-//	wallet accept <client-id> <signature-hex>  POST /sn/wallet with the saved message and its signature
-//	wallet show                                GET /sn/wallet; the network's mapped wallets
-//	wallet --self-test                         credential-free checks
+//	wallet provision <installation-key> <client-jwt-file>  POST /network/auth-client; writes the installation's client JWT
+//	wallet network-challenge                               POST /sn/wallet/network-consent; saves the exact message to sign
+//	wallet network-accept <signature-hex>                  POST /sn/wallet with the saved network message and its signature
+//	wallet challenge <client-id>                           POST /sn/wallet/consent; saves the exact message to sign
+//	wallet accept <client-id> <signature-hex>              POST /sn/wallet with the saved message and its signature
+//	wallet show                                            GET /sn/wallet; the network's mapped wallets
+//	wallet --self-test                                     credential-free checks
 //
 // The coldkey owner signs the saved message offline with their own wallet
 // tool. The coldkey's secret never reaches this tool, the backend or the app.
 //
 // Settings: URNETWORK_ROOT_JWT (the network credential, backend only),
-// URNETWORK_PAYOUT_COLDKEY (the coldkey's ss58 address), URNETWORK_WALLET_DIR
-// (an absolute, existing, private directory for the consent messages) and
-// optionally URNETWORK_API_URL (default https://api.bringyour.com). The root
-// JWT is never printed.
+// URNETWORK_PAYOUT_COLDKEY (the coldkey's ss58 address, not needed to
+// provision), URNETWORK_WALLET_DIR (an absolute, existing, private directory
+// for the consent messages and the provider map providers.json) and optionally
+// URNETWORK_API_URL (default https://api.bringyour.com). The root JWT and the
+// client JWTs are never printed.
 package main
 
 import (
@@ -56,7 +59,7 @@ const networkConsentFile = "network-consent.txt"
 const networkConsentReceiptFile = "network-consent.accepted.json"
 
 // the command forms
-const usage = "usage: wallet network-challenge | network-accept <signature-hex> | challenge <client-id> | accept <client-id> <signature-hex> | show | --self-test"
+const usage = "usage: wallet provision <installation-key> <client-jwt-file> | network-challenge | network-accept <signature-hex> | challenge <client-id> | accept <client-id> <signature-hex> | show | --self-test"
 
 // A consent covers at most 65,536 epochs (about 1,256 years of 7-day epochs).
 const consentEpochCount = 65536
@@ -158,6 +161,17 @@ func run(args []string) error {
 	if args[0] == "show" && len(args) == 1 {
 		return showWallets(transport, os.Stdout)
 	}
+	if args[0] == "provision" && len(args) == 3 {
+		// provider installs are created with the network credential only
+		if _, err := jwtNetworkId(rootJwt); err != nil {
+			return err
+		}
+		provisioner, err := newProviderProvisioner(os.Getenv("URNETWORK_WALLET_DIR"), transport, os.Stdout)
+		if err != nil {
+			return err
+		}
+		return provisioner.Provision(args[1], args[2])
+	}
 	tool, err := newWalletTool(os.Getenv("URNETWORK_PAYOUT_COLDKEY"), os.Getenv("URNETWORK_WALLET_DIR"), transport, os.Stdout)
 	if err != nil {
 		return err
@@ -182,31 +196,56 @@ func run(args []string) error {
 }
 
 // The network_id claim of a network JWT. The claims are read only to check
-// the consent message; the server verifies the token. A client JWT (with a
-// client_id claim) cannot request a network consent.
+// the consent message and the credential's kind; the server verifies the
+// token. A client JWT (with a client_id claim) can neither request a network
+// consent nor provision clients.
 func jwtNetworkId(jwt string) (string, error) {
-	parts := strings.Split(jwt, ".")
-	if len(parts) != 3 {
-		return "", errors.New("URNETWORK_ROOT_JWT is not a JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
-	if err != nil {
-		return "", errors.New("URNETWORK_ROOT_JWT is not a JWT")
-	}
 	var claims struct {
 		NetworkId string  `json:"network_id"`
 		ClientId  *string `json:"client_id"`
 	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
+	if err := decodeJwtClaims(jwt, &claims); err != nil {
 		return "", errors.New("URNETWORK_ROOT_JWT is not a JWT")
 	}
 	if claims.ClientId != nil {
-		return "", errors.New("URNETWORK_ROOT_JWT is a client JWT; a network consent needs the network JWT")
+		return "", errors.New("URNETWORK_ROOT_JWT is a client JWT; this command needs the network JWT")
 	}
 	if !uuidPattern.MatchString(claims.NetworkId) {
 		return "", errors.New("URNETWORK_ROOT_JWT has no network_id claim")
 	}
 	return claims.NetworkId, nil
+}
+
+// Decodes the claims of a JWT into claims, without verifying the token.
+func decodeJwtClaims(jwt string, claims any) error {
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		return errors.New("not a JWT")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return errors.New("not a JWT")
+	}
+	if err := json.Unmarshal(payload, claims); err != nil {
+		return errors.New("not a JWT")
+	}
+	return nil
+}
+
+// The wallet directory must be absolute, existing and, on POSIX, private to
+// its owner. It holds the consent messages, their receipts and providers.json.
+func checkWalletDir(walletDir string) error {
+	if !filepath.IsAbs(walletDir) {
+		return errors.New("set URNETWORK_WALLET_DIR to an absolute, existing, private directory")
+	}
+	info, err := os.Stat(walletDir)
+	if err != nil || !info.IsDir() {
+		return errors.New("URNETWORK_WALLET_DIR must be an existing directory")
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return errors.New("URNETWORK_WALLET_DIR must be private to its owner (chmod 700)")
+	}
+	return nil
 }
 
 // Validates the coldkey and the private consent directory.
@@ -215,15 +254,8 @@ func newWalletTool(coldkeySs58 string, walletDir string, transport apiTransport,
 	if err != nil {
 		return nil, fmt.Errorf("URNETWORK_PAYOUT_COLDKEY: %w", err)
 	}
-	if !filepath.IsAbs(walletDir) {
-		return nil, errors.New("set URNETWORK_WALLET_DIR to an absolute, existing, private directory")
-	}
-	info, err := os.Stat(walletDir)
-	if err != nil || !info.IsDir() {
-		return nil, errors.New("URNETWORK_WALLET_DIR must be an existing directory")
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, errors.New("URNETWORK_WALLET_DIR must be private to its owner (chmod 700)")
+	if err := checkWalletDir(walletDir); err != nil {
+		return nil, err
 	}
 	return &walletTool{
 		coldkeySs58: coldkeySs58,

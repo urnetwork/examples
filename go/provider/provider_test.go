@@ -18,8 +18,20 @@ func TestFormatByteCount(t *testing.T) {
 	}
 }
 
+func TestStatusText(t *testing.T) {
+	if err := checkStatusText(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStatusLines(t *testing.T) {
 	if err := checkStatusLines(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStatusKey(t *testing.T) {
+	if err := checkStatusKey(); err != nil {
 		t.Fatal(err)
 	}
 }

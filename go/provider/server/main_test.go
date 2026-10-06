@@ -30,6 +30,30 @@ func TestJwtNetworkId(t *testing.T) {
 	}
 }
 
+func TestProviderMap(t *testing.T) {
+	if err := checkProviderMap(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProvision(t *testing.T) {
+	if err := checkProvision(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProvisionDeactivatedClient(t *testing.T) {
+	if err := checkProvisionDeactivatedClient(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProvisionRefusals(t *testing.T) {
+	if err := checkProvisionRefusals(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNetworkChallengeAndAccept(t *testing.T) {
 	if err := checkNetworkChallengeAndAccept(); err != nil {
 		t.Fatal(err)

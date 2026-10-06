@@ -253,8 +253,13 @@ func newProviderIdentity(clientId string, keyMaterial *sdk.DeviceLocalKeyMateria
 	}
 }
 
-// The key material that recreates the device's identity.
+// The key material that recreates the device's identity. nil without an
+// identity (the first run, or another client's identity): the device then
+// makes a new identity, which the app saves.
 func (self *providerIdentity) keyMaterial() *sdk.DeviceLocalKeyMaterial {
+	if self == nil {
+		return nil
+	}
 	keyMaterial := sdk.NewDeviceLocalKeyMaterial(
 		self.ClientKeySeed,
 		self.ProvideTlsCertificatePem,

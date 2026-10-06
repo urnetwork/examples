@@ -28,6 +28,14 @@ const walletSyncInterval = 10 * time.Minute
 const deviceDescription = "Go provider example"
 const deviceSpec = "urnetwork-examples/go-provider"
 
+// The provider extender role's two device settings (PROVIDER_CONTRACT.md,
+// "Extender role"), passed explicitly and both on. provideExtenderEnabled is
+// the embedder's hard switch: false means the role never runs.
+// defaultProvideExtender is the setting the device uses until the user sets
+// one: false turns the default off.
+const provideExtenderEnabled = true
+const defaultProvideExtender = true
+
 // One run of the provider. Created by newProviderSession, which starts
 // providing; Run shows the status; Close stops providing.
 type providerSession struct {
@@ -48,8 +56,10 @@ type providerSession struct {
 	payoutWalletScope string
 }
 
-// Creates the provider device with the installation's identity, saves a new
-// identity on first run, and starts providing publicly.
+// Creates the provider device with the installation's identity and the
+// extender role's settings on, saves a new identity on first run, and starts
+// providing publicly. The sdk declares provide intent on the device's platform
+// connections by itself while the provide mode is public.
 func newProviderSession(config *providerConfig) (*providerSession, error) {
 	instanceId, err := sdk.ParseId(config.instanceId)
 	if err != nil {
@@ -61,12 +71,20 @@ func newProviderSession(config *providerConfig) (*providerSession, error) {
 		&sdk.NetworkSpaceValues{MigrationHostName: "bringyour.com"},
 	)
 	space.GetApi().SetByJwt(config.clientJwt)
-	var device *sdk.DeviceLocal
-	if config.identity != nil {
-		device, err = sdk.NewDeviceLocalWithKeyMaterial(space, config.clientJwt, deviceDescription, deviceSpec, "1", instanceId, false, config.identity.keyMaterial())
-	} else {
-		device, err = sdk.NewDeviceLocalWithDefaults(space, config.clientJwt, deviceDescription, deviceSpec, "1", instanceId, false)
-	}
+	// one call for both runs: on first run there is no identity, the key
+	// material is nil and the device makes a new identity, saved below
+	device, err := sdk.NewDeviceLocalWithProvideExtender(
+		space,
+		config.clientJwt,
+		deviceDescription,
+		deviceSpec,
+		"1",
+		instanceId,
+		false,
+		config.identity.keyMaterial(),
+		provideExtenderEnabled,
+		defaultProvideExtender,
+	)
 	if err != nil {
 		manager.Close()
 		return nil, err
@@ -108,11 +126,15 @@ func newProviderSession(config *providerConfig) (*providerSession, error) {
 // Reads the status from the device getters and the listener state.
 func (self *providerSession) Status() *providerStatus {
 	device := self.device
+	// never nil: "client_limit_exceeded" with the hold's end in RetryTime while
+	// the platform holds this client off for its network's client limit
+	clientLimitStatus := device.GetClientLimitStatus()
 	// GetProviderReady also waits for processed client key registration, which
 	// default device settings do not enable, so the connected carrier is the
 	// readiness signal here
 	state := providerState(
 		device.GetProvideMode(),
+		clientLimitStatus.Status,
 		device.GetProvidePaused(),
 		device.GetProvideEnabled(),
 		device.GetProviderConnected(),
@@ -125,6 +147,7 @@ func (self *providerSession) Status() *providerStatus {
 	clientsServed, clientsServedAtLimit := self.clientsServed.Count()
 	status := &providerStatus{
 		state:                 state,
+		clientLimitRetryTime:  clientLimitStatus.RetryTime,
 		clientsServed:         clientsServed,
 		clientsServedAtLimit:  clientsServedAtLimit,
 		dataProvidedByteCount: dataProvidedByteCount,
@@ -212,7 +235,8 @@ func (self *providerSession) walletSynced(result *sdk.SnGetWalletResult, err err
 		return
 	}
 	// the sdk caches the effective wallet before the callback: this client's
-	// own mapping, else the network's wallet
+	// own consent, else the network consent, else (with hotkey delegations)
+	// the network's hotkey entry, else a non-consent wallet
 	wallet := self.device.GetSnWallet()
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -222,7 +246,7 @@ func (self *providerSession) walletSynced(result *sdk.SnGetWalletResult, err err
 		return
 	}
 	self.payoutWallet = wallet.ColdkeySs58
-	self.payoutWalletScope = payoutWalletScope(wallet.ClientId, self.config.clientId)
+	self.payoutWalletScope = payoutWalletScope(wallet.ConsentScope, wallet.ClientId, self.config.clientId)
 }
 
 // Saves refreshed client credentials.
