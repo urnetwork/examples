@@ -4,7 +4,10 @@
 // (PROVIDER_CONTRACT.md, "Platform notes", Electron). The window runs
 // sandboxed with context isolation and no Node integration; its preload
 // script is its only bridge. Closing the window keeps providing in the tray;
-// Quit stops providing first.
+// Quit stops providing first. Electron loads this module as its main script
+// and its top-level code starts the app, with no import.meta.main check:
+// Electron 44 reads import.meta.main as false in its main script, and Node
+// before 24.2 does not define it.
 
 import {BrowserWindow, Menu, Tray, app, dialog, ipcMain, nativeImage, session} from "electron";
 import fs from "node:fs";
@@ -13,12 +16,10 @@ import {fileURLToPath} from "node:url";
 import {StartAtLogin} from "./autostart.mjs";
 import {CompanionProcess, companionPath} from "./companion.mjs";
 import {ProviderController} from "./controller.mjs";
-import {openCompanionDevice} from "./device.mjs";
 import {trayIconBitmap} from "./icon.mjs";
 import {ipcChannels} from "./ipc.mjs";
 import {loadClientJwt, providerStateDir} from "./state.mjs";
-import {ClientsServed} from "./status.mjs";
-import {PayoutWallet, defaultApiUrl} from "./wallet.mjs";
+import {PayoutWallet} from "./wallet.mjs";
 
 const appDir = path.dirname(fileURLToPath(import.meta.url));
 const productName = "URnetwork Provider";
@@ -43,7 +44,6 @@ if (app.requestSingleInstanceLock()) {
 function runApp() {
   const stateDir = providerStateDir(app.getPath("userData"));
   const startAtLogin = new StartAtLogin({app, name: productName});
-  const clientsServed = new ClientsServed();
   let window = null;
   let tray = null;
   // the status and controls the tray menu shows, so it is rebuilt only when they change
@@ -53,7 +53,6 @@ function runApp() {
 
   const controller = new ProviderController({
     stateDir,
-    clientsServed,
     startAtLogin,
     payoutWallet: new PayoutWallet({readClientJwt: () => loadClientJwt(stateDir).clientJwt}),
     startCompanion: ({env}) => new CompanionProcess({
@@ -67,18 +66,6 @@ function runApp() {
       }),
       env,
     }),
-    openDevice: async ({config, deviceRpcUrl, token}) => {
-      const {URNetwork} = await import("@urnetwork/sdk");
-      return openCompanionDevice({
-        URNetwork,
-        apiUrl: defaultApiUrl,
-        clientJwt: config.clientJwt,
-        instanceId: config.instanceId,
-        deviceRpcUrl,
-        token,
-        clientsServed,
-      });
-    },
     onChange: (payload, line) => {
       if (window && !window.isDestroyed()) {
         window.webContents.send(ipcChannels.status, payload);

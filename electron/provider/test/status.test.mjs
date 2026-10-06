@@ -1,21 +1,21 @@
 // The status rules of PROVIDER_CONTRACT.md ("Status", "Self-test"): the
-// disclaimer, the byte, status text, status line, status rule, payout wallet
-// scope, peer key and clients-served vectors. No Electron, network or
-// credentials.
+// disclaimer, the byte, status text, status line, status rule and payout
+// wallet scope vectors, and reading the companion's /provider-status body into
+// the four fields. The peer key and clients-served vectors are the
+// companion's (javascript/integration/companion, provider_test.go), which
+// counts the clients served. No Electron, network or credentials.
 
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
 import {readFileSync} from "node:fs";
 import {
-  ClientsServed,
   clientLimitStatusExceeded,
   clientLimitStatusNone,
-  clientsServedLimit,
   consentDisclaimer,
-  contractPeerKey,
-  contractRowPeerKeys,
+  dataProvidedByteCount,
   formatByteCount,
+  parseProviderStatus,
   payoutWalletChecking,
   payoutWalletNotSet,
   payoutWalletScope,
@@ -46,17 +46,35 @@ const walletA = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
 
 const provider = "11111111-1111-1111-1111-111111111111";
 const clientA = "22222222-2222-2222-2222-222222222222";
-const clientB = "33333333-3333-3333-3333-333333333333";
-const stream = "44444444-4444-4444-4444-444444444444";
-const zero = "00000000-0000-0000-0000-000000000000";
 
-// Provider contract details in the sdk's json shape.
-function contract(contractId, sourceId, destinationId, streamId) {
-  const details = {ContractId: contractId, Status: "open"};
-  if (sourceId !== undefined) {
-    details.ContractTransferPath = {SourceId: sourceId, DestinationId: destinationId, StreamId: streamId ?? null};
-  }
-  return details;
+// A /provider-status body in the companion's shape, with changes.
+function providerStatusBody(changes = {}) {
+  return {
+    ProvideMode: 3,
+    ProvideEnabled: true,
+    ProvidePaused: false,
+    ProviderConnected: true,
+    ClientLimitStatus: {Status: "", RetryTime: 0},
+    ProviderPacketStats: {RemoteEgressByteCount: 13000000, RemoteIngressByteCount: 2342},
+    ClientsServed: 3,
+    ClientsServedAtLimit: false,
+    DeviceRpcStarted: true,
+    ...changes,
+  };
+}
+
+// The four fields for a /provider-status body and a payout wallet.
+function routeFields(body, payoutWallet = walletA, payoutWalletScope = payoutWalletScopeNetwork) {
+  const deviceValues = parseProviderStatus(body);
+  return statusFields({
+    state: providerState(deviceValues),
+    clientLimitRetryTime: deviceValues.clientLimitRetryTime,
+    clientsServed: deviceValues.clientsServed,
+    clientsServedAtLimit: deviceValues.clientsServedAtLimit,
+    dataProvidedByteCount: deviceValues.dataProvidedByteCount,
+    payoutWallet,
+    payoutWalletScope,
+  });
 }
 
 test("the consent disclaimer is the contract's exact text", () => {
@@ -138,7 +156,7 @@ test("the status line and fields match the contract's golden lines", () => {
       line: `status: providing | clients served: 3 | data provided: 12.4 MiB | payout wallet: ${walletA} (hotkey)`,
     },
     {
-      status: {state: providerStatePaused, clientLimitRetryTime: 0, clientsServed: clientsServedLimit, clientsServedAtLimit: true, dataProvidedByteCount: 1536, payoutWallet: walletA, payoutWalletScope: payoutWalletScopeProvider},
+      status: {state: providerStatePaused, clientLimitRetryTime: 0, clientsServed: 100 * 1000, clientsServedAtLimit: true, dataProvidedByteCount: 1536, payoutWallet: walletA, payoutWalletScope: payoutWalletScopeProvider},
       line: `status: paused | clients served: 100000+ | data provided: 1.5 KiB | payout wallet: ${walletA} (this provider)`,
     },
     {
@@ -202,58 +220,70 @@ test("the payout wallet is labeled by its consent scope first, then by the owner
   }
 });
 
-test("a contract's peer is the source of a receive contract and the destination of a send contract", () => {
+test("the companion's status body reads into the device values", () => {
+  assert.deepEqual(parseProviderStatus(providerStatusBody()), {
+    provideMode: 3,
+    provideEnabled: true,
+    providePaused: false,
+    providerConnected: true,
+    clientLimitStatus: "",
+    clientLimitRetryTime: 0,
+    dataProvidedByteCount: 13002342,
+    clientsServed: 3,
+    clientsServedAtLimit: false,
+  });
+  // no provider: null stats provide 0 bytes
+  assert.equal(parseProviderStatus(providerStatusBody({ProviderPacketStats: null})).dataProvidedByteCount, 0);
+  assert.equal(dataProvidedByteCount(null), 0);
+  assert.equal(dataProvidedByteCount({RemoteEgressByteCount: 5, RemoteIngressByteCount: 7}), 12);
+});
+
+test("the companion's status body shows the contract's fields", () => {
   const cases = [
-    {details: contract("55555555-5555-5555-5555-555555555555", clientA, provider), receive: true, peerKey: clientA},
-    {details: contract("66666666-6666-6666-6666-666666666666", provider, clientA), receive: false, peerKey: clientA},
-    {details: contract("77777777-7777-7777-7777-777777777777", zero, provider, stream), receive: true, peerKey: `stream:${stream}`},
-    {details: contract("88888888-8888-8888-8888-888888888888"), receive: true, peerKey: "contract:88888888-8888-8888-8888-888888888888"},
+    {body: providerStatusBody(), status: "providing", clientsServed: "3", dataProvided: "12.4 MiB"},
+    {body: providerStatusBody({ClientsServed: 100 * 1000, ClientsServedAtLimit: true}), status: "providing", clientsServed: "100000+", dataProvided: "12.4 MiB"},
+    {body: providerStatusBody({ProviderPacketStats: null, ClientsServed: 0, ProviderConnected: false}), status: "starting", clientsServed: "0", dataProvided: "0 B"},
+    {body: providerStatusBody({ProvideEnabled: false}), status: "starting", clientsServed: "3", dataProvided: "12.4 MiB"},
+    {body: providerStatusBody({ProvidePaused: true, ProviderPacketStats: {RemoteEgressByteCount: 1280, RemoteIngressByteCount: 0}}), status: "paused", clientsServed: "3", dataProvided: "1.2 KiB"},
+    // the client limit comes after stopped and before paused, with its retry time
+    {body: providerStatusBody({ProvidePaused: true, ClientLimitStatus: {Status: "client_limit_exceeded", RetryTime: 1791313440001}}), status: "client limit, retry at 19:05 UTC", clientsServed: "3", dataProvided: "12.4 MiB"},
+    {body: providerStatusBody({ProviderConnected: false, ClientLimitStatus: {Status: "client_limit_exceeded", RetryTime: 0}}), status: "client limit", clientsServed: "3", dataProvided: "12.4 MiB"},
+    {body: providerStatusBody({ProvideMode: 1, ClientLimitStatus: {Status: "client_limit_exceeded", RetryTime: 1791313500000}}), status: "stopped", clientsServed: "3", dataProvided: "12.4 MiB"},
+    {body: providerStatusBody({ProvideMode: 0, ProvideEnabled: false, ProviderConnected: false}), status: "stopped", clientsServed: "3", dataProvided: "12.4 MiB"},
   ];
   for (const c of cases) {
-    assert.equal(contractPeerKey(c.details, c.receive), c.peerKey, JSON.stringify(c.details));
+    const fields = routeFields(c.body);
+    assert.deepEqual(
+      {status: fields.status, clientsServed: fields.clientsServed, dataProvided: fields.dataProvided},
+      {status: c.status, clientsServed: c.clientsServed, dataProvided: c.dataProvided},
+      JSON.stringify(c.body),
+    );
   }
+  // the payout wallet is the app's own read, labeled for this client
+  assert.equal(routeFields(providerStatusBody(), walletA, payoutWalletScope("provider", clientA, provider)).payoutWallet, `${walletA} (another provider)`);
 });
 
-test("contracts count once per client up to the limit", () => {
-  const served = new ClientsServed(2);
-  // the first two contracts of client A, one per direction, count once
-  served.addContractDetails(contract("55555555-5555-5555-5555-555555555555", clientA, provider), true);
-  served.addContractDetails(contract("66666666-6666-6666-6666-666666666666", provider, clientA), false);
-  served.addContractDetails(contract("99999999-9999-9999-9999-999999999999", clientA, provider), true);
-  assert.deepEqual(served.count(), {count: 1, atLimit: false});
-  served.addContractDetails(contract("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", clientB, provider), true);
-  assert.deepEqual(served.count(), {count: 2, atLimit: false});
-  // a third distinct peer reaches the limit of 2
-  served.addContractDetails(contract("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", zero, provider, stream), true);
-  assert.deepEqual(served.count(), {count: 2, atLimit: true});
-});
-
-test("the sdk's provider contract rows count once per peer and keep peers whose rows left", () => {
-  const rowA = {
-    clientId: clientA,
-    receiveContracts: [{contractId: "55555555-5555-5555-5555-555555555555"}],
-    sendContracts: [{contractId: "66666666-6666-6666-6666-666666666666"}],
-  };
-  const rowB = {clientId: clientB, receiveContracts: [{contractId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}], sendContracts: []};
-  // contracts whose path names no client: keyed by contract id
-  const rowZero = {
-    clientId: zero,
-    receiveContracts: [{contractId: "77777777-7777-7777-7777-777777777777"}],
-    sendContracts: [{contractId: "88888888-8888-8888-8888-888888888888"}],
-  };
-  assert.deepEqual(contractRowPeerKeys(rowA), [clientA]);
-  assert.deepEqual(contractRowPeerKeys(rowZero), [
-    "contract:77777777-7777-7777-7777-777777777777",
-    "contract:88888888-8888-8888-8888-888888888888",
-  ]);
-
-  const served = new ClientsServed(clientsServedLimit);
-  served.addContractRows([rowA]);
-  served.addContractRows([rowA]);
-  assert.deepEqual(served.count(), {count: 1, atLimit: false});
-  // client A's row left when its contracts closed; it still counts
-  served.addContractRows([rowB]);
-  assert.deepEqual(served.count(), {count: 2, atLimit: false});
-  served.addContractRows([rowB, rowZero]);
-  assert.deepEqual(served.count(), {count: 4, atLimit: false});
+test("a status body that is not the companion's shape is refused", () => {
+  const invalidBodies = [
+    null,
+    [],
+    "providing",
+    {},
+    providerStatusBody({ProvideMode: "3"}),
+    providerStatusBody({ProvideEnabled: undefined}),
+    providerStatusBody({ProvidePaused: 0}),
+    providerStatusBody({ProviderConnected: "true"}),
+    providerStatusBody({ClientLimitStatus: null}),
+    providerStatusBody({ClientLimitStatus: {Status: "", RetryTime: "0"}}),
+    providerStatusBody({ClientLimitStatus: {Status: "", RetryTime: -1}}),
+    providerStatusBody({ProviderPacketStats: {RemoteEgressByteCount: 5}}),
+    providerStatusBody({ProviderPacketStats: {RemoteEgressByteCount: 5, RemoteIngressByteCount: 1.5}}),
+    providerStatusBody({ProviderPacketStats: 12}),
+    providerStatusBody({ClientsServed: -1}),
+    providerStatusBody({ClientsServed: undefined}),
+    providerStatusBody({ClientsServedAtLimit: "false"}),
+  ];
+  for (const body of invalidBodies) {
+    assert.throws(() => parseProviderStatus(body), /unexpected provider status/, JSON.stringify(body));
+  }
 });

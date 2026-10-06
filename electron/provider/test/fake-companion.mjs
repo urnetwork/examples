@@ -1,9 +1,10 @@
 // A stand-in for the native companion in provider mode, for companion.test.mjs:
 // it checks the environment the app gives the companion, prints the
-// companion's lines, serves /provider-status with the token check, and stops
-// with exit 0 when its standard input closes, as
+// companion's lines, serves /provider-status in the companion's shape with the
+// token check, and stops with exit 0 when its standard input closes, as
 // javascript/integration/companion/provider.go does. It never provides and
-// never touches the network beyond its loopback port.
+// never touches the network beyond its loopback port. Its top-level code runs
+// whenever it is started, so it needs no import.meta.main.
 // FAKE_COMPANION_EXIT=78 makes it fail its configuration check instead.
 
 import http from "node:http";
@@ -42,8 +43,13 @@ const server = http.createServer((request, response) => {
   response.writeHead(200, {"Content-Type": "application/json"});
   response.end(JSON.stringify({
     ProvideMode: 3,
+    ProvideEnabled: true,
+    ProvidePaused: false,
     ProviderConnected: false,
     ClientLimitStatus: {Status: "client_limit_exceeded", RetryTime: 1791313500000},
+    ProviderPacketStats: {RemoteEgressByteCount: 1000, RemoteIngressByteCount: 536},
+    ClientsServed: 2,
+    ClientsServedAtLimit: false,
     DeviceRpcStarted: false,
   }));
 });

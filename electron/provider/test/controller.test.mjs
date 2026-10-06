@@ -1,8 +1,8 @@
-// The provider controller with fake companions, a fake device and timers that
-// run only when the test fires them: configuration errors, the companion's
-// environment, the status from /provider-status and the device rpc, stop,
-// the restart after a failure, configuration exits, the client JWT import and
-// a launch at login. The state directory is a real temporary directory.
+// The provider controller with fake companions and timers that run only when
+// the test fires them: configuration errors, the companion's environment, the
+// whole status from /provider-status, stop, the restart after a failure,
+// configuration exits, the client JWT import and a launch at login. The state
+// directory is a real temporary directory.
 
 import {test} from "node:test";
 import assert from "node:assert/strict";
@@ -11,11 +11,26 @@ import os from "node:os";
 import path from "node:path";
 import {ProviderController, restartDelayMillis, statusPollIntervalMillis} from "../controller.mjs";
 import {clientJwtFileName, instanceIdFileName, writePrivateFile} from "../state.mjs";
-import {ClientsServed} from "../status.mjs";
 
 const clientId = "11111111-1111-1111-1111-111111111111";
 const clientJwt = `e30.${Buffer.from(`{"client_id":"${clientId}"}`).toString("base64url")}.test`;
-const routes = {statusUrl: "http://127.0.0.1:54321/provider-status", deviceRpcUrl: "ws://127.0.0.1:54321/device-rpc"};
+const routes = {statusUrl: "http://127.0.0.1:54321/provider-status"};
+
+// A /provider-status body in the companion's shape, with changes.
+function providerStatusBody(changes = {}) {
+  return {
+    ProvideMode: 3,
+    ProvideEnabled: true,
+    ProvidePaused: false,
+    ProviderConnected: true,
+    ClientLimitStatus: {Status: "", RetryTime: 0},
+    ProviderPacketStats: {RemoteEgressByteCount: 13000000, RemoteIngressByteCount: 2342},
+    ClientsServed: 2,
+    ClientsServedAtLimit: false,
+    DeviceRpcStarted: true,
+    ...changes,
+  };
+}
 
 // Timers that run only when the test fires them, by delay.
 function fakeTimers() {
@@ -92,9 +107,6 @@ function setup(t, {jwt = clientJwt, parentEnv = {PATH: "/usr/bin"}} = {}) {
     companions: [],
     starts: [],
     providerStatus: null,
-    deviceOpens: [],
-    deviceReadout: {provideEnabled: true, providePaused: false, dataProvidedByteCount: 13002342},
-    deviceCloses: 0,
     walletSyncs: 0,
     walletResets: 0,
     payloads: [],
@@ -118,15 +130,6 @@ function setup(t, {jwt = clientJwt, parentEnv = {PATH: "/usr/bin"}} = {}) {
       }
       return fixture.providerStatus;
     },
-    openDevice: async ({config, deviceRpcUrl, token}) => {
-      fixture.deviceOpens.push({config, deviceRpcUrl, token});
-      return {
-        read: () => fixture.deviceReadout,
-        close: async () => {
-          fixture.deviceCloses += 1;
-        },
-      };
-    },
     payoutWallet: {
       get: () => ({payoutWallet: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", payoutWalletScope: "network"}),
       sync: async () => {
@@ -136,7 +139,6 @@ function setup(t, {jwt = clientJwt, parentEnv = {PATH: "/usr/bin"}} = {}) {
         fixture.walletResets += 1;
       },
     },
-    clientsServed: new ClientsServed(),
     startAtLogin: {available: () => true, enabled: () => false, setEnabled: () => {}},
     onChange: (payload, line) => {
       fixture.payloads.push(payload);
@@ -189,48 +191,58 @@ test("start runs the companion in provider mode without a credential in its envi
 test("the companion's client limit status shows its retry time", async t => {
   const fixture = setup(t);
   await fixture.controller.start();
-  fixture.providerStatus = {ProvideMode: 3, ProviderConnected: false, ClientLimitStatus: {Status: "client_limit_exceeded", RetryTime: 1791313500000}, DeviceRpcStarted: false};
+  fixture.providerStatus = providerStatusBody({
+    ProvideEnabled: false,
+    ProviderConnected: false,
+    ClientLimitStatus: {Status: "client_limit_exceeded", RetryTime: 1791313500000},
+    ProviderPacketStats: null,
+    ClientsServed: 0,
+    DeviceRpcStarted: false,
+  });
   fixture.companions[0].listen();
   await settle();
   assert.equal(fixture.controller.payload().fields.status, "client limit, retry at 19:05 UTC");
   assert.equal(fixture.lines.at(-1), "status: client limit, retry at 19:05 UTC | clients served: 0 | data provided: 0 B | payout wallet: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY (network)");
-  assert.equal(fixture.deviceOpens.length, 0);
 });
 
-test("the device rpc opens once the companion serves it and the status follows the device", async t => {
+test("the whole status follows the companion's status route", async t => {
   const fixture = setup(t);
   await fixture.controller.start();
   fixture.companions[0].listen();
   await settle();
   // the companion does not answer yet: starting
   assert.equal(fixture.controller.payload().fields.status, "starting");
-  fixture.providerStatus = {ProvideMode: 3, ProviderConnected: true, ClientLimitStatus: {Status: "", RetryTime: 0}, DeviceRpcStarted: true};
+  fixture.providerStatus = providerStatusBody();
   await poll(fixture);
-  assert.equal(fixture.deviceOpens.length, 1);
-  assert.equal(fixture.deviceOpens[0].deviceRpcUrl, routes.deviceRpcUrl);
-  assert.equal(fixture.deviceOpens[0].token, fixture.starts[0].URNETWORK_COMPANION_TOKEN);
-  assert.equal(fixture.deviceOpens[0].config.clientId, clientId);
-  assert.equal(fixture.deviceOpens[0].config.clientJwt, clientJwt);
-  const payload = fixture.controller.payload();
-  assert.equal(payload.fields.status, "providing");
-  assert.equal(payload.fields.dataProvided, "12.4 MiB");
+  let fields = fixture.controller.payload().fields;
+  assert.deepEqual([fields.status, fields.clientsServed, fields.dataProvided], ["providing", "2", "12.4 MiB"]);
+  // the companion's count reached its limit
+  fixture.providerStatus = providerStatusBody({ClientsServed: 100 * 1000, ClientsServedAtLimit: true});
   await poll(fixture);
-  assert.equal(fixture.deviceOpens.length, 1);
-  // the provider reconnects: the companion reports it, the device stays open
-  fixture.providerStatus = {...fixture.providerStatus, ProviderConnected: false};
+  assert.equal(fixture.controller.payload().fields.clientsServed, "100000+");
+  // paused, then the provider reconnects
+  fixture.providerStatus = providerStatusBody({ProvidePaused: true});
+  await poll(fixture);
+  assert.equal(fixture.controller.payload().fields.status, "paused");
+  fixture.providerStatus = providerStatusBody({ProviderConnected: false});
   await poll(fixture);
   assert.equal(fixture.controller.payload().fields.status, "starting");
+  // an answer in another shape keeps the last status
+  fixture.providerStatus = {ProvideMode: 3, ProviderConnected: true};
+  await poll(fixture);
+  fields = fixture.controller.payload().fields;
+  assert.deepEqual([fields.status, fields.clientsServed, fields.dataProvided], ["starting", "2", "12.4 MiB"]);
 });
 
-test("a stop closes the device, stops the companion and shows stopped", async t => {
+test("a stop stops the companion and shows stopped", async t => {
   const fixture = setup(t);
   await fixture.controller.start();
-  fixture.providerStatus = {ProvideMode: 3, ProviderConnected: true, ClientLimitStatus: {Status: "", RetryTime: 0}, DeviceRpcStarted: true};
+  fixture.providerStatus = providerStatusBody();
   fixture.companions[0].listen();
   await settle();
+  assert.equal(fixture.controller.payload().fields.status, "providing");
   const stopped = fixture.controller.stop();
   await settle();
-  assert.equal(fixture.deviceCloses, 1);
   assert.equal(fixture.companions[0].stopCalls, 1);
   assert.equal(fixture.controller.payload().fields.status, "stopped");
   assert.equal(fixture.controller.payload().message, "stopping the provider");
@@ -240,6 +252,7 @@ test("a stop closes the device, stops the companion and shows stopped", async t 
   assert.equal(payload.running, false);
   assert.equal(payload.message, "");
   assert.equal(payload.fields.dataProvided, "0 B");
+  assert.equal(payload.fields.clientsServed, "0");
   assert.equal(fixture.timers.has(restartDelayMillis), false);
 });
 
@@ -336,14 +349,14 @@ test("without client.jwt the wallet is not read and stays checking", async t => 
 test("the payload is sent only when it changes", async t => {
   const fixture = setup(t);
   await fixture.controller.start();
-  fixture.providerStatus = {ProvideMode: 3, ProviderConnected: false, ClientLimitStatus: {Status: "", RetryTime: 0}, DeviceRpcStarted: false};
+  fixture.providerStatus = providerStatusBody({ProviderConnected: false, DeviceRpcStarted: false});
   fixture.companions[0].listen();
   await settle();
   const sent = fixture.payloads.length;
   await poll(fixture);
   await poll(fixture);
   assert.equal(fixture.payloads.length, sent);
-  fixture.providerStatus = {...fixture.providerStatus, ClientLimitStatus: {Status: "client_limit_exceeded", RetryTime: 1791313500000}};
+  fixture.providerStatus = providerStatusBody({ProviderConnected: false, ClientLimitStatus: {Status: "client_limit_exceeded", RetryTime: 1791313500000}});
   await poll(fixture);
   assert.equal(fixture.payloads.length, sent + 1);
 });

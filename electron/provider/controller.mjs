@@ -1,13 +1,12 @@
 // The provider of the Electron app, without Electron: Start checks the
-// installation state and starts the companion in provider mode, the status is
-// read every second from the companion's /provider-status route and its
-// device rpc, Stop stops the companion, and a companion that fails is started
-// again after 30 seconds (not after a requested stop or a configuration
-// error, like the background templates). It also keeps the payout wallet,
-// counts the clients served since the app started, and builds the status
-// payload for the window and the status line for the tray. main.mjs passes in
-// the Electron parts; the unit tests pass fakes. It runs on the main process's
-// event loop, so its state needs no lock.
+// installation state and starts the companion in provider mode, the whole
+// status is read every second from the companion's /provider-status route,
+// Stop stops the companion, and a companion that fails is started again after
+// 30 seconds (not after a requested stop or a configuration error, like the
+// background templates). It also keeps the payout wallet and builds the
+// status payload for the window and the status line for the tray. main.mjs
+// passes in the Electron parts; the unit tests pass fakes. It runs on the main
+// process's event loop, so its state needs no lock.
 
 import {
   companionEnvironment,
@@ -24,6 +23,7 @@ import {
 } from "./state.mjs";
 import {
   clientLimitStatusNone,
+  parseProviderStatus,
   provideModeNone,
   provideModePublic,
   providerState,
@@ -38,25 +38,19 @@ export const statusPollIntervalMillis = 1000;
 // How long the app waits before it starts a failed companion again.
 export const restartDelayMillis = 30 * 1000;
 
-// How many status reads pass before a device rpc that failed to open is tried again.
-const deviceOpenRetryPolls = 5;
-
 // The provider's start, stop and status for one installation.
 export class ProviderController {
   // stateDir is the installation's private state directory.
   // startCompanion({env}) starts a companion and returns a CompanionProcess.
-  // openDevice({config, deviceRpcUrl, token}) resolves with a CompanionDevice.
-  // fetchProviderStatus(statusUrl, token) reads /provider-status.
-  // payoutWallet is a PayoutWallet, clientsServed a ClientsServed, and
-  // startAtLogin a StartAtLogin. onChange(payload, line) receives each new
-  // status payload with its status line.
+  // fetchProviderStatus(statusUrl, token) reads the /provider-status body.
+  // payoutWallet is a PayoutWallet and startAtLogin a StartAtLogin.
+  // onChange(payload, line) receives each new status payload with its status
+  // line.
   constructor({
     stateDir,
     startCompanion,
-    openDevice,
     fetchProviderStatus = fetchCompanionStatus,
     payoutWallet,
-    clientsServed,
     startAtLogin,
     parentEnv = process.env,
     timers = globalThis,
@@ -64,10 +58,8 @@ export class ProviderController {
   }) {
     this.stateDir = stateDir;
     this.startCompanion = startCompanion;
-    this.openDevice = openDevice;
     this.fetchProviderStatus = fetchProviderStatus;
     this.payoutWallet = payoutWallet;
-    this.clientsServed = clientsServed;
     this.startAtLogin = startAtLogin;
     this.parentEnv = parentEnv;
     this.timers = timers;
@@ -130,10 +122,10 @@ export class ProviderController {
       return this.payload();
     }
     this.cancelRestart();
-    let config;
     try {
       ensureStateDir(this.stateDir);
-      config = loadProviderConfig(this.stateDir);
+      // checks client.jwt and creates instance-id, which the companion reads
+      loadProviderConfig(this.stateDir);
     } catch (error) {
       this.message = error.message;
       this.publish();
@@ -151,17 +143,10 @@ export class ProviderController {
     const run = {
       companion,
       token,
-      config,
-      // {statusUrl, deviceRpcUrl} once the companion listens
+      // {statusUrl} once the companion listens
       routes: null,
-      // the last /provider-status json
+      // the device values of the last good /provider-status read
       providerStatus: null,
-      // the CompanionDevice once the device rpc is open
-      device: null,
-      deviceOpening: false,
-      // status reads to skip before opening the device rpc again
-      deviceOpenWait: 0,
-      deviceError: "",
       stopRequested: false,
       pollTimer: null,
     };
@@ -178,8 +163,8 @@ export class ProviderController {
     return this.payload();
   }
 
-  // Stops providing: closes the device rpc, then stops the companion and waits
-  // for it to exit. A stop during the wait after a failure cancels the start.
+  // Stops providing: stops the companion and waits for it to exit. A stop
+  // during the wait after a failure cancels the start.
   async stop() {
     if (this.restartTimer !== null) {
       this.cancelRestart();
@@ -196,11 +181,6 @@ export class ProviderController {
       this.cancelPoll(run);
       this.message = "stopping the provider";
       this.publish();
-      const device = run.device;
-      run.device = null;
-      if (device) {
-        await device.close().catch(() => {});
-      }
       run.companion.stop();
     }
     await run.companion.exited;
@@ -256,38 +236,32 @@ export class ProviderController {
     return this.payload();
   }
 
-  // The status snapshot (status.mjs) from the companion's status and device.
+  // The status snapshot (status.mjs) from the companion's last status read.
+  // Stopped, nothing is provided and no client is served; before the
+  // companion's first answer the provide mode is public, the mode the
+  // companion runs in, so the status is starting.
   status() {
     const run = this.run;
-    let provideMode = provideModeNone;
-    let clientLimitStatus = clientLimitStatusNone;
-    let clientLimitRetryTime = 0;
-    let providerConnected = false;
-    let provideEnabled = false;
-    let providePaused = false;
-    let dataProvidedByteCount = 0;
+    let deviceValues = {
+      provideMode: provideModeNone,
+      provideEnabled: false,
+      providePaused: false,
+      providerConnected: false,
+      clientLimitStatus: clientLimitStatusNone,
+      clientLimitRetryTime: 0,
+      dataProvidedByteCount: 0,
+      clientsServed: 0,
+      clientsServedAtLimit: false,
+    };
     if (run && !run.stopRequested) {
-      const providerStatus = run.providerStatus;
-      // the companion runs in public mode; until it answers, that is the mode
-      provideMode = providerStatus ? providerStatus.ProvideMode : provideModePublic;
-      clientLimitStatus = providerStatus?.ClientLimitStatus?.Status ?? clientLimitStatusNone;
-      clientLimitRetryTime = providerStatus?.ClientLimitStatus?.RetryTime ?? 0;
-      providerConnected = providerStatus?.ProviderConnected === true;
-      if (run.device) {
-        try {
-          ({provideEnabled, providePaused, dataProvidedByteCount} = run.device.read());
-        } catch {
-          // a device rpc that broke reads as not yet enabled
-        }
-      }
+      deviceValues = run.providerStatus ?? {...deviceValues, provideMode: provideModePublic};
     }
-    const {count, atLimit} = this.clientsServed.count();
     return {
-      state: providerState({provideMode, clientLimitStatus, providePaused, provideEnabled, providerConnected}),
-      clientLimitRetryTime,
-      clientsServed: count,
-      clientsServedAtLimit: atLimit,
-      dataProvidedByteCount,
+      state: providerState(deviceValues),
+      clientLimitRetryTime: deviceValues.clientLimitRetryTime,
+      clientsServed: deviceValues.clientsServed,
+      clientsServedAtLimit: deviceValues.clientsServedAtLimit,
+      dataProvidedByteCount: deviceValues.dataProvidedByteCount,
       ...this.payoutWallet.get(),
     };
   }
@@ -299,12 +273,10 @@ export class ProviderController {
 
   // The payload for one status snapshot.
   payloadFor(status) {
-    const run = this.run;
-    const message = this.message || run?.deviceError || "";
     return statusPayload({
       fields: statusFields(status),
-      running: run !== null || this.restartTimer !== null,
-      message,
+      running: this.run !== null || this.restartTimer !== null,
+      message: this.message,
       startAtLogin: this.startAtLoginEnabled,
       startAtLoginAvailable: this.startAtLogin.available(),
       stateDir: this.stateDir,
@@ -346,50 +318,27 @@ export class ProviderController {
     }
   }
 
-  // Reads /provider-status, opens the device rpc once the companion serves
-  // it, and publishes the status.
+  // Reads /provider-status and publishes the status. A read that fails or
+  // answers an unexpected body keeps the last status: the companion is
+  // starting or stopping.
   async poll(run) {
     if (this.run !== run || run.stopRequested) {
       return;
     }
     if (run.routes) {
       try {
-        run.providerStatus = await this.fetchProviderStatus(run.routes.statusUrl, run.token);
+        const providerStatus = parseProviderStatus(await this.fetchProviderStatus(run.routes.statusUrl, run.token));
+        if (this.run === run) {
+          run.providerStatus = providerStatus;
+        }
       } catch {
-        // the companion is starting or stopping; the last status stands
+        // the last status stands
       }
       if (this.run !== run || run.stopRequested) {
         return;
-      }
-      if (run.providerStatus?.DeviceRpcStarted && !run.device && !run.deviceOpening) {
-        if (0 < run.deviceOpenWait) {
-          run.deviceOpenWait -= 1;
-        } else {
-          this.openRunDevice(run);
-        }
       }
     }
     this.publish();
-  }
-
-  // Opens the device rpc of a run; a failure is tried again a few reads later.
-  openRunDevice(run) {
-    run.deviceOpening = true;
-    this.openDevice({config: run.config, deviceRpcUrl: run.routes.deviceRpcUrl, token: run.token}).then(device => {
-      run.deviceOpening = false;
-      if (this.run !== run || run.stopRequested) {
-        device.close().catch(() => {});
-        return;
-      }
-      run.device = device;
-      run.deviceError = "";
-      this.publish();
-    }, error => {
-      run.deviceOpening = false;
-      run.deviceOpenWait = deviceOpenRetryPolls;
-      run.deviceError = `could not read the provider device: ${error.message}`;
-      this.publish();
-    });
   }
 
   // Records the end of a run: stopped, a configuration error to fix, or a
@@ -400,10 +349,6 @@ export class ProviderController {
     }
     this.run = null;
     this.cancelPoll(run);
-    if (run.device) {
-      run.device.close().catch(() => {});
-      run.device = null;
-    }
     switch (companionExitAction({code: exit.code, spawnFailed: exit.spawnFailed, stopRequested: run.stopRequested})) {
       case "stopped":
         this.message = "";

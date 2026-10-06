@@ -1,10 +1,11 @@
 // The native companion (javascript/integration/companion) in provider mode, as
 // a child process of the main process. The companion owns the provider device
-// and the installation state; the app reads the device values that the
-// JavaScript sdk does not bind from the companion's /provider-status route and
-// the rest through its /device-rpc route, both on a numeric loopback address
-// with a random token per launch. This module finds the binary, builds its
-// environment, parses its routes, and starts and stops it.
+// and the installation state, and serves the whole provider status on its
+// /provider-status route, on a numeric loopback address with a random token
+// per launch. The app needs nothing else from it: the JavaScript sdk's remotes
+// get no provider packet stats or provider contract details over the
+// companion's /device-rpc. This module finds the binary, builds its
+// environment, parses its status route, and starts and stops it.
 
 import {spawn} from "node:child_process";
 import {randomBytes} from "node:crypto";
@@ -77,22 +78,22 @@ export function companionEnvironment(parentEnv, {stateDir, token}) {
   };
 }
 
-// The routes from the companion's listening line, "companion listening at
-// http://127.0.0.1:<port>/provider-status and ws://127.0.0.1:<port>/device-rpc":
-// {statusUrl, deviceRpcUrl}, or null for any other line.
+// The status route from the companion's listening line, "companion listening
+// at http://127.0.0.1:<port>/provider-status and ws://127.0.0.1:<port>/device-rpc":
+// {statusUrl}, or null for any other line.
 export function parseCompanionRoutes(line) {
-  const match = /^companion listening at (http:\/\/(127\.0\.0\.1|\[::1\]):(\d{1,5})\/provider-status) and (ws:\/\/(127\.0\.0\.1|\[::1\]):(\d{1,5})\/device-rpc)$/.exec(line.trim());
-  if (!match || match[2] !== match[5] || match[3] !== match[6]) {
+  const match = /^companion listening at (http:\/\/(127\.0\.0\.1|\[::1\]):(\d{1,5})\/provider-status) and ws:\/\/(127\.0\.0\.1|\[::1\]):(\d{1,5})\/device-rpc$/.exec(line.trim());
+  if (!match || match[2] !== match[4] || match[3] !== match[5]) {
     return null;
   }
-  return {statusUrl: match[1], deviceRpcUrl: match[4]};
+  return {statusUrl: match[1]};
 }
 
-// A url of a companion route with the token, which the companion reads from
-// the query. Only numeric loopback urls are accepted.
+// The status route's url with the token, which the companion reads from the
+// query. Only a numeric loopback http url is accepted.
 export function companionRouteUrl(url, token) {
   const endpoint = new URL(url);
-  if (!["http:", "ws:"].includes(endpoint.protocol) || !["127.0.0.1", "[::1]"].includes(endpoint.hostname) || endpoint.username || endpoint.password) {
+  if (endpoint.protocol !== "http:" || !["127.0.0.1", "[::1]"].includes(endpoint.hostname) || endpoint.username || endpoint.password) {
     throw new Error("a companion route must use a numeric loopback address");
   }
   if (typeof token !== "string" || token.length < 32) {
@@ -102,9 +103,12 @@ export function companionRouteUrl(url, token) {
   return endpoint.href;
 }
 
-// Reads /provider-status: {ProvideMode, ProviderConnected, ClientLimitStatus:
-// {Status, RetryTime}, DeviceRpcStarted}. Rejects when the companion does not
-// answer with that json.
+// Reads the /provider-status json body, for example {"ProvideMode":3,
+// "ProvideEnabled":true,"ProvidePaused":false,"ProviderConnected":true,
+// "ClientLimitStatus":{"Status":"","RetryTime":0},"ProviderPacketStats":
+// {"RemoteEgressByteCount":5,"RemoteIngressByteCount":7},"ClientsServed":2,
+// "ClientsServedAtLimit":false,"DeviceRpcStarted":true}; status.mjs
+// parseProviderStatus checks it. Rejects when the companion does not answer.
 export async function fetchProviderStatus(statusUrl, token, fetchFunction = globalThis.fetch) {
   const response = await fetchFunction(companionRouteUrl(statusUrl, token), {
     cache: "no-store",
@@ -113,79 +117,7 @@ export async function fetchProviderStatus(statusUrl, token, fetchFunction = glob
   if (!response.ok) {
     throw new Error(`the companion status answered HTTP ${response.status}`);
   }
-  const providerStatus = await response.json();
-  if (providerStatus === null || typeof providerStatus !== "object" || typeof providerStatus.ProvideMode !== "number") {
-    throw new Error("the companion status is not provider status json");
-  }
-  return providerStatus;
-}
-
-// The sdk's DeviceRpcTransport over the companion's /device-rpc websocket: it
-// carries the sdk's opaque binary frames, like javascript/integration's
-// companionTransport, which this app cannot import once packaged.
-export function companionTransport(deviceRpcUrl, token, WebSocketClass = globalThis.WebSocket) {
-  const url = companionRouteUrl(deviceRpcUrl, token);
-  if (typeof WebSocketClass !== "function") {
-    throw new Error("this runtime has no WebSocket");
-  }
-  return {
-    // Opens one connection; callbacks get its frames and its end.
-    open(callbacks) {
-      const ws = new WebSocketClass(url);
-      ws.binaryType = "arraybuffer";
-      let closed = false;
-      const opened = () => callbacks.opened();
-      const message = event => {
-        if (closed) {
-          return;
-        }
-        if (!(event.data instanceof ArrayBuffer)) {
-          terminate("the companion sent a non-binary frame");
-          return;
-        }
-        callbacks.message(new Uint8Array(event.data).slice());
-      };
-      const ended = () => terminate("the companion connection closed");
-      const failed = () => terminate("the companion connection failed");
-      // Ends the connection once, telling the sdk unless the sdk ended it.
-      const terminate = (reason, notify = true) => {
-        if (closed) {
-          return;
-        }
-        closed = true;
-        ws.removeEventListener("open", opened);
-        ws.removeEventListener("message", message);
-        ws.removeEventListener("close", ended);
-        ws.removeEventListener("error", failed);
-        ws.close();
-        if (notify) {
-          callbacks.closed(reason);
-        }
-      };
-      ws.addEventListener("open", opened);
-      ws.addEventListener("message", message);
-      ws.addEventListener("close", ended);
-      ws.addEventListener("error", failed);
-      return {
-        // Sends one frame; the sdk keeps ownership of its bytes.
-        send(frame) {
-          if (closed || ws.readyState !== 1) {
-            throw new Error("the companion connection is closed");
-          }
-          if (1024 * 1024 < ws.bufferedAmount + frame.byteLength) {
-            terminate("the companion send queue exceeded 1 MiB");
-            throw new Error("the companion send queue overflowed");
-          }
-          ws.send(frame.slice());
-        },
-        // The sdk ends the connection: its callbacks are released, so they
-        // are not called again.
-        close() {
-          terminate("the sdk closed the companion connection", false);
-        },
-      };
-    },
-  };
+  return response.json();
 }
 
 // What the app does after the companion exited: "stopped" after a requested

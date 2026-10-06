@@ -1,8 +1,10 @@
 // The provider status that the Electron provider shows, with the exact text
 // rules of PROVIDER_CONTRACT.md ("Status"): providing state, clients served,
-// data provided and the payout wallet, read only. The main process computes
-// it and the window shows it. Everything here is pure, so the unit tests check
-// it without Electron, a network or credentials; it mirrors go/provider/status.go.
+// data provided and the payout wallet, read only. The main process reads the
+// device values from the companion's /provider-status route, maps them here
+// and the window shows them. Everything here is pure, so the unit tests check
+// it without Electron, a network or credentials; the text rules mirror
+// go/provider/status.go.
 
 // Shown next to the control that starts providing, and in the README. The app
 // that integrates a provider owns the consent screen; this example starts
@@ -44,18 +46,6 @@ export const payoutWalletScopeAnotherProvider = "another provider";
 // Hotkey delegations come with a later server and sdk change; the app only
 // labels the entry.
 export const snWalletConsentScopeHotkey = "hotkey";
-
-// Distinct clients are counted up to this many; beyond it the count is a
-// lower bound, shown with a trailing "+".
-export const clientsServedLimit = 100 * 1000;
-
-const zeroIdString = "00000000-0000-0000-0000-000000000000";
-
-// A client, stream or contract id that names something: a non-empty id that
-// is not all zero.
-function presentId(id) {
-  return typeof id === "string" && id !== "" && id.toLowerCase() !== zeroIdString;
-}
 
 // The status field text: the state, and for the client limit state the time
 // the sdk retries, for example "client limit, retry at 19:05 UTC". The retry
@@ -101,7 +91,7 @@ export function formatByteCount(byteCount) {
   return `${roundedTenths / 10n}.${roundedTenths % 10n} ${units[unitIndex]}`;
 }
 
-// The providing state from the device readout, in this order: stopped unless
+// The providing state from the device values, in this order: stopped unless
 // the provide mode is public; client limit while the sdk holds this client off
 // for its network's client limit; paused while paused; providing once the
 // provider is enabled and connected to the platform; starting otherwise.
@@ -138,88 +128,46 @@ export function payoutWalletScope(walletConsentScope, walletClientId, clientId) 
   return payoutWalletScopeAnotherProvider;
 }
 
-// The peer of one provider contract, by direction as the sdk's contract
-// screens resolve it: the source of a receive (ingress) contract, the
-// destination of a send (egress) contract. A path without that client id is
-// keyed by its stream id, then by the contract id. The details use the sdk's
-// json field names: ContractId and ContractTransferPath with SourceId,
-// DestinationId and StreamId.
-export function contractPeerKey(details, receive) {
-  const path = details.ContractTransferPath;
-  if (path) {
-    const peerId = receive ? path.SourceId : path.DestinationId;
-    if (presentId(peerId)) {
-      return peerId.toLowerCase();
-    }
-    if (presentId(path.StreamId)) {
-      return `stream:${path.StreamId.toLowerCase()}`;
-    }
+// Data provided: the bytes relayed for clients in both directions since the
+// device started, RemoteEgressByteCount + RemoteIngressByteCount of the
+// provider packet stats; 0 when the stats are null.
+export function dataProvidedByteCount(providerPacketStats) {
+  if (providerPacketStats === null || providerPacketStats === undefined) {
+    return 0;
   }
-  if (presentId(details.ContractId)) {
-    return `contract:${details.ContractId.toLowerCase()}`;
-  }
-  return "";
+  return providerPacketStats.RemoteEgressByteCount + providerPacketStats.RemoteIngressByteCount;
 }
 
-// The peer keys of one row of the JavaScript sdk's provider contract details
-// view controller. A row holds the open contracts of one peer, which the sdk
-// resolves by direction as contractPeerKey does, so its client id is the peer
-// key. A row without a client id (an all-zero id) holds contracts whose path
-// names no client; rows carry no stream ids, so each of those contracts is
-// keyed by its contract id.
-export function contractRowPeerKeys(row) {
-  if (presentId(row.clientId)) {
-    return [row.clientId.toLowerCase()];
+// The device values of the companion's /provider-status body
+// (javascript/integration/companion, provider mode), checked: the provide
+// mode, enabled and paused state, the provider connection and the client
+// limit status with the sdk's Go field names, the data provided from the two
+// byte counts of its provider packet stats (null without a provider), and the
+// clients served that the companion counts with the contract's peer rules.
+// Throws for any other body, which the app reads as a failed status read.
+export function parseProviderStatus(body) {
+  const clientLimitStatus = body?.ClientLimitStatus;
+  const providerPacketStats = body?.ProviderPacketStats;
+  const count = value => Number.isSafeInteger(value) && 0 <= value;
+  const validPacketStats = providerPacketStats === null || (typeof providerPacketStats === "object" &&
+    count(providerPacketStats?.RemoteEgressByteCount) && count(providerPacketStats?.RemoteIngressByteCount));
+  if (!Number.isInteger(body?.ProvideMode) || typeof body.ProvideEnabled !== "boolean" ||
+      typeof body.ProvidePaused !== "boolean" || typeof body.ProviderConnected !== "boolean" ||
+      typeof clientLimitStatus?.Status !== "string" || !count(clientLimitStatus.RetryTime) || !validPacketStats ||
+      !count(body.ClientsServed) || typeof body.ClientsServedAtLimit !== "boolean") {
+    throw new Error("the companion answered an unexpected provider status");
   }
-  const contracts = [...(row.receiveContracts ?? []), ...(row.sendContracts ?? [])];
-  return contracts
-    .filter(contract => presentId(contract.contractId))
-    .map(contract => `contract:${contract.contractId.toLowerCase()}`);
-}
-
-// The distinct clients that held a contract with this provider since the app
-// started, up to a limit. The main process feeds it from one thread.
-export class ClientsServed {
-  // An empty count that keeps at most limit distinct peers.
-  constructor(limit = clientsServedLimit) {
-    this.limit = limit;
-    this.peerKeys = new Set();
-    this.atLimit = false;
-  }
-
-  // Counts one peer key; an empty key names no peer.
-  addPeerKey(peerKey) {
-    if (!peerKey || this.peerKeys.has(peerKey)) {
-      return;
-    }
-    if (this.limit <= this.peerKeys.size) {
-      this.atLimit = true;
-      return;
-    }
-    this.peerKeys.add(peerKey);
-  }
-
-  // Counts the peer of one provider contract.
-  addContractDetails(details, receive) {
-    if (details) {
-      this.addPeerKey(contractPeerKey(details, receive));
-    }
-  }
-
-  // Counts the peers of the provider contract rows the sdk shows now. Rows
-  // leave when their contracts close; the count keeps their peers.
-  addContractRows(rows) {
-    for (const row of rows ?? []) {
-      for (const peerKey of contractRowPeerKeys(row)) {
-        this.addPeerKey(peerKey);
-      }
-    }
-  }
-
-  // The distinct count, and whether the count stopped at the limit.
-  count() {
-    return {count: this.peerKeys.size, atLimit: this.atLimit};
-  }
+  return {
+    provideMode: body.ProvideMode,
+    provideEnabled: body.ProvideEnabled,
+    providePaused: body.ProvidePaused,
+    providerConnected: body.ProviderConnected,
+    clientLimitStatus: clientLimitStatus.Status,
+    clientLimitRetryTime: clientLimitStatus.RetryTime,
+    dataProvidedByteCount: dataProvidedByteCount(providerPacketStats),
+    clientsServed: body.ClientsServed,
+    clientsServedAtLimit: body.ClientsServedAtLimit,
+  };
 }
 
 // The four fields as display text, the same text the console status line

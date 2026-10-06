@@ -1,8 +1,7 @@
 // The companion child process: where the binary is, its environment (no
-// credential, provider mode, a loopback port, stop on input close), its
-// routes, the device rpc transport, the exit policy, and starting and
-// stopping it, with a fake child and with a real process running
-// fake-companion.mjs.
+// credential, provider mode, a loopback port, stop on input close), its status
+// route, the exit policy, and starting and stopping it, with a fake child and
+// with a real process running fake-companion.mjs.
 
 import {test} from "node:test";
 import assert from "node:assert/strict";
@@ -14,11 +13,11 @@ import {
   companionEnvironment,
   companionExitAction,
   companionPath,
-  companionTransport,
   fetchProviderStatus,
   newCompanionToken,
   parseCompanionRoutes,
 } from "../companion.mjs";
+import {parseProviderStatus} from "../status.mjs";
 
 const token = "a".repeat(64);
 
@@ -112,14 +111,12 @@ test("a companion token is 32 random bytes in hex, new for each launch", () => {
   assert.notEqual(newCompanionToken(), first);
 });
 
-test("the routes come from the companion's listening line on a numeric loopback address", () => {
+test("the status route comes from the companion's listening line on a numeric loopback address", () => {
   assert.deepEqual(parseCompanionRoutes("companion listening at http://127.0.0.1:54321/provider-status and ws://127.0.0.1:54321/device-rpc"), {
     statusUrl: "http://127.0.0.1:54321/provider-status",
-    deviceRpcUrl: "ws://127.0.0.1:54321/device-rpc",
   });
   assert.deepEqual(parseCompanionRoutes("companion listening at http://[::1]:8787/provider-status and ws://[::1]:8787/device-rpc\r"), {
     statusUrl: "http://[::1]:8787/provider-status",
-    deviceRpcUrl: "ws://[::1]:8787/device-rpc",
   });
   for (const line of [
     "provider client 11111111-1111-1111-1111-111111111111, instance 22222222-2222-2222-2222-222222222222",
@@ -131,80 +128,23 @@ test("the routes come from the companion's listening line on a numeric loopback 
   }
 });
 
-test("the provider status read sends the token to the loopback route and checks the answer", async () => {
+test("the provider status read sends the token to the loopback route", async () => {
   const requests = [];
+  const body = {ProvideMode: 3, ClientsServed: 2};
   const answers = [
-    {ok: true, status: 200, json: async () => ({ProvideMode: 3, ProviderConnected: true, ClientLimitStatus: {Status: "", RetryTime: 0}, DeviceRpcStarted: true})},
+    {ok: true, status: 200, json: async () => body},
     {ok: false, status: 401, json: async () => ({})},
-    {ok: true, status: 200, json: async () => ({unexpected: true})},
   ];
   const fetchFunction = async url => {
     requests.push(url);
     return answers.shift();
   };
-  const providerStatus = await fetchProviderStatus("http://127.0.0.1:54321/provider-status", token, fetchFunction);
-  assert.equal(providerStatus.DeviceRpcStarted, true);
+  assert.deepEqual(await fetchProviderStatus("http://127.0.0.1:54321/provider-status", token, fetchFunction), body);
   assert.deepEqual(requests, [`http://127.0.0.1:54321/provider-status?token=${token}`]);
   await assert.rejects(fetchProviderStatus("http://127.0.0.1:54321/provider-status", token, fetchFunction), /401/);
-  await assert.rejects(fetchProviderStatus("http://127.0.0.1:54321/provider-status", token, fetchFunction), /not provider status/);
   await assert.rejects(fetchProviderStatus("http://203.0.113.1:54321/provider-status", token, fetchFunction), /loopback/);
+  await assert.rejects(fetchProviderStatus("ws://127.0.0.1:54321/device-rpc", token, fetchFunction), /loopback/);
   await assert.rejects(fetchProviderStatus("http://127.0.0.1:54321/provider-status", "short", fetchFunction), /32 characters/);
-});
-
-test("the device rpc transport carries owned binary frames and releases its socket", () => {
-  let socket;
-  // A WebSocket double that records what the transport does.
-  class WebSocket extends EventTarget {
-    readyState = 1;
-    bufferedAmount = 0;
-    sent = [];
-    closes = 0;
-    constructor(url) {
-      super();
-      this.url = url;
-      socket = this;
-    }
-    send(bytes) {
-      this.sent.push(bytes);
-    }
-    close() {
-      this.closes += 1;
-    }
-  }
-  const seen = [];
-  const closed = [];
-  const connection = companionTransport("ws://127.0.0.1:54321/device-rpc", token, WebSocket).open({
-    opened: () => seen.push("open"),
-    message: bytes => seen.push(bytes),
-    closed: reason => closed.push(reason),
-  });
-  assert.equal(socket.url, `ws://127.0.0.1:54321/device-rpc?token=${token}`);
-  socket.dispatchEvent(new Event("open"));
-  socket.dispatchEvent(new MessageEvent("message", {data: Uint8Array.of(0, 255, 9).buffer}));
-  const frame = Uint8Array.of(1, 2, 3);
-  connection.send(frame);
-  frame.fill(0);
-  assert.deepEqual(seen, ["open", Uint8Array.of(0, 255, 9)]);
-  assert.deepEqual(socket.sent, [Uint8Array.of(1, 2, 3)]);
-  // the sdk closes: no callback after that, one socket close
-  connection.close();
-  connection.close();
-  socket.dispatchEvent(new MessageEvent("message", {data: new ArrayBuffer(1)}));
-  assert.equal(seen.length, 2);
-  assert.deepEqual(closed, []);
-  assert.equal(socket.closes, 1);
-  assert.throws(() => connection.send(frame), /closed/);
-
-  // a text frame ends the connection and tells the sdk
-  const textClosed = [];
-  companionTransport("ws://127.0.0.1:54321/device-rpc", token, WebSocket).open({
-    opened: () => {},
-    message: () => {},
-    closed: reason => textClosed.push(reason),
-  });
-  socket.dispatchEvent(new MessageEvent("message", {data: "text"}));
-  assert.deepEqual(textClosed, ["the companion sent a non-binary frame"]);
-  assert.throws(() => companionTransport("ws://203.0.113.1:54321/device-rpc", token, WebSocket), /loopback/);
 });
 
 test("the app restarts a failed companion but not after a stop or a configuration error", () => {
@@ -239,7 +179,7 @@ test("a stop closes the companion's input and kills it only after the timeout", 
   assert.deepEqual(child.spawned.options.stdio, ["pipe", "pipe", "pipe"]);
   assert.equal(child.spawned.options.windowsHide, true);
   child.stdout.write("companion listening at http://127.0.0.1:54321/provider-status and ws://127.0.0.1:54321/device-rpc\n");
-  assert.deepEqual(await companion.routes, {statusUrl: "http://127.0.0.1:54321/provider-status", deviceRpcUrl: "ws://127.0.0.1:54321/device-rpc"});
+  assert.deepEqual(await companion.routes, {statusUrl: "http://127.0.0.1:54321/provider-status"});
   const stopped = companion.stop();
   await settle();
   assert.equal(child.stdinEnded, true);
@@ -292,15 +232,20 @@ test("a companion binary that cannot run is a configuration error", async () => 
   assert.match(missing.lastErrorLine, /ENOENT/);
 });
 
-test("a real companion process reports its routes and status and stops when its input closes", async () => {
+test("a real companion process reports its status route and status and stops when its input closes", async t => {
   const companion = new CompanionProcess({
     command: process.execPath,
     args: [fakeCompanionPath],
     env: companionEnvironment(process.env, {stateDir: "/state/provider", token}),
   });
+  // a failed check still stops the child, whose pipes would keep the test alive
+  t.after(() => companion.stop());
   const routes = await companion.routes;
-  const providerStatus = await fetchProviderStatus(routes.statusUrl, token);
-  assert.deepEqual(providerStatus.ClientLimitStatus, {Status: "client_limit_exceeded", RetryTime: 1791313500000});
+  const deviceValues = parseProviderStatus(await fetchProviderStatus(routes.statusUrl, token));
+  assert.equal(deviceValues.clientLimitStatus, "client_limit_exceeded");
+  assert.equal(deviceValues.clientLimitRetryTime, 1791313500000);
+  assert.equal(deviceValues.dataProvidedByteCount, 1536);
+  assert.equal(deviceValues.clientsServed, 2);
   await assert.rejects(fetchProviderStatus(routes.statusUrl, "b".repeat(64)), /401/);
   const exit = await companion.stop();
   assert.equal(exit.code, 0);
@@ -308,12 +253,13 @@ test("a real companion process reports its routes and status and stops when its 
   assert.ok(companion.recentLines.includes("status: stopped"));
 });
 
-test("a real companion with a configuration error exits 78 with its message", async () => {
+test("a real companion with a configuration error exits 78 with its message", async t => {
   const companion = new CompanionProcess({
     command: process.execPath,
     args: [fakeCompanionPath],
     env: {...companionEnvironment(process.env, {stateDir: "/state/provider", token}), FAKE_COMPANION_EXIT: "78"},
   });
+  t.after(() => companion.stop());
   const exit = await companion.exited;
   assert.equal(exit.code, 78);
   assert.equal(companionExitAction({...exit, stopRequested: false}), "config");

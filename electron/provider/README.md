@@ -2,7 +2,7 @@
 
 [Native companion](../../javascript/integration/companion/README.md#provider-mode) · [JavaScript provider](../../javascript/provider/README.md) · [Provider](README.md)
 
-This Electron app runs a URnetwork provider inside your application on Windows, macOS and Linux. It provides publicly as a provider client of your network and shows the provider status in its window and its tray: providing state, clients served, data provided and the payout wallet, read only. Electron cannot provide in its renderer or with the JavaScript SDK's WebAssembly alone, so the main process runs the JavaScript examples' [native companion](../../javascript/integration/companion/README.md#provider-mode) in provider mode as a child process, which owns the provider device and the installation state, and reads the status from it with `@urnetwork/sdk` over the companion's loopback device RPC. The app follows the [provider contract](../../PROVIDER_CONTRACT.md) and its [Electron notes](../../PROVIDER_CONTRACT.md#electron).
+This Electron app runs a URnetwork provider inside your application on Windows, macOS and Linux. It provides publicly as a provider client of your network and shows the provider status in its window and its tray: providing state, clients served, data provided and the payout wallet, read only. Electron cannot provide in its renderer or with the JavaScript SDK's WebAssembly alone, so the main process runs the JavaScript examples' [native companion](../../javascript/integration/companion/README.md#provider-mode) in provider mode as a child process, which owns the provider device and the installation state, and reads the whole provider status from the companion's loopback `/provider-status` route. The app follows the [provider contract](../../PROVIDER_CONTRACT.md) and its [Electron notes](../../PROVIDER_CONTRACT.md#electron).
 
 **Consent disclaimer:** an app that integrates a URnetwork provider must collect the user's consent before it provides. Providing shares the user's internet connection: other URnetwork users' traffic exits through the user's device and IP address. This example starts providing without asking, because the consent screen belongs to your app.
 
@@ -14,20 +14,19 @@ The window shows the disclaimer next to **Start providing**.
 | --- | --- |
 | [main.mjs](main.mjs) | Electron main process: window, tray, IPC handlers, start at login, quit. |
 | [controller.mjs](controller.mjs) | Start, stop, the status read every second, the restart after a failure, the window's status payload. |
-| [companion.mjs](companion.mjs) | The companion child process: binary location, environment, loopback routes, device RPC transport, stop. |
-| [device.mjs](device.mjs) | The companion's device read with `@urnetwork/sdk` over the device RPC: provide state, data provided, provider contract rows. |
-| [status.mjs](status.mjs) | Status fields, status line text and the clients-served count. |
+| [companion.mjs](companion.mjs) | The companion child process: binary location, environment, status route, stop. |
+| [status.mjs](status.mjs) | Reading the companion's status into the status fields, and the status line text. |
 | [state.mjs](state.mjs) | The private installation state directory and the client JWT import. |
 | [wallet.mjs](wallet.mjs) | The read-only payout wallet from `GET /sn/wallet`. |
 | [autostart.mjs](autostart.mjs) | Start at login: the login item on macOS and Windows, an XDG autostart entry on Linux. |
 | [ipc.mjs](ipc.mjs), [preload.cjs](preload.cjs) | The IPC channels and status payload, and the sandboxed window's only bridge. |
 | [renderer/](renderer/index.html) | The window: disclaimer, Start, the four fields, Stop, client JWT import and start at login. |
 | [icon.mjs](icon.mjs) | The tray icon, drawn at runtime. |
-| [test/](test/status.test.mjs) | Credential-free unit tests, run with `npm test` without Electron. |
+| [test/](test/status.test.mjs) | Credential-free unit tests, run with `npm test` without Electron, and a stand-in companion for them. |
 
 ## Build and test
 
-Use Node 24 or later with npm, and Go 1.26.7 or later for the companion. The app depends on `@urnetwork/sdk` at the `nightly` tag and on Electron 44. The companion's [go.mod](../../javascript/integration/companion/go.mod) requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query rather than a pin: `go mod tidy` resolves it to the latest 2026 SDK release, so run it first. Provider mode needs the provider intent, client limit and extender APIs, which are in the first SDK release after sdk `c638dfa8`.
+Use Node 24 or later with npm, and Go 1.26.7 or later for the companion. The app's only dependency is Electron 44; it needs no URnetwork JavaScript package, because the companion serves the whole status. The companion's [go.mod](../../javascript/integration/companion/go.mod) requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query rather than a pin: `go mod tidy` resolves it to the latest 2026 SDK release, so run it first. Provider mode needs the provider intent, client limit and extender APIs, which are in the first SDK release after sdk `c638dfa8`.
 
 The app runs the companion from `bin/<platform>-<arch>/` in this directory, named with Node's `process.platform` and `process.arch`: `bin/darwin-arm64/ur-companion`, `bin/linux-x64/ur-companion`, `bin/win32-x64/ur-companion.exe`. Set `URNETWORK_COMPANION_PATH` to an absolute path to run another build. On macOS and Linux, from the examples checkout:
 
@@ -36,7 +35,7 @@ cd javascript/integration/companion
 go mod tidy
 go build -o "../../../electron/provider/bin/$(node -p 'process.platform + "-" + process.arch')/ur-companion" .
 cd ../../../electron/provider
-npm install
+npm ci
 npm test
 npm start
 ```
@@ -48,12 +47,12 @@ cd javascript\integration\companion
 go mod tidy
 go build -o ..\..\..\electron\provider\bin\win32-x64\ur-companion.exe .
 cd ..\..\..\electron\provider
-npm install
+npm ci
 npm test
 npm start
 ```
 
-`npm test` runs the self-test as unit tests with `node --test`; it starts no Electron, no companion and no network connection, and needs no credentials. It checks the disclaimer text, the window's disclaimer next to Start, the byte, status text and status line formats, the providing state rules and their order (`stopped` before `client limit`, `client limit` before `paused`), a new client limit retry time, the payout wallet labels, the clients-served count by peer, the client JWT claim, the state directory (private permissions, atomic replacement, `instance-id` created once and reused, configuration errors), the client JWT import, the companion's environment and routes, its stop and restart policy (with a stand-in companion process), the device reads, the IPC payload, the preload bridge and the window's script, and start at login. The companion owns `identity.json`; its own tests check the identity handling (`go test` in the companion directory).
+`npm test` runs the self-test as unit tests with `node --test`; it starts no Electron and no native companion, connects to nothing beyond loopback, and needs no credentials. It checks the disclaimer text, the window's disclaimer next to Start, the byte, status text and status line formats, the providing state rules and their order (`stopped` before `client limit`, `client limit` before `paused`), a new client limit retry time, the payout wallet labels, reading the companion's status into the four fields (including `100000+` at the clients-served limit and 0 bytes without packet stats), the client JWT claim, the state directory (private permissions, atomic replacement, `instance-id` created once and reused, configuration errors), the client JWT import, the companion's environment and status route, its stop and restart policy (with a stand-in companion process), the IPC payload, the preload bridge and the window's script, start at login, and entry points that start without `import.meta.main`, which Node defines only from 24.2. The companion owns `identity.json` and counts the clients served; its own tests check the identity handling and the contract's peer and clients-served vectors (`go test` in the companion directory).
 
 ### Package
 
@@ -150,7 +149,7 @@ Or start the packaged app. Click **Start providing**: the app starts the compani
 | Field | Meaning |
 | --- | --- |
 | Status | `starting` until the provider is enabled and connected to the platform, then `providing`; `client limit, retry at HH:MM UTC` while the platform holds this client off; `paused` and `stopped` otherwise. |
-| Clients served | Distinct clients that opened a contract with this provider since the app started. |
+| Clients served | Distinct clients that opened a contract with this provider since providing started. |
 | Data provided | Bytes relayed for clients, both directions, since providing started. |
 | Payout wallet | The mapped coldkey, read only, with `(this provider)` for this client's own mapping, `(network)` for the network's wallet, `(hotkey)` for the network's hotkey delegation (a later server and SDK change) or `(another provider)`; `checking`, `not set` or `unavailable` otherwise. |
 
@@ -160,7 +159,7 @@ The tray icon's tooltip shows the same values as the contract's status line:
 status: providing | clients served: 3 | data provided: 12.4 MiB | payout wallet: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY (network)
 ```
 
-The companion's `/provider-status` route gives the provide mode, the provider's platform connection and the client limit status, which the JavaScript SDK does not bind. The device RPC gives the provide state, the provider packet stats (data provided) and the provider contract rows (clients served, counted by peer). With the JavaScript SDK as of sdk `c638dfa8`, an extension remote does not serve the provider contract details and packet stats that these view controllers read: the rows stay empty, and the stats appear only for about a second after each traffic update. Until an SDK release fixes this, clients served stays 0 and data provided shows the largest total the app read.
+Every value comes from the companion's `/provider-status` route, which the companion reads in process with the full SDK: the provide mode, enabled and paused state, the provider's platform connection, the client limit status, the provider packet stats (data provided adds their two byte counts) and the clients served, which the companion counts by peer with the contract's rules. Each Start runs a new companion, so both counts start again from 0; while stopped they show 0.
 
 `client limit` means the platform disconnected this client because your network reached its plan's concurrent client limit and this installation has not qualified as a provider. The SDK retries by itself after about 15 to 20 minutes, at the time the status shows. A provider install that qualifies as a provider (providing publicly, passing its egress probe and reliable) is exempt from the limit and does not get this status.
 

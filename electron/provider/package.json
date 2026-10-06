@@ -10,9 +10,6 @@
     "start": "electron .",
     "test": "node --test --test-timeout=60000 test/*.test.mjs"
   },
-  "dependencies": {
-    "@urnetwork/sdk": "nightly"
-  },
   "devDependencies": {
     "electron": "^44.5.1"
   },
