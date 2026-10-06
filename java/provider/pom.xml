@@ -1,0 +1,48 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <!-- The Java provider example. `mvn package` builds target/urnetwork-provider.jar with its
+       dependencies in target/dependency and runs the credential-free self-test. -->
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>io.ur.examples</groupId>
+  <artifactId>provider</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- the version of a local SDK build; select a release with -Durnetwork.sdk.version -->
+    <urnetwork.sdk.version>0.0.1-dev.0</urnetwork.sdk.version>
+    <skipTests>false</skipTests>
+  </properties>
+  <dependencies>
+    <dependency><groupId>io.ur</groupId><artifactId>urnetwork-sdk</artifactId><version>${urnetwork.sdk.version}</version></dependency>
+  </dependencies>
+  <build>
+    <sourceDirectory>.</sourceDirectory>
+    <finalName>urnetwork-provider</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.14.0</version>
+        <configuration><includes><include>*.java</include></includes></configuration>
+      </plugin>
+      <plugin>
+        <!-- java -jar target/urnetwork-provider.jar finds the SDK and JNA in target/dependency -->
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-jar-plugin</artifactId><version>3.5.0</version>
+        <configuration><archive><manifest><mainClass>Main</mainClass><addClasspath>true</addClasspath><classpathPrefix>dependency/</classpathPrefix></manifest></archive></configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-dependency-plugin</artifactId><version>3.7.0</version>
+        <executions><execution><id>runtime-dependencies</id><phase>package</phase><goals><goal>copy-dependencies</goal></goals><configuration><includeScope>runtime</includeScope></configuration></execution></executions>
+      </plugin>
+      <plugin>
+        <!-- runs the packaged jar's self-test; -DskipTests skips it -->
+        <groupId>org.codehaus.mojo</groupId><artifactId>exec-maven-plugin</artifactId><version>3.5.0</version>
+        <executions><execution><id>self-test</id><phase>package</phase><goals><goal>exec</goal></goals>
+          <configuration>
+            <executable>${java.home}/bin/java</executable>
+            <arguments><argument>-jar</argument><argument>${project.build.directory}/${project.build.finalName}.jar</argument><argument>--self-test</argument></arguments>
+            <skip>${skipTests}</skip>
+          </configuration>
+        </execution></executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
