@@ -147,7 +147,7 @@ The companion prints the consent disclaimer, creates its device with the install
 | `ClientsServedAtLimit` | The count stopped at 100,000 and is a lower bound (show `100000+`). |
 | `DeviceRpcStarted` | `/device-rpc` is served. |
 
-While providing, the extender role listens on TCP 443 and UDP 443, 53 and 4053 and logs those listeners on stderr. Ctrl-C, SIGTERM and a closed standard input stop providing. Exit codes: **0** after a requested stop, **78** for a configuration or credential problem that a restart does not fix (a missing or invalid state directory or token, a network JWT, or the server rejecting the client credential), and **1** for any other failure.
+While providing, the extender role listens on TCP 443, which the role needs, and on UDP 443 and 4053 when it can bind them, and logs those listeners on stderr. Ctrl-C, SIGTERM and a closed standard input stop providing. Exit codes: **0** after a requested stop, **78** for a configuration or credential problem that a restart does not fix (a missing or invalid state directory or token, a network JWT, or the server rejecting the client credential), and **1** for any other failure.
 
 ## Validation
 
