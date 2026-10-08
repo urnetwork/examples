@@ -1,0 +1,50 @@
+<!doctype html>
+<!-- The embed window: the token server settings, Start and Stop, the status
+     fields, the client and installation IDs, and the SDK's licenses. It loads
+     no remote content; renderer.js talks to the main process only through the
+     preload script's window.urnetworkEmbed. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>URnetwork Embed</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="renderer.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>URnetwork embed</h1>
+    <p class="intro">This app embeds URnetwork for its own traffic only: it uses no VPN.</p>
+    <section class="settings" aria-label="Token server">
+      <label for="token-server-url">Token server URL</label>
+      <input id="token-server-url" type="url" placeholder="https://tokens.example.com" autocomplete="off" spellcheck="false">
+      <label for="demo-session">Demo session</label>
+      <input id="demo-session" type="password" autocomplete="off" spellcheck="false">
+      <button id="save-token-server" type="button">Save</button>
+    </section>
+    <section class="controls" aria-label="Device">
+      <button id="start" type="button">Start</button>
+      <button id="stop" type="button">Stop</button>
+    </section>
+    <dl class="fields" aria-label="Status">
+      <dt>Status</dt>
+      <dd id="status">stopped</dd>
+      <dt>Data this month</dt>
+      <dd id="data-this-month">checking</dd>
+      <dt>Data total</dt>
+      <dd id="data-total">checking</dd>
+      <dt>Client ID</dt>
+      <dd id="client-id"></dd>
+      <dt>Installation ID</dt>
+      <dd id="installation-id"></dd>
+    </dl>
+    <p id="message" class="message" role="status" aria-live="polite"></p>
+    <p class="state-dir">State directory: <code id="state-dir"></code></p>
+    <section class="licenses" aria-label="Licenses">
+      <button id="show-licenses" type="button">Show licenses</button>
+      <ul id="licenses"></ul>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "name": "urnetwork-typescript-embed",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "self-test": "npm run build && node main.ts --self-test",
+    "test": "npm run build && node --test embed.test.ts",
+    "start": "node main.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

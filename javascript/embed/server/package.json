@@ -1,0 +1,12 @@
+{
+  "name": "urnetwork-javascript-embed-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "self-test": "node embed-server.mjs --self-test",
+    "start": "node embed-server.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
