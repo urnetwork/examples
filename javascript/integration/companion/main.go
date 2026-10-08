@@ -3,7 +3,8 @@
 //
 // URNETWORK_COMPANION_PROVIDE selects the mode: unset, this is the messaging
 // companion below; "public", it is the provider companion of the provider
-// examples (provider.go).
+// examples (provider.go). URNETWORK_COMPANION_EMBED=1 selects the embed
+// companion of the embed examples instead (embed.go).
 package main
 
 import (
@@ -150,17 +151,21 @@ func run() error {
 	return err
 }
 
-// Runs the mode that URNETWORK_COMPANION_PROVIDE selects. Messaging errors
-// exit with 1; provider mode exits with the provider exit codes (provider.go),
-// and so does a mode that is not one of the two.
+// Runs the mode that URNETWORK_COMPANION_EMBED and URNETWORK_COMPANION_PROVIDE
+// select. Messaging errors exit with 1; provider and embed modes exit with the
+// provider exit codes (provider.go, embed.go), and so does a mode setting that
+// selects none of them.
 func main() {
-	mode, err := parseCompanionMode(os.Getenv("URNETWORK_COMPANION_PROVIDE"))
+	mode, err := selectCompanionMode(os.Getenv("URNETWORK_COMPANION_PROVIDE"), os.Getenv("URNETWORK_COMPANION_EMBED"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(exitConfig)
 	}
-	if mode == companionModeProvider {
+	switch mode {
+	case companionModeProvider:
 		os.Exit(runProvider(os.Args[1:]))
+	case companionModeEmbed:
+		os.Exit(runEmbed(os.Args[1:]))
 	}
 	if err := run(); err != nil {
 		log.Print(err)

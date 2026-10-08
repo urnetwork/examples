@@ -103,18 +103,25 @@ func loadProviderConfig(stateDir string) (*providerConfig, error) {
 // The state directory must be an existing absolute directory, private to its
 // owner on POSIX.
 func checkStateDir(stateDir string) error {
+	return checkStateDirFor(stateDir, "URNETWORK_PROVIDER_STATE_DIR")
+}
+
+// checkStateDir for the setting named variable, which the errors name: the
+// provider mode's URNETWORK_PROVIDER_STATE_DIR or the embed mode's
+// URNETWORK_EMBED_STATE_DIR.
+func checkStateDirFor(stateDir string, variable string) error {
 	if stateDir == "" {
-		return errors.New("set URNETWORK_PROVIDER_STATE_DIR to this installation's private state directory")
+		return fmt.Errorf("set %s to this installation's private state directory", variable)
 	}
 	if !filepath.IsAbs(stateDir) {
-		return errors.New("URNETWORK_PROVIDER_STATE_DIR must be an absolute path")
+		return fmt.Errorf("%s must be an absolute path", variable)
 	}
 	info, err := os.Stat(stateDir)
 	if err != nil {
 		return fmt.Errorf("state directory: %w", err)
 	}
 	if !info.IsDir() {
-		return errors.New("URNETWORK_PROVIDER_STATE_DIR is not a directory")
+		return fmt.Errorf("%s is not a directory", variable)
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return errors.New("the state directory must be private to its owner (chmod 700)")

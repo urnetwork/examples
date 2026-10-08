@@ -1,0 +1,98 @@
+/* The embed window: system fonts and colors, light and dark. */
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+h1 {
+  font-size: 1.4rem;
+  margin: 0 0 4px;
+}
+
+.intro {
+  margin: 0 0 20px;
+  opacity: 0.75;
+}
+
+.settings {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 12px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.settings button {
+  grid-column: 2;
+  justify-self: start;
+}
+
+input {
+  font: inherit;
+  padding: 6px 8px;
+  min-width: 0;
+}
+
+button {
+  font: inherit;
+  padding: 6px 16px;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0 0 16px;
+}
+
+.fields dt {
+  font-weight: 600;
+}
+
+.fields dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.message {
+  min-height: 1.45em;
+  margin: 0 0 8px;
+}
+
+.state-dir code {
+  overflow-wrap: anywhere;
+}
+
+.licenses ul {
+  padding-left: 20px;
+}
+
+.licenses li {
+  margin-bottom: 8px;
+}
+
+.licenses pre {
+  white-space: pre-wrap;
+  font-size: 0.8rem;
+  max-height: 240px;
+  overflow: auto;
+}
