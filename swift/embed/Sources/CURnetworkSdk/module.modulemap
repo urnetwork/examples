@@ -1,0 +1,7 @@
+// The SDK's C ABI as a Swift module: urnetwork_sdk.h, from the include
+// directory that Package.swift passes, and the URnetworkSdk native library.
+module CURnetworkSdk [system] {
+  header "shim.h"
+  link "URnetworkSdk"
+  export *
+}
