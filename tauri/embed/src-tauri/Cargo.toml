@@ -1,0 +1,26 @@
+[package]
+name = "urnetwork-tauri-embed-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "urnetwork-tauri-embed"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# placeholder icons on the first build (build.rs); tauri-build already uses both
+png = "0.17"
+ico = "0.5"
+
+[dependencies]
+# the embed core shared with the Rust console app, without its console signal handling
+urnetwork-embed-example = { path = "../../../rust/embed", default-features = false }
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

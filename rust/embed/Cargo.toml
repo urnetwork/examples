@@ -1,0 +1,32 @@
+[package]
+name = "urnetwork-embed-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The embed core (state, token fetch, status rules and the embedded Device session) is a library,
+# so the console app here and the Tauri app (tauri/embed) share one tested core.
+[lib]
+name = "urnetwork_embed"
+path = "src/lib.rs"
+
+[[bin]]
+name = "embed"
+path = "src/main.rs"
+required-features = ["console"]
+
+[features]
+default = ["console"]
+# the console app's Ctrl-C and SIGTERM handling; the Tauri app builds without it
+console = ["dep:ctrlc"]
+
+[dependencies]
+urnetwork-sdk = "0.0.1-dev.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+getrandom = "0.3"
+tempfile = "3"
+# HTTPS for the token fetch and the cap reads (rustls with bundled roots), no async runtime
+ureq = "=3.4.2"
+ctrlc = { version = "3", features = ["termination"], optional = true }

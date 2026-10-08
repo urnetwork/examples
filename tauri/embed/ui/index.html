@@ -1,0 +1,51 @@
+<!doctype html>
+<!-- The embed window: the token server settings that stand in for your sign-in, start and stop, the three status
+fields and the installation's identity. The Rust core formats every value; main.js only shows them. No bundler:
+Tauri serves this folder as is. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>URnetwork embed</title>
+    <link rel="stylesheet" href="style.css">
+    <script type="module" src="main.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>URnetwork embed</h1>
+      <p class="intro">This app embeds a URnetwork Device that carries only the app's own traffic. Your backend's token
+      server provisions this installation's client and delivers its scoped client JWT; the root credential never
+      reaches the app.</p>
+      <section class="sign-in">
+        <label for="token-server-url">Token server URL</label>
+        <input id="token-server-url" type="url" placeholder="http://127.0.0.1:8790" autocomplete="off" spellcheck="false">
+        <label for="demo-session">Demo session</label>
+        <input id="demo-session" type="password" placeholder="demo session token" autocomplete="off" spellcheck="false">
+        <p class="hint">Leave both empty to use a <code>client.jwt</code> from your backend tool's provision command.</p>
+        <div class="controls">
+          <button id="start" type="button">Start</button>
+          <button id="stop" type="button" disabled>Stop</button>
+        </div>
+      </section>
+      <dl class="fields">
+        <dt>Status</dt>
+        <dd id="status">stopped</dd>
+        <dt>Data this month</dt>
+        <dd id="data-this-month">checking</dd>
+        <dt>Data total</dt>
+        <dd id="data-total">checking</dd>
+        <dt>Client ID</dt>
+        <dd id="client-id" class="id"></dd>
+        <dt>Installation ID</dt>
+        <dd id="installation-id" class="id"></dd>
+      </dl>
+      <p id="message" class="message" hidden></p>
+      <p class="state-dir">Installation state: <code id="state-dir"></code></p>
+      <details id="licenses">
+        <summary>Licenses and data attributions</summary>
+        <pre id="licenses-text">Loading…</pre>
+      </details>
+      <p class="note">Next: route your app's traffic through this Device with the Sockets and Messages examples.</p>
+    </main>
+  </body>
+</html>

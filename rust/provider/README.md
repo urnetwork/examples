@@ -1,6 +1,6 @@
 # Rust provider
 
-[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](README.md)
+[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](README.md) · [Embed](../embed/README.md)
 
 This console app runs a URnetwork provider inside your application on Windows, macOS and Linux. It provides publicly as a provider client of your network and shows the provider status: providing state, clients served, data provided and the payout wallet, read only. It follows the [provider contract](../../PROVIDER_CONTRACT.md) and the [Go provider](../../go/provider/README.md), the reference implementation, over the SDK's C ABI. Its provider core is a library that the [Tauri provider](../../tauri/provider/README.md) shares.
 

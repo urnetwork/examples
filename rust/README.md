@@ -26,6 +26,7 @@ Cargo supports Git dependencies, but the source checkout must first have its run
 - [Sockets](socket/README.md): TCP/UDP, TLS/DTLS and HTTP client adapters.
 - [Messages](messages/README.md): live peer discovery and interoperable text/ACK exchange.
 - [Provider](provider/README.md): a provider client of your network with the consent disclaimer, status, payout wallet display and background run; its provider core also runs the [Tauri provider](../tauri/provider/README.md).
+- [Embed](embed/README.md): your backend provisions a client for each installation of your app, with per-user data caps, and the app embeds the SDK and starts a Device that carries only its own traffic; its embed core also runs the [Tauri embed app](../tauri/embed/README.md).
 
 Apps use `URNETWORK_CLIENT_JWT` and a persisted `URNETWORK_INSTANCE_ID`; only the service backend holds `URNETWORK_ROOT_JWT`. See the [shared contract](../INTEGRATION_CONTRACT.md) and [official networking research](../NETWORK_EXAMPLES.md).
 
