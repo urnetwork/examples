@@ -1,6 +1,6 @@
 # Embed integration
 
-An embed example puts URnetwork inside a third party's own product. The developer's backend provisions a URnetwork client for each of its users' installations and delivers that client's scoped JWT to its app; the app embeds the SDK and starts a Device with it. The two halves carry equal weight: [provisioning](#backend-provision-clients) and [per-user data caps](#backend-per-user-data-caps) on the backend, and [packaging and embedding the SDK](#packaging-and-embedding-the-sdk) in the app. The embedded Device carries only the app's own traffic; what the app does with it continues in the [Sockets and Messages examples](#next-traffic-through-the-device).
+An embed example puts URnetwork inside a third party's own product. The developer's backend provisions a URnetwork client for each of its users' installations and delivers that client's scoped JWT to its app; the app embeds the SDK and starts a Device with it. The two halves carry equal weight: [provisioning](#backend-provision-clients) and [per-user data caps](#backend-per-user-data-caps) on the backend, and [packaging and embedding the SDK](#packaging-and-embedding-the-sdk) in the app. The embedded Device carries only the app's own traffic; what the app sends through it continues in the [Sockets examples](#next-traffic-through-the-device). Messages do not run on the embed Device: they need a provider-capable Device, as [Next](#next-traffic-through-the-device) explains.
 
 This contract applies to every embed example: the twelve [language folders](README.md), each as `<language>/embed/` with its backend tool in `<language>/embed/server/`, and the `electron/embed/`, `tauri/embed/` and `android/embed/` apps. The [Go token server](#the-token-server) in `go/embed/server/` is the reference backend, and the [Go embed app](go/embed/README.md) is the reference app. The [integration contract](INTEGRATION_CONTRACT.md) still governs the backend and client credential boundary; this document adds what embedding needs.
 
@@ -44,7 +44,7 @@ Treat the root credential like a production database password: keep it in the ba
 The backend provisions with `POST /network/auth-client` and the root credential, as the [integration contract](INTEGRATION_CONTRACT.md#backend-provisioning) describes for a top-level client:
 
 - **New client:** send `description` and `device_spec`, and neither `client_id` nor `source_client_id`. The answer carries the new `client_id` and its scoped `by_client_jwt`.
-- **Reissue:** send the stored `client_id` with the same `description` and `device_spec`. The answer carries a fresh `by_client_jwt` for the same client; check that its `client_id` matches the map.
+- **Reissue:** send the stored `client_id` with a `description` and a `device_spec`. The server does not require the values the client was created with: every request relabels the client with the `description` and `device_spec` it sends, and an empty `device_spec` clears the stored one. Send the same values each time to keep the labels stable. The answer carries a fresh `by_client_jwt` for the same client; check that its `client_id` matches the map.
 - **Deactivated client:** a client that has not connected for 30 days is deactivated, and its reissue answers `Client does not exist.` Remove that mapping, provision a new client, and apply the installation's caps to the new client.
 
 Check the HTTP result, the API error and both success fields, check that the JWT's `client_id` claim equals the answer's `client_id`, and refuse a new `client_id` that the map already assigns to another key. A refusal answers 200 with `error.message`. The description is visible to URnetwork, so do not put your users' identifiers in it; the map already links each client to its user.
@@ -66,16 +66,16 @@ jq -r .by_client_jwt auth-client.json > client.jwt  # deliver it to the installa
 rm auth-client.json
 ```
 
-For a reissue, post `{"client_id": "<stored client id>", "description": "embed client", "device_spec": "urnetwork-examples/curl"}` instead.
+For a reissue, post `{"client_id": "<stored client id>", "description": "embed client", "device_spec": "urnetwork-examples/curl"}` instead, with the same labels as before.
 
 ## Backend: per-user data caps
 
 Each client has two optional caps, and either, both or neither may be set:
 
 - The **monthly cap** limits the bytes the client uses in each UTC calendar month. It resets at 00:00 UTC on the first of the month, not at midnight in the user's time zone.
-- The **running-total cap** limits the bytes used since the total last started. It never resets on its own: the backend raises or clears it, or starts a new total period with `reset_total`.
+- The **running-total cap** limits the bytes used since the total started: at the first cap request for the client, or at its last `reset_total`. It never resets on its own: the backend raises or clears it, or starts a new total period with `reset_total`.
 
-At a cap the client gets no new transfer contracts until the month rolls over, the cap is raised or cleared, or the total is reset: a hard stop, not a throttle. Usage is accounted when transfer contracts settle, so the used counts lag live traffic, and a client can pass a cap by up to the size of its contracts that are still open. Set caps with that headroom in mind. A cap of `0` pauses the client at once; a pause lasts until that cap changes, and the month rolling over does not lift a monthly cap of `0`.
+At a cap the client gets no new transfer contracts until the month rolls over, the cap is raised or cleared, or the total is reset: a hard stop, not a throttle. Usage is accounted when transfer contracts settle and rolled up within about two minutes, so the used counts lag live traffic, a cap takes effect within about two minutes of being reached, and a client can pass a cap by up to the size of its contracts that are still open. Set caps with that headroom in mind. Metering never over-counts: each contract is counted at most once. A capped client's new contracts are refused the way an empty balance is, so read the caps to tell the two apart. A cap of `0` pauses the client at once; a pause lasts until that cap changes, and the month rolling over does not lift a monthly cap of `0`.
 
 ### Set caps
 
@@ -109,7 +109,7 @@ There are no threshold notifications; the backend and the app poll these reads.
 | `monthly_period_start`, `monthly_period_end` | The current month, RFC 3339 in UTC; the end is when monthly usage resets. |
 | `total_byte_limit` | The running-total cap in bytes, or `null` for none. |
 | `total_used_byte_count` | Bytes used since `total_period_start`. |
-| `total_period_start` | When the running total last started. |
+| `total_period_start` | When the running total started: the client's first cap request, or its last `reset_total`. `null` for a client that never had a cap request. |
 | `capped` | True while a cap is reached: the client gets no new transfer contracts. |
 | `capped_reason` | `monthly`, `total`, or `""` when the client is not capped. |
 
@@ -147,7 +147,7 @@ curl -fsS "$API/network/client-data-caps?limit=1000" -H "Authorization: Bearer $
 
 ## The token server
 
-The Go token server in `go/embed/server/` is a minimal backend the embed apps call over HTTP to obtain their client JWT: the shape of a real service's sign-in endpoint. It uses only the Go standard library and no URnetwork SDK. It authenticates the app's demo session, provisions or reissues the installation's client, applies default caps to new clients and returns the client JWT. The same binary also runs the [backend commands](#backend-tools) against its own map.
+The Go token server in `go/embed/server/` is a minimal backend the embed apps call over HTTP to obtain their client JWT: the shape of a real service's sign-in endpoint. It uses only the Go standard library and no URnetwork SDK. It authenticates the app's demo session, provisions or reissues the installation's client, applies default caps to new clients and returns the client JWT. The same binary also runs the [backend commands](#backend-tools) against its own map; its `provision` command issues a key exactly as the HTTP route does, default caps and `pending_caps` included, so every client in its map is capped or recorded as owing its caps.
 
 ### Configuration
 
@@ -172,7 +172,7 @@ The demo session file stands in for your service's real authentication; your ser
 }
 ```
 
-Tokens are unique. Service user IDs match `[A-Za-z0-9][A-Za-z0-9_.@-]{0,72}`: no colon, so that `user:<service-user-id>:<installation-id>` splits one way and stays within the map key pattern. Compare presented tokens in constant time. A file that does not parse, has another version, a token shorter than 32 characters or an invalid user ID is a configuration error.
+Tokens are unique and made only of visible ASCII (`!` to `~`), so they travel in an `Authorization` header. Service user IDs match `[A-Za-z0-9][A-Za-z0-9_.@-]{0,72}`: no colon, so that `user:<service-user-id>:<installation-id>` splits one way and stays within the map key pattern. Compare presented tokens in constant time. A file that does not parse, has another version, a token shorter than 32 characters or with a character outside visible ASCII, or an invalid user ID is a configuration error.
 
 ### HTTP contract
 
@@ -202,6 +202,7 @@ A success answers 200 with:
 | 401 | `unauthorized` | A missing or unknown demo session token. |
 | 409 | `installation_limit` | The user already has the maximum number of installations. |
 | 409 | `client_limit` | URnetwork refused a new client with `error.client_limit_exceeded` or `error.upgrade_required`. The message points to the [Services page](https://ur.io/services). |
+| 500 | `internal` | The token server itself failed, such as an unreadable or invalid map or a disk error. |
 | 502 | `upstream` | The URnetwork API failed, answered something invalid, or the default caps could not be applied. |
 | 503 | `busy` | Another process holds the map lock; retry. |
 
@@ -212,7 +213,7 @@ Other methods answer 405 and other paths 404, in the same error shape. There is 
 1. Authenticate the demo session and validate `installation_id`. The key is `user:<service-user-id>:<installation-id>`.
 2. Take the map lock: an in-process mutex and the [allocators'](INTEGRATION_CONTRACT.md#runnable-backend-allocators) exclusive `<map>.lock` directory, held through the remote calls and the map update.
 3. A mapped key is reissued. If the reissue answers `Client does not exist.`, remove the mapping and continue as a new key.
-4. A new key first checks the installation limit: the number of mapped keys beginning `user:<service-user-id>:`. Then it provisions a new client (`"description": "embed installation"`, `"device_spec": "urnetwork-examples/embed-token-server"`), validates the answer, and saves the mapping.
+4. A new key first checks the installation limit: the number of mapped keys beginning `user:<service-user-id>:`. Then it provisions a new client (`"description": "embed installation"`, `"device_spec": "urnetwork-examples/embed-token-server"`), validates the answer, and saves the mapping. A reissue sends the same labels. The `provision` command labels its clients `embed client` and `urnetwork-examples/go-embed-server`; since a reissue relabels a client, a key reissued by the other path just takes the newer labels.
 5. When default caps are configured, a new client's key is saved in the map's `pending_caps` together with the mapping, then the caps are applied with `POST /network/client-data-cap` (only the configured fields), and the key leaves `pending_caps` once that succeeds. If applying fails, the answer is 502 and no token is returned. A later request for a key that is still in `pending_caps` applies the default caps before it returns a token. A key never stays uncapped without a record.
 6. Read the cap object, release the lock and answer.
 
@@ -234,7 +235,7 @@ It never answers with, prints or logs the root credential, a session token or a 
 
 ## Backend tools
 
-Every console language has a backend tool in `<language>/embed/server/`, and the Go token server has the same commands. Each extends the language's [integration allocator](INTEGRATION_CONTRACT.md#runnable-backend-allocators): the same settings (`URNETWORK_ROOT_JWT`, `URNETWORK_CLIENT_MAP`, optional `URNETWORK_API_URL`), map format, key pattern, lock and response checks.
+Every console language has a backend tool in `<language>/embed/server/`, and the Go token server has the same commands. Each extends the language's [integration allocator](INTEGRATION_CONTRACT.md#runnable-backend-allocators): the same settings (`URNETWORK_ROOT_JWT`, `URNETWORK_CLIENT_MAP`, optional `URNETWORK_API_URL`), map format, key pattern, lock and response checks. The lock is the allocators' exclusive `<map>.lock`: most tools create it as a directory, and C# as an exclusively created file, as the integration contract describes; the two shapes block each other because they claim the same path.
 
 | Command | Does |
 | --- | --- |
@@ -245,17 +246,21 @@ Every console language has a backend tool in `<language>/embed/server/`, and the
 | `remove <key>` | Removes the key's client with `POST /network/remove-client`, then the mapping (also when the answer is `Client does not exist.`), and prints `{"removed": "<client_id>"}`. |
 | `--self-test` | The credential-free self-test below. |
 
-`<key>` matches the allocator pattern, so `user:alice` and `user:alice:22222222-2222-2222-2222-222222222222` both work. The language tools accept a map with only `version` and `clients` and refuse one with other fields, such as the token server's `pending_caps`, so that two tools never rewrite each other's map. The description they send is `embed client` and the device spec `urnetwork-examples/<language>-embed-server`.
+`<key>` matches the allocator pattern, so `user:alice` and `user:alice:22222222-2222-2222-2222-222222222222` both work. The language tools accept a map with only `version` and `clients` and refuse one with other fields, such as the token server's `pending_caps`, so that two tools never rewrite each other's map. The description they send is `embed client` and the device spec `urnetwork-examples/<language>-embed-server`, on a new client and on every reissue.
 
-A refusal for either client limit flag prints `client limit reached: your network is at its client limit; see https://ur.io/services` on stderr. The tools exit **0** on success, **78** for a configuration or credential problem (missing settings, an invalid key or map, the root credential refused, the client limit), and **1** for any other failure, with one stderr line that never contains a secret.
+A refusal for either client limit flag prints `client limit reached: your network is at its client limit; see https://ur.io/services` on stderr. The tools exit **0** on success, **78** for a configuration or credential problem (missing settings, an invalid key or map, the root credential refused, the client limit), and **1** for any other failure, with one stderr line that never contains a secret. Three failures have fixed rules:
 
-The self-test needs no credentials and no network. It checks the allocator rules (new versus reissue, key and argument rejection, private map round trip, response and claim checks), the `Client does not exist.` re-provision, the client JWT file's private permissions and that the token never reaches stdout or stderr, the merge request bodies (an omitted option is absent from the JSON, `null` is JSON `null`, byte counts are integers, `reset_total` appears only when given), the cap object parsing, the `usage-all` paging and its stop on a repeated cursor, `remove` dropping the mapping for both answers, the refusal of a map with unknown fields, and the exit codes.
+- `cap`, `usage` or `remove` for a key with no mapped client exits **78** with `no client is mapped for that key; run provision first`.
+- A `<map>.lock` that another process holds exits **1**, a retryable failure, with a line that names the lock and says to retry.
+- A cap route (`/network/client-data-cap` or `/network/client-data-caps`) that answers 404 exits **1** with `<path> answered 404: the server predates the data-cap routes`, where `<path>` is the route's path without its query.
+
+The self-test needs no credentials and no network. It checks the allocator rules (new versus reissue, key and argument rejection, private map round trip, response and claim checks), the `Client does not exist.` re-provision, the client JWT file's private permissions and that the token never reaches stdout or stderr, the merge request bodies (an omitted option is absent from the JSON, `null` is JSON `null`, byte counts are integers, `reset_total` appears only when given), the cap object parsing, the `usage-all` paging and its stop on a repeated cursor, `remove` dropping the mapping for both answers, the refusal of a map with unknown fields, the unmapped-key and cap-route 404 texts, and the exit codes.
 
 ## Packaging and embedding the SDK
 
 **In-app traffic only.** The embedded Device routes only the traffic the app sends through it: a socket opened on the Device, or an HTTP client pointed at the [loopback proxy](NETWORK_EXAMPLES.md#shared-interpretation). It does not use the operating system's VPN APIs, so the app needs no Android `VpnService` and no Apple Network Extension VPN entitlement, and Google Play's VpnService declaration does not apply. The app's privacy disclosures still apply: it routes some of its users' traffic through URnetwork, and its privacy policy, App Store privacy details and Play data safety form must say so. The SDK ships no Apple privacy manifest (`PrivacyInfo.xcprivacy`); each embedding app owns its disclosures.
 
-**License.** The SDK (urnetwork/sdk) and connect are licensed under the [Mozilla Public License 2.0](https://mozilla.org/MPL/2.0/), a file-level copyleft. The embedding app's own code can stay proprietary; changes to the SDK's own source files must be shared under the MPL. Publish the SDK's licenses and data attributions with the app: `GetLicenses(app)` (C ABI `urnet_get_licenses`) returns them for the app kind (`android`, `apple`, `windows`, `linux`, `web` or `extension`) with no network.
+**License.** The SDK (urnetwork/sdk) and connect are licensed under the [Mozilla Public License 2.0](https://mozilla.org/MPL/2.0/), a file-level copyleft. The embedding app's own code can stay proprietary; changes to the SDK's own source files must be shared under the MPL. Publish the SDK's licenses and data attributions with the app: `GetLicenses(app)` (C ABI `urnet_get_licenses`) returns them for the app kind (`android`, `apple`, `windows`, `linux`, `web` or `extension`) with no network, as a JSON array of license objects with the Go field names. Every console example prints them with [`--licenses`](#console-commands).
 
 | Platform | How the SDK is added and pinned | Binding | Native runtime |
 | --- | --- | --- | --- |
@@ -289,20 +294,20 @@ Each installation keeps its state in one private directory with the [provider co
 | `token-server.json` | GUI and Android apps | `{"url": "...", "session": "..."}`: the token server origin and the demo session token. |
 | `logs/` | The SDK | The SDK's bounded log files, as in the [provider contract](PROVIDER_CONTRACT.md#app-lifecycle). |
 
-The state directory works with the Sockets and Messages examples: `URNETWORK_CLIENT_JWT` is the content of `client.jwt` and `URNETWORK_INSTANCE_ID` the content of `instance-id`. Run one program at a time with one identity.
+The state directory works with the Sockets and Messages programs: `URNETWORK_CLIENT_JWT` is the content of `client.jwt` and `URNETWORK_INSTANCE_ID` the content of `instance-id`. Run one program at a time with one identity.
 
 ## Obtaining the client JWT
 
 Each example has one named function, such as `fetchClientJwt`, that obtains the client JWT, so the pattern is easy to find and to replace with your own sign-in:
 
-- **Token server.** When a token server is configured — console examples read `URNETWORK_TOKEN_SERVER_URL` and `URNETWORK_DEMO_SESSION`, GUI and Android apps read `token-server.json` — the app posts its `instance-id` to `POST /urnetwork/client-token` with the demo session as the bearer token, checks that `by_client_jwt` carries a `client_id` claim equal to `client_id`, and saves it as `client.jwt`. The URL is an HTTPS origin, or explicit loopback HTTP (`localhost`, `127.0.0.1`, `[::1]`) for local testing. It fetches on every start, so a start reissues the client.
+- **Token server.** When a token server is configured — console examples read `URNETWORK_TOKEN_SERVER_URL` and `URNETWORK_DEMO_SESSION`, GUI and Android apps read `token-server.json` — the app posts its `instance-id` to `POST /urnetwork/client-token` with the demo session as the bearer token, checks that `by_client_jwt` carries a `client_id` claim equal to `client_id`, and saves it as `client.jwt`. The URL is an HTTPS origin, or explicit loopback HTTP (`localhost`, `127.0.0.1`, `[::1]`) for local testing; Android debug builds also allow plain HTTP to `10.0.2.2`, the host as the emulator sees it. It fetches on every start, so a start reissues the client.
 - **Otherwise** the app uses the `client.jwt` already in its state, as written by a [backend tool](#backend-tools)'s `provision` or by the developer.
 
 | Token server answer | Console exit | GUI and Android |
 | --- | --- | --- |
 | 200 | — | — |
 | 401 `unauthorized`, 409 `installation_limit` or `client_limit` | 78 | `signed out`, with the error's message |
-| Unreachable, 5xx, or an invalid answer | 1 | `stopped`, with the error's message |
+| Any other status (such as 400, 404, 405, 500, 502 or 503), unreachable, or an invalid answer | 1 | `stopped`, with the error's message |
 
 ## App lifecycle
 
@@ -334,7 +339,7 @@ C ABI callbacks run on SDK threads: copy what they carry before returning, keep 
 
 ## Status
 
-Every example shows these fields with these exact rules. Console examples print the client ID and installation ID at start, then one status line when any field's text changes, and otherwise once a minute; GUI and Android apps show the same fields as labeled values, with the client ID and installation ID.
+Every example shows these fields with these exact rules. Console examples print `embed client <client_id>, installation <installation_id>` at start, then one status line when any field's text changes, and otherwise once a minute; GUI and Android apps show the same fields as labeled values, with the client ID and installation ID.
 
 | Field | Rule |
 | --- | --- |
@@ -342,7 +347,15 @@ Every example shows these fields with these exact rules. Console examples print 
 | Data this month | `checking` until the first cap reading; `unavailable` if that reading fails (a later failure keeps the last value; a server without the cap routes answers 404, which counts as a failure); `no cap` when `monthly_byte_limit` is `null`; otherwise `<used> of <limit>` from `monthly_used_byte_count` and `monthly_byte_limit`. |
 | Data total | The same rule with `total_used_byte_count` and `total_byte_limit`. |
 
-A field without a cap shows `no cap`, never a used count: a server need not report usage for an uncapped client. Data amounts use decimal units, because data plans and the Embed plan's monthly data budget are sold in them: below 1000 `N B`, otherwise `kB`, `MB`, `GB`, `TB`, `PB`, `EB` in powers of 1000, with one decimal, moving to the next unit when the rounded value reaches 1000.0. Round to the nearest tenth with ties to even, as Go's `%.1f` does: an exact half such as 1250 bytes (1.25 kB) shows `1.2 kB` and 1750 bytes shows `1.8 kB`. Formatters that round ties up (JavaScript `toFixed`, Java and Kotlin `String.format`) need an explicit tie rule. The console status line is:
+A field without a cap shows `no cap`, never a used count: a server need not report usage for an uncapped client. Data amounts use decimal units, because data plans and the Embed plan's monthly data budget are sold in them: below 1000 bytes `N B`, otherwise one decimal in `kB`, `MB`, `GB`, `TB`, `PB` or `EB`, in powers of 1000. Every language computes the text with exact integer arithmetic, never binary floating point, so all fifteen examples print the same text for every byte count:
+
+1. Below 1000, print `N B`.
+2. Start with `kB`, whose tenth is 100 bytes. Divide the byte count by the unit's tenth, with quotient `q` and remainder `r`.
+3. Round half to even: add 1 to `q` when `2r` exceeds the tenth, or equals it and `q` is odd.
+4. When `q` reaches 10000 (1000.0 in the unit) and a larger unit remains, move to the next unit, whose tenth is 1000 times larger, and go back to step 2.
+5. Print `q / 10`, a point, `q % 10` and the unit.
+
+An exact tie rounds to even: 1250 bytes (exactly 1.25 kB) shows `1.2 kB`, 1750 bytes `1.8 kB`, and 1050 bytes (exactly 1.05 kB) `1.0 kB`. Float formatting does not meet this rule: 1.05 has no exact binary value, so a formatter that rounds the binary value (Go's `%.1f`, Python's `format`, .NET `F1`, Rust `{:.1}`) shows `1.1 kB`, and formatters that round ties up (JavaScript `toFixed`, Java and Kotlin `String.format`) differ on other ties. The console status line is:
 
 ```text
 status: <status> | data this month: <monthly> | data total: <total>
@@ -353,9 +366,11 @@ Golden vectors for self-tests:
 | Input | Text |
 | --- | --- |
 | 0, 999, 1000, 999949 bytes | `0 B`, `999 B`, `1.0 kB`, `999.9 kB` |
-| 1250, 1750 bytes (exact halves, ties to even) | `1.2 kB`, `1.8 kB` |
+| 1050, 1150, 1250, 1750 bytes (exact halves, ties to even) | `1.0 kB`, `1.2 kB`, `1.2 kB`, `1.8 kB` |
+| 999950 bytes (999.95 kB ties to the even 1000.0, next unit) | `1.0 MB` |
 | 999999 bytes (rounds to 1000.0 kB, next unit) | `1.0 MB` |
 | 1234567890, 5000000000, 10000000000, 3000000000000 bytes | `1.2 GB`, `5.0 GB`, `10.0 GB`, `3.0 TB` |
+| 9223372036854775807 bytes (the largest byte count) | `9.2 EB` |
 | `monthly_period_end` `2026-11-01T00:00:00Z` | `resets 2026-11-01 00:00 UTC` |
 | `monthly_period_end` `2026-10-31T23:59:00.001Z` (rounds up) | `resets 2026-11-01 00:00 UTC` |
 | `monthly_period_end` `2026-10-31T19:00:00-05:00` (to UTC) | `resets 2026-11-01 00:00 UTC` |
@@ -388,11 +403,23 @@ Status rule vectors, for the order of the rules (GUI and Android show the first 
 
 Console examples exit with **0** after a requested stop (Ctrl-C, SIGTERM), **78** for a configuration or credential problem that a restart does not fix (missing or invalid state, a network JWT, an auth logout, or a token server answer of 401 or 409), and **1** for any other failure. An embedded Device lives with its app, so the embed examples have no background templates.
 
+## Console commands
+
+Every console example takes one command:
+
+| Command | Does |
+| --- | --- |
+| `embed` or `embed run` | Runs the app until a stop or a failure. |
+| `embed --self-test` | The [self-test](#self-test); prints one passed line and exits 0. |
+| `embed --licenses` | Prints the SDK's licenses and data attributions for the host OS's app kind (`apple` on macOS, `windows` on Windows, `linux` elsewhere) as the JSON array `GetLicenses` returns, and exits 0. It loads the SDK and needs no state, credential or network. JavaScript and TypeScript ask the companion, which has the same flag. |
+
+A `--version` command that prints the SDK version is optional. Any other argument is a usage error (exit 78).
+
 ## Self-test
 
 Every embed app has a self-test that needs no credentials and no network and creates no device. Console examples run it with `--self-test` and print a single passed line; GUI and Android samples run it as their unit tests. Where the language allows, it does not load the native SDK runtime. It checks:
 
-- the byte, reset time, client limit text and status line vectors above, and the status rules with the rule vectors (`client limit` before `paused`, `paused` before `data cap reached`, the cap that `capped_reason` names deciding `paused`);
+- the byte vectors above, computed with the exact integer rule, and the reset time, client limit text and status line vectors, and the status rules with the rule vectors (`client limit` before `paused`, `paused` before `data cap reached`, the cap that `capped_reason` names deciding `paused`);
 - the data fields: `checking`, `unavailable`, a later failure keeping the last value, `no cap` for a `null` limit even with a used count, and `<used> of <limit>`;
 - the cap object parsing: `null` or absent limits, `capped` and `capped_reason`, an unknown `capped_reason` read as capped without a reset time;
 - the JWT `client_id` claim: accepted for a client JWT, refused for a network JWT, a malformed token and an invalid UUID;
@@ -402,10 +429,10 @@ Every embed app has a self-test that needs no credentials and no network and cre
 
 ## Next: traffic through the Device
 
-The embed example ends where the app's own traffic begins. Use the same Device:
+The embed example ends where the app's own traffic begins.
 
-- **Sockets** route TCP, UDP and HTTP clients through it. Libraries that need an operating system socket use the loopback proxy; the [networking matrix](NETWORK_EXAMPLES.md) maps each language's HTTP stack to its adapter.
-- **Messages** exchange the [URMS](MESSAGES_PROTOCOL.md) text and ACK protocol with other clients of your network.
+- **Sockets** route TCP, UDP and HTTP clients through the embed Device. Libraries that need an operating system socket use the loopback proxy; the [networking matrix](NETWORK_EXAMPLES.md) maps each language's HTTP stack to its adapter.
+- **Messages** exchange the [URMS](MESSAGES_PROTOCOL.md) text and ACK protocol with other clients of your network, but not on the embed Device. Subprotocol messages attach to a Device's provider client, and the embed Device does not provide. A Messages program, or the companion in messaging mode, starts its own provider-capable Device for the installation, and that Device provides to your network: your network's other clients can route traffic through that installation. Ask your users before you turn that on.
 
 Every embed client is a top-level client, so it appears in your network's peer list (`GET /network/peers` and the peer change stream) while the network has 100 or fewer recently active top-level clients; the Messages examples depend on that list, and your app decides what of it to show.
 
@@ -420,8 +447,8 @@ Each `<platform>/embed/README.md` follows the [Go embed README](go/embed/README.
 5. Backend: the [root credential](#the-root-credential) (an API key for production), provisioning and caps with the [token server](#the-token-server) or the language's [backend tool](#backend-tools), with curl equivalents; pausing and removing a client; the [client limit](#backend-provision-clients) and the Embed plan.
 6. Package: how the SDK and its native runtime ship with the app on each OS, the license and `GetLicenses`, and where `client.jwt` lives.
 7. Configure the installation: the state directory on each OS and the token server settings, or a `client.jwt` from `provision`.
-8. Run: per-OS commands, a sample status line, the field table, the `client limit` and data cap states in a sentence each, and the exit codes.
-9. Next: the language's [Sockets](README.md) and Messages guides, with the state directory exported as `URNETWORK_CLIENT_JWT` and `URNETWORK_INSTANCE_ID`.
+8. Run: per-OS commands, a sample status line, the field table, the `client limit` and data cap states in a sentence each, the [console commands](#console-commands) or the GUI's controls, and the exit codes.
+9. Next: the language's [Sockets](README.md) guide, with the state directory exported as `URNETWORK_CLIENT_JWT` and `URNETWORK_INSTANCE_ID`; and the Messages guide, with the note that Messages run on their own provider-capable Device, which provides to the network and needs the user's consent.
 
 ## Platform notes
 
@@ -435,7 +462,7 @@ Tauri runs the Device in its Rust core with the `urnetwork-sdk` crate through th
 
 ### Android
 
-The Android app is a Kotlin app on the gomobile AAR. The Device lives in an application-scoped holder, started from an explicit user action and closed on Stop or when the app signs out; in-app traffic in the foreground needs no foreground service and no VpnService, and the app needs only the `INTERNET` permission. Keep the state in a private `embed` directory in the no-backup files directory, never in the APK or backups. Your app's sign-in provides the session; for local testing, debug builds import the token server URL and the demo session over adb, and release builds have no import path. A debug network security configuration allows cleartext HTTP only to the loopback token server (`10.0.2.2` from the emulator, or `adb reverse tcp:8790 tcp:8790` from a device); release builds use HTTPS.
+The Android app is a Kotlin app on the gomobile AAR. The Device lives in an application-scoped holder, started from an explicit user action and closed on Stop or when the app signs out; in-app traffic in the foreground needs no foreground service and no VpnService, and the app needs only the `INTERNET` permission. Keep the state in a private `embed` directory in the no-backup files directory, never in the APK or backups. Your app's sign-in provides the session; for local testing, debug builds import the token server URL and the demo session over adb, and release builds have no import path. A debug network security configuration allows cleartext HTTP only to the loopback token server: `10.0.2.2`, the host as the emulator sees it, or `127.0.0.1` after `adb reverse tcp:8790 tcp:8790` from a device; release builds use HTTPS. The debug import broadcast takes `token_server_url` and `demo_session`, or `client_jwt` (a client JWT that a backend tool's `provision` wrote) together with `clear_token_server`, which drops `token-server.json` so the app starts with that `client.jwt`.
 
 ### JavaScript and TypeScript
 
@@ -443,11 +470,12 @@ The WebAssembly SDK cannot run a local Device, so the [native companion](javascr
 
 - It reads `client.jwt` and `instance-id` from `URNETWORK_EMBED_STATE_DIR` with the [installation state](#installation-state) rules, rewrites `client.jwt` when the SDK refreshes it, and points the SDK's logs at `logs/` there.
 - It creates its device as the native examples do (description `JavaScript embed companion`, spec `urnetwork-examples/node-embed-companion`), sets the connect location to best available, and waits for the platform without a time limit, because a client limit hold lasts 15 to 20 minutes.
-- It serves `GET /embed-status` from the start, authorized by `URNETWORK_COMPANION_TOKEN` like its other routes: `{"ClientId": "...", "InstanceId": "...", "WindowStatus": {...} or null, "ClientLimitStatus": {"Status": "", "RetryTime": 0}, "ContractStatus": {...} or null, "Licenses": {...}}`, with the Go field names and `Licenses` from `GetLicenses` for the host OS's app kind.
-- It serves `/device-rpc` as the messaging companion does, for what a browser-state DeviceRemote gets.
+- It serves `GET /embed-status` from the start, authorized by `URNETWORK_COMPANION_TOKEN` like its other routes: `{"ClientId": "...", "InstanceId": "...", "WindowStatus": {...} or null, "ClientLimitStatus": {"Status": "", "RetryTime": 0}, "ContractStatus": {...} or null, "Licenses": [...]}`, with the Go field names. `Licenses` is the JSON array of `GetLicenses` for the host OS's app kind, the same array `urnet_get_licenses` returns; it is hundreds of kilobytes, so a read with `?licenses=0` leaves it out, and the apps read the status every second that way and the licenses once.
+- `ur-companion --licenses` in embed mode prints that array and exits 0, with no state, credential or network; the JavaScript and TypeScript apps' `--licenses` runs it.
+- It serves `/device-rpc` as the messaging companion does, for what a browser-state DeviceRemote gets. Subprotocol messages do not work through it, because the embed device does not provide.
 - An auth logout stops the device and exits with code 78. It honors `URNETWORK_COMPANION_STOP_ON_STDIN_CLOSE` like provider mode.
 
-The JavaScript and TypeScript embed apps are Node 24 programs: they obtain the client JWT, then start the companion as a child process (`bin/<platform>-<arch>/ur-companion`, or `URNETWORK_COMPANION_PATH`), with a random per-launch token and a free loopback port, read `/embed-status` every second and the caps with `fetch` every 5 minutes and within 5 seconds of a change in its `ContractStatus`, and print the status line. Messages continue on the companion as in the [Messages examples](javascript/messages/README.md); the JavaScript and TypeScript [Sockets examples](javascript/socket/README.md) use a hosted Device today.
+The JavaScript and TypeScript embed apps are Node 24 programs: they obtain the client JWT, then start the companion as a child process (`bin/<platform>-<arch>/ur-companion`, or `URNETWORK_COMPANION_PATH`), with a random per-launch token and a free loopback port, read `/embed-status` every second and the caps with `fetch` every 5 minutes and within 5 seconds of a change in its `ContractStatus`, and print the status line. Messages run on the companion in messaging mode, as in the [Messages examples](javascript/messages/README.md), whose device provides to your network, not on the embed companion; the JavaScript and TypeScript [Sockets examples](javascript/socket/README.md) use a hosted Device today.
 
 ### Swift
 
@@ -455,7 +483,7 @@ The cross-platform Swift embed app uses the C ABI header and library through a S
 
 ## Release availability
 
-The embed apps need no SDK API beyond what ships today; they read the caps over HTTP. They need an SDK release from the first release after sdk `c638dfa8`, which adds the client limit status. The companion's embed mode and `/embed-status` route are example code in this repository, built against that SDK.
+The embed apps need no SDK API beyond what ships today; they read the caps over HTTP. They need an SDK release from the first release after sdk `c638dfa8`, which adds the client limit status. The companion's embed mode and `/embed-status` route are example code in this repository, built against that SDK. Where a published package is older than that release, each README gives the local build path, such as the Swift example's `URNETWORK_SDK_INCLUDE` and `URNETWORK_SDK_LIBDIR` or a fresh `make -C sdk/rust` before using the staged Rust crate.
 
 The data-cap routes (`POST` and `GET /network/client-data-cap`, `GET /network/client-data-caps`) and the per-network client limit that an Embed plan raises ship with the server release that adds them; they follow the API in connect's `api/bringyour.yml`. On an older server the cap routes answer 404: the apps show `unavailable` for the data fields, and the backend tools report the failure.
 
