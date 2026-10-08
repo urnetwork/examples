@@ -151,16 +151,20 @@ module Allocator
   end
 end
 
-begin
-  if ARGV == ['--self-test']
-    Allocator.self_test
-  else
-    user = Allocator.service_user(ARGV)
-    url = Allocator.endpoint(ENV.fetch('URNETWORK_API_URL', 'https://api.bringyour.com'))
-    root, file = ENV.fetch('URNETWORK_ROOT_JWT'), ENV.fetch('URNETWORK_CLIENT_MAP')
-    puts JSON.generate(Allocator.allocate(user, file) { |body| Allocator.post(url, root, body) })
+# Run only as a program, so the embed backend tool (../../embed/server/backend.rb)
+# can require this module and extend it.
+if File.expand_path($PROGRAM_NAME) == File.expand_path(__FILE__)
+  begin
+    if ARGV == ['--self-test']
+      Allocator.self_test
+    else
+      user = Allocator.service_user(ARGV)
+      url = Allocator.endpoint(ENV.fetch('URNETWORK_API_URL', 'https://api.bringyour.com'))
+      root, file = ENV.fetch('URNETWORK_ROOT_JWT'), ENV.fetch('URNETWORK_CLIENT_MAP')
+      puts JSON.generate(Allocator.allocate(user, file) { |body| Allocator.post(url, root, body) })
+    end
+  rescue StandardError
+    warn 'allocator failed: check service key, private mapping and backend API configuration'
+    exit 1
   end
-rescue StandardError
-  warn 'allocator failed: check service key, private mapping and backend API configuration'
-  exit 1
 end
