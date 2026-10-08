@@ -1,6 +1,6 @@
 # C# sockets, HttpClient and RestSharp
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Embed](../embed/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [Program.cs](Program.cs) uses `URnetwork.SDK` with a local Device. [UrStream.cs](UrStream.cs) adapts its Conn to a .NET Stream and [UrSession.cs](../integration/UrSession.cs) owns the native SDK handles.
 
