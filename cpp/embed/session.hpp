@@ -35,9 +35,10 @@ namespace embed {
 inline constexpr auto statusPollInterval = std::chrono::seconds(1);
 inline constexpr auto statusRepeatInterval = std::chrono::seconds(60);
 
-// How often the caps are read, and how soon after a contract status change.
+// How often the caps are read. A contract status change reads them at the next
+// pass of the run loop, well within the contract's 5 seconds; changes during a
+// read add one more read.
 inline constexpr auto capReadInterval = std::chrono::minutes(5);
-inline constexpr auto contractCapReadDelay = std::chrono::seconds(5);
 
 // The device description and spec recorded for this installation's device.
 inline constexpr const char* deviceDescription = "C++ embed example";
@@ -173,7 +174,7 @@ public:
         bool printed = false;
         auto lastPrintTime = std::chrono::steady_clock::now();
         auto nextCapRead = lastPrintTime + (config.firstCap ? capReadInterval : std::chrono::minutes(0));
-        std::optional<std::chrono::steady_clock::time_point> contractCapRead;
+        bool contractCapReadPending = false;
         bool capReadRunning = false;
         bool capReadFailing = false;
         for (;;) {
@@ -199,16 +200,16 @@ public:
                 }
                 capReadFailing = !work.capReading;
             }
-            if (work.contractStatusChanged && !contractCapRead) {
-                contractCapRead = now + contractCapReadDelay;
+            if (work.contractStatusChanged) {
+                contractCapReadPending = true;
             }
-            if (!capReadRunning && (nextCapRead <= now || (contractCapRead && *contractCapRead <= now))) {
+            if (!capReadRunning && (nextCapRead <= now || contractCapReadPending)) {
                 capReadRunning = startCapRead();
                 if (!capReadRunning) {
                     caps.apply(std::nullopt);
                 }
                 nextCapRead = now + capReadInterval;
-                contractCapRead.reset();
+                contractCapReadPending = false;
             }
             std::string line = statusLine(readStatus());
             if (!printed || line != lastLine || statusRepeatInterval <= now - lastPrintTime) {

@@ -18,9 +18,10 @@
 #define STATUS_POLL_MILLIS 1000
 #define STATUS_REPEAT_MILLIS (60 * 1000)
 
-/* How often the caps are read, and how soon after a contract status change. */
+/* How often the caps are read. A contract status change reads them at the
+ * next pass of the run loop, well within the contract's 5 seconds; changes
+ * during a read add one more read. */
 #define CAP_READ_MILLIS (5 * 60 * 1000)
-#define CONTRACT_CAP_READ_MILLIS (5 * 1000)
 
 /* The device description and spec recorded for this installation's device. */
 #define DEVICE_DESCRIPTION "C embed example"
@@ -367,8 +368,8 @@ int ur_embed_session_run(ur_embed_session *session) {
   bool cap_read_failing = false;
   int64_t next_cap_read_millis =
       monotonic_millis() + (session->config->has_first_cap ? CAP_READ_MILLIS : 0);
-  /* 0 when no contract status change waits for a cap read */
-  int64_t contract_cap_read_millis = 0;
+  /* a contract status change waits for a cap read */
+  bool contract_cap_read_pending = false;
   for (;;) {
     callback_work work;
     take_callback_work(&work);
@@ -391,16 +392,15 @@ int ur_embed_session_run(ur_embed_session *session) {
                 work.cap_read_error);
       cap_read_failing = !work.cap_read_succeeded;
     }
-    if (work.contract_status_changed && !contract_cap_read_millis)
-      contract_cap_read_millis = now_millis + CONTRACT_CAP_READ_MILLIS;
+    if (work.contract_status_changed)
+      contract_cap_read_pending = true;
     if (!cap_read_running &&
-        (next_cap_read_millis <= now_millis ||
-         (contract_cap_read_millis && contract_cap_read_millis <= now_millis))) {
+        (next_cap_read_millis <= now_millis || contract_cap_read_pending)) {
       cap_read_running = start_cap_read(session->config);
       if (!cap_read_running)
         ur_embed_caps_apply(&session->caps, NULL);
       next_cap_read_millis = now_millis + CAP_READ_MILLIS;
-      contract_cap_read_millis = 0;
+      contract_cap_read_pending = false;
     }
     char line[UR_EMBED_LINE_CAPACITY];
     read_status_line(session, line, sizeof(line));
