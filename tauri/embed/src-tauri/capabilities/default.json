@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "The main window calls the app's embed commands and listens to the embed-view event.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

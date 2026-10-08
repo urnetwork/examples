@@ -1,6 +1,6 @@
 # Rust sockets, ureq and reqwest
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Embed](../embed/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [src/main.rs](src/main.rs) runs the examples. [session.rs](src/session.rs) owns a local Device, and [ur_http.rs](src/ur_http.rs) supplies a ureq connector, resolver and transport over `urnetwork_sdk::Conn`.
 

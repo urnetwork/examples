@@ -1,0 +1,13 @@
+[package]
+name = "urnetwork-embed-server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# SERVER ONLY: the embed backend tool, which extends the integration allocator (rust/integration/server)
+# with data caps and removal. It does not depend on the URnetwork SDK.
+[dependencies]
+reqwest = { version = "=0.13.5", features = ["blocking", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
