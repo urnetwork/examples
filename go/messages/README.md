@@ -1,6 +1,6 @@
 # Go peer messages
 
-[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](README.md) · [Provider](../provider/README.md)
+[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](README.md) · [Provider](../provider/README.md) · [Embed](../embed/README.md)
 
 This local Device example discovers real-time peers and exchanges text over subprotocol **4096** using the shared [URMS v1 TEXT/ACK format](../../MESSAGES_PROTOCOL.md). Its files are [main.go](main.go), [codec.go](codec.go), [codec_test.go](codec_test.go) and [go.mod](go.mod); the Device bootstrap is described in [Integration](../integration/README.md).
 

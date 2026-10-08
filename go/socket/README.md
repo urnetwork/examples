@@ -1,6 +1,6 @@
 # Go sockets and HTTP clients
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Embed](../embed/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [main.go](main.go) creates a local Device and demonstrates `net.Conn`-compatible sockets. [socket.go](socket.go) installs `Device.DialContext` in an `http.Transport`. [proxy.go](proxy.go) also provides a runnable loopback proxy for clients in other languages that require OS sockets.
 

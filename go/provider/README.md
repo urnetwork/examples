@@ -1,6 +1,6 @@
 # Go provider
 
-[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](README.md)
+[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](README.md) · [Embed](../embed/README.md)
 
 This console app runs a URnetwork provider inside your application on Windows, macOS and Linux. It provides publicly as a provider client of your network and shows the provider status: providing state, clients served, data provided and the payout wallet, read only. It is the reference for the [provider contract](../../PROVIDER_CONTRACT.md), which every provider example follows.
 
