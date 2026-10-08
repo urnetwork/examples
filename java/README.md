@@ -26,6 +26,7 @@ Maven and Gradle do not natively consume arbitrary Git dependencies. Clone sdk a
 - [Sockets](socket/README.md): TCP/UDP, TLS/DTLS and HTTP client adapters.
 - [Messages](messages/README.md): live peer discovery and interoperable text/ACK exchange.
 - [Provider](provider/README.md): a provider client of your network with the consent disclaimer, status, payout wallet display and background run.
+- [Embed](embed/README.md): URnetwork inside your own app: one scoped client per installation from your backend, the in-app Device, and the installation's data caps; with the backend tool that provisions clients and sets caps.
 
 Apps use `URNETWORK_CLIENT_JWT` and a persisted `URNETWORK_INSTANCE_ID`; only the service backend holds `URNETWORK_ROOT_JWT`. See the [shared contract](../INTEGRATION_CONTRACT.md) and [official networking research](../NETWORK_EXAMPLES.md).
 

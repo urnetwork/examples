@@ -1,6 +1,6 @@
 # Java sockets, OkHttp, Retrofit and Apache HttpClient
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Embed](../embed/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [Main.java](Main.java) runs the examples; [UrSession.java](../integration/UrSession.java) owns a local Device and [UrSocketFactory.java](UrSocketFactory.java) implements the Java Socket/SocketFactory operations these HTTP clients use.
 

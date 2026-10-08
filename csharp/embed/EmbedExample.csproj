@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><InvariantGlobalization>true</InvariantGlobalization><UrSdkVersion Condition="'$(UrSdkVersion)' == ''">0.0.1-dev.0</UrSdkVersion></PropertyGroup>
+  <ItemGroup><PackageReference Include="URnetwork.SDK" Version="$(UrSdkVersion)" /></ItemGroup>
+  <!-- server/ is the backend tool, a separate project -->
+  <ItemGroup><Compile Remove="server/**" /><None Remove="server/**" /></ItemGroup>
+</Project>
