@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app's labels. The status texts are in EmbedStatus.kt, where the unit tests check them. -->
+<resources>
+    <string name="app_name">URnetwork embed</string>
+    <string name="intro">This app embeds the URnetwork SDK and starts a device for its own traffic, with a client JWT that your backend provisioned for this installation. It is not a device VPN.</string>
+    <string name="start">Start</string>
+    <string name="stop">Stop</string>
+    <string name="status_label">Status</string>
+    <string name="data_month_label">Data this month</string>
+    <string name="data_total_label">Data total</string>
+    <string name="client_id_label">Client ID</string>
+    <string name="installation_id_label">Installation ID</string>
+    <string name="not_known">—</string>
+    <string name="licenses">Licenses</string>
+    <string name="licenses_title">URnetwork SDK licenses</string>
+    <string name="licenses_loading">Loading…</string>
+    <string name="close">Close</string>
+    <string name="next_steps">Next: send your app\'s own traffic through this device. See the Sockets and Messages examples in the URnetwork examples repository.</string>
+    <string name="sdk_version">URnetwork SDK %1$s</string>
+</resources>

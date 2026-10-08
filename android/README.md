@@ -23,7 +23,8 @@ Clone sdk with `connect`, `glog`, `goidenticons` and `gvisor` next to it, instal
 ## Examples
 
 - [Provider](provider/README.md): a provider client of your network in a foreground service, with the consent disclaimer, status, payout wallet display and background run.
+- [Embed](embed/README.md): URnetwork inside your own app, for its own traffic: the client JWT from your backend's token server, the device, and the installation's status and data caps.
 
-Apps get a scoped client JWT from their backend; only the service backend holds `URNETWORK_ROOT_JWT`. See the [shared contract](../INTEGRATION_CONTRACT.md) and the [provider contract](../PROVIDER_CONTRACT.md).
+Apps get a scoped client JWT from their backend; only the service backend holds `URNETWORK_ROOT_JWT`. See the [shared contract](../INTEGRATION_CONTRACT.md), the [provider contract](../PROVIDER_CONTRACT.md) and the [embed contract](../EMBED_CONTRACT.md).
 
 Use an SDK release containing the required APIs. The [package plan](https://github.com/urnetwork/sdk/blob/main/PACKAGEMANAGERS.md) records package names, build outputs and publication gates.
