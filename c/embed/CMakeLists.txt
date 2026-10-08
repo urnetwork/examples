@@ -1,0 +1,26 @@
+# Builds the C embed example and its self-test, which links neither the SDK
+# library nor libcurl, with the SDK package's urnetwork::sdk target and CURL.
+cmake_minimum_required(VERSION 3.24)
+project(urnetwork_c_embed LANGUAGES C)
+set(CMAKE_C_STANDARD 11)
+find_package(urnetwork-sdk CONFIG REQUIRED)
+find_package(CURL REQUIRED)
+find_package(Threads REQUIRED)
+add_executable(embed main.c session.c status.c state.c fetch.c http_curl.c json.c selftest.c)
+target_link_libraries(embed PRIVATE urnetwork::sdk CURL::libcurl Threads::Threads)
+# the self-test without the sdk library or libcurl: only the sdk header's
+# constants
+add_executable(embed-self-test selftest_main.c status.c state.c fetch.c json.c selftest.c)
+target_include_directories(embed-self-test PRIVATE $<TARGET_PROPERTY:urnetwork::sdk,INTERFACE_INCLUDE_DIRECTORIES>)
+target_link_libraries(embed-self-test PRIVATE Threads::Threads)
+enable_testing()
+add_test(NAME embed-self-test COMMAND embed-self-test)
+if(MSVC)
+  target_compile_definitions(embed PRIVATE _CRT_SECURE_NO_WARNINGS)
+  target_compile_definitions(embed-self-test PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+if(WIN32)
+  target_link_libraries(embed PRIVATE bcrypt)
+  target_link_libraries(embed-self-test PRIVATE bcrypt)
+  add_custom_command(TARGET embed POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:urnetwork::sdk> $<TARGET_FILE_DIR:embed>)
+endif()
