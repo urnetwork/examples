@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The light theme; values-night has the dark one. The screen draws under the system bars and pads itself. -->
+<resources>
+    <style name="Theme.Embed" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
