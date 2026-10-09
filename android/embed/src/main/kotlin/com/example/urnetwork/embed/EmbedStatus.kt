@@ -136,7 +136,8 @@ fun dataFieldText(reading: DataCapReading, monthly: Boolean): String = when (rea
 /**
  * Decimal units with one decimal, as data plans are sold: "0 B", "999 B", "1.0 kB", "12.4 MB". A
  * value that rounds to 1000.0 moves to the next unit. The decimal is the exact value rounded to the
- * nearest tenth with ties to even, as Go's %.1f formats it: 1250 bytes shows "1.2 kB".
+ * nearest tenth with ties to even, never a binary fraction: 1050 bytes shows "1.0 kB" and 1250
+ * bytes "1.2 kB".
  */
 fun formatDataAmount(byteCount: Long): String {
     if (byteCount < 1000) {

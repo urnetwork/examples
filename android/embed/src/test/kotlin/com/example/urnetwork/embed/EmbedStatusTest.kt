@@ -39,7 +39,7 @@ class EmbedStatusTest {
         assertEquals("client_limit_exceeded", Sdk.ClientLimitStatusExceeded)
     }
 
-    /** Data amounts use decimal units with one decimal, ties to even. */
+    /** Data amounts use decimal units with one decimal, ties to even on the exact integer. */
     @Test
     fun formatDataAmount() {
         val cases = listOf(
@@ -47,10 +47,14 @@ class EmbedStatusTest {
             999L to "999 B",
             1000L to "1.0 kB",
             999949L to "999.9 kB",
-            // exact halves round to even, as Go's %.1f does
+            // exact halves round to even on the integer; rounding the binary value of 1.05 would
+            // give 1.1
+            1050L to "1.0 kB",
+            1150L to "1.2 kB",
             1250L to "1.2 kB",
             1750L to "1.8 kB",
-            // rounds to 1000.0 kB, so the next unit
+            // 999.95 kB ties to the even 1000.0 kB and moves to the next unit, as does 999.999 kB
+            999950L to "1.0 MB",
             999999L to "1.0 MB",
             1234567890L to "1.2 GB",
             5000000000L to "5.0 GB",

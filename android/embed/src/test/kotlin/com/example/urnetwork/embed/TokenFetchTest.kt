@@ -255,6 +255,9 @@ class TokenFetchTest {
             StandInAnswer(503, errorBody("busy", "retry")),
             StandInAnswer(500, "not json"),
             StandInAnswer(400, errorBody("invalid_request", "installation_id must be a lowercase UUID")),
+            StandInAnswer(404, "404 page not found"),
+            StandInAnswer(405, errorBody("method_not_allowed", "use POST")),
+            StandInAnswer(500, errorBody("internal", "internal error")),
             StandInAnswer(200, "not json"),
         )
         for (answer in answers) {
