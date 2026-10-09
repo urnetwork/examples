@@ -33,6 +33,11 @@ internal sealed class StandInApi {
   public bool AclUnsupported;
   // when set, the ACL route answers the other group
   public bool AclMismatch;
+  // when set, Embed isn't enabled for the network: the data-cap and ACL-group
+  // routes answer the refusal and GET /network/embed answers enabled false
+  public bool EmbedDisabled;
+  // when set, GET /network/embed answers this body
+  public string? EmbedAnswer;
   private int nextClient = 1;
   private int generation;
 
@@ -70,6 +75,14 @@ internal sealed class StandInApi {
       }
       string id = Id(nextClient++);
       return Issue(id, ClaimOverride ?? id);
+    }
+    if (EmbedDisabled && (path.StartsWith(Program.CapPath, StringComparison.Ordinal) || path == Program.AclPath)) {
+      return Answer(200, """{"error":{"message":"Embed isn't enabled for this network."}}""");
+    }
+    if (request.Method == "GET" && path == Program.EmbedPath) {
+      return Answer(200, EmbedAnswer ?? new JsonObject {
+        ["enabled"] = !EmbedDisabled, ["client_limit"] = 100, ["active_client_count"] = nextClient - 1,
+      }.ToJsonString());
     }
     if (request.Method == "POST" && path == Program.CapPath) {
       return Answer(200, CapAnswer ?? Cap(Program.Text(body["client_id"]) ?? ""));
@@ -143,6 +156,8 @@ internal static class SelfTest {
       CheckRemove(dir);
       CheckMap(dir);
       CheckAclGroups(dir);
+      CheckEmbedNotEnabled(dir);
+      CheckEmbedStatus(dir);
       CheckFailureTexts(dir);
       CheckNothingSecretPrinted();
     } finally {
@@ -261,7 +276,7 @@ internal static class SelfTest {
       ["cap", "user:a", "--monthly", "9223372036854775808"], ["cap", "user:a", "--monthly", "1", "--monthly", "2"],
       ["cap", "user:a", "--foo"], ["cap", "user:a", "--monthly"], ["cap", "user:a", "--reset-total", "--reset-total"],
       ["acl"], ["acl", "user:a"], ["acl", "user:a", "other"], ["acl", "user:a", "Default"],
-      ["acl", "user:a", "default", "extra"], ["acl", "alice", "default"],
+      ["acl", "user:a", "default", "extra"], ["acl", "alice", "default"], ["status", "extra"],
     ];
     foreach (string[] args in usage) {
       Expect(Exec(api, env, args).Exit == 78, $"the arguments [{string.Join(' ', args)}] do not exit 78");
@@ -486,6 +501,75 @@ internal static class SelfTest {
       Expect(Exec(refused, Env(dir, "pending.json"), "provision", "user:x", Path.Combine(dir, "x.jwt")).Exit == 78 &&
              File.ReadAllText(map) == text && refused.Requests.Count == 0,
              $"the map {text} is accepted");
+    }
+  }
+
+  /// The Embed-not-enabled refusal: cap, usage, usage-all and acl exit 78 with
+  /// the fixed line; provision still provisions and writes the client JWT,
+  /// keeps the default group pending with the fixed stderr line, and a
+  /// provision after the team enables Embed applies it.
+  private static void CheckEmbedNotEnabled(string dir) {
+    var api = new StandInApi();
+    var isolated = Env(dir, "embed.json", aclGroup: null);
+    Expect(Exec(api, isolated, "provision", "user:pia", Path.Combine(dir, "pia.jwt")).Exit == 0,
+           "provision before the refusal failed");
+    api.EmbedDisabled = true;
+    foreach (string[] args in new[] {
+               new[] { "cap", "user:pia", "--monthly", "1" }, new[] { "usage", "user:pia" },
+               new[] { "usage-all" }, new[] { "acl", "user:pia", "isolated" },
+             }) {
+      var refused = Exec(api, isolated, args);
+      Expect(refused.Exit == 78 && refused.Out == "" && refused.Err == Program.EmbedNotEnabledLine + Environment.NewLine,
+             $"{args[0]} while Embed isn't enabled answers {refused.Exit}: {refused.Err}");
+    }
+    string quinnJwt = Path.Combine(dir, "quinn.jwt");
+    var run = Exec(api, isolated, "provision", "user:quinn", quinnJwt);
+    string quinn = ClientMap.Load(Path.Combine(dir, "embed.json")).Clients["user:quinn"];
+    Expect(run.Exit == 0 && run.Out.Trim() == $"{{\"client_id\":\"{quinn}\"}}" &&
+           run.Err == Program.EmbedPendingLine + Environment.NewLine,
+           $"provision while Embed isn't enabled answers {run.Exit}: {run.Out}{run.Err}");
+    Expect(File.ReadAllText(quinnJwt) == api.IssuedJwts[^1] + "\n" &&
+           PendingAcl(dir, "embed.json").SequenceEqual(new[] { "user:quinn" }),
+           "provision while Embed isn't enabled wrote no client JWT or dropped the record");
+    api.EmbedDisabled = false;
+    run = Exec(api, isolated, "provision", "user:quinn", quinnJwt);
+    Expect(run.Exit == 0 && run.Err == "" && PendingAcl(dir, "embed.json").Count == 0 &&
+           api.AclGroups[quinn] == "isolated",
+           $"provision after Embed was enabled does not apply the group: {run.Err}");
+  }
+
+  /// The status command: GET /network/embed with the root credential, printed
+  /// as the fixed line for an enabled and a not enabled network; a refusal
+  /// exits 78; a server without the route and an invalid answer exit 1.
+  private static void CheckEmbedStatus(string dir) {
+    var env = Env(dir, "status.json");
+    var api = new StandInApi { EmbedAnswer = """{"enabled":true,"client_limit":5000,"active_client_count":1234}""" };
+    var run = Exec(api, env, "status");
+    Expect(run.Exit == 0 && run.Out == "embed enabled: yes | client limit: 5000 | active clients: 1234" + Environment.NewLine &&
+           run.Err == "",
+           $"status printed {run.Out}{run.Err}");
+    Expect(api.Requests.Count == 1 && api.Requests[0].Method == "GET" && api.Requests[0].PathAndQuery == Program.EmbedPath &&
+           api.Requests[0].Body == null,
+           "the status request is not GET /network/embed");
+    run = Exec(new StandInApi { EmbedDisabled = true }, env, "status");
+    Expect(run.Exit == 0 && run.Out == "embed enabled: no | client limit: 100 | active clients: 0" + Environment.NewLine,
+           $"status while Embed isn't enabled printed {run.Out}{run.Err}");
+    run = Exec(new StandInApi { EmbedAnswer = """{"error":{"message":"Invalid credential."}}""" }, env, "status");
+    Expect(run.Exit == 78 && run.Out == "" && run.Err.Contains("Invalid credential.") && run.Err.Count(c => c == '\n') == 1,
+           $"status on a refusal answers {run.Exit}: {run.Err}");
+    Expect(Exec(new StandInApi { Status = 401 }, env, "status").Exit == 78, "status with a refused root credential");
+    run = Exec(new StandInApi { Status = 404 }, env, "status");
+    Expect(run.Exit == 1 && run.Err.Trim() == Program.EmbedUnsupportedMessage,
+           $"status on a server without Embed enablement answers {run.Exit}: {run.Err}");
+    foreach (string invalid in new[] {
+               """{"enabled":true}""", """{"enabled":"yes","client_limit":1,"active_client_count":1}""",
+               """{"enabled":true,"client_limit":-1,"active_client_count":0}""",
+               """{"enabled":true,"client_limit":1.5,"active_client_count":0}""",
+               """{"enabled":1,"client_limit":1,"active_client_count":1}""",
+               """{"enabled":true,"client_limit":"1","active_client_count":1}""",
+             }) {
+      run = Exec(new StandInApi { EmbedAnswer = invalid }, env, "status");
+      Expect(run.Exit == 1 && run.Out == "", $"status accepted {invalid}");
     }
   }
 

@@ -56,7 +56,7 @@ internal sealed class EmbedSession : IDisposable {
   // cap readings so far, and the cap read in flight
   private string clientJwt;
   private readonly CapReadings capReadings = new();
-  private Task<DataCap?>? capRead;
+  private Task<CapRead>? capRead;
   private TimeSpan nextCapReadTime;
 
   private readonly object stateLock = new();
@@ -193,7 +193,14 @@ internal sealed class EmbedSession : IDisposable {
       nextCapReadTime = now + CapReadAfterContractChange;
     }
     if (capRead is { IsCompleted: true } finished) {
-      capReadings.Record(finished.IsCompletedSuccessfully ? finished.Result : null);
+      CapRead read = finished.IsCompletedSuccessfully ? finished.Result : new CapRead(null);
+      // the Embed-not-enabled refusal clears the last reading; another failure
+      // keeps it
+      if (read.EmbedNotEnabled) {
+        capReadings.RecordEmbedNotEnabled();
+      } else {
+        capReadings.Record(read.Cap);
+      }
       capRead = null;
     }
     if (capRead == null && nextCapReadTime <= now) {

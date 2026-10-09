@@ -25,6 +25,28 @@ internal sealed record DataCap {
   // "monthly", "total", or "" when the client is not capped
   public string CappedReason { get; init; } = "";
 
+  /// The server refuses the cap read with this message while the team has not
+  /// enabled Embed for the network (EMBED_CONTRACT.md, "Embed enablement").
+  public const string EmbedNotEnabledMessage = "Embed isn't enabled for this network.";
+
+  /// Whether a JSON text is the Embed-not-enabled refusal,
+  /// {"error": {"message": "Embed isn't enabled for this network."}}.
+  public static bool IsEmbedNotEnabled(string? json) {
+    if (json == null) {
+      return false;
+    }
+    try {
+      using var document = JsonDocument.Parse(json);
+      return document.RootElement.ValueKind == JsonValueKind.Object &&
+             document.RootElement.TryGetProperty("error", out var error) &&
+             error.ValueKind == JsonValueKind.Object &&
+             error.TryGetProperty("message", out var message) &&
+             message.ValueKind == JsonValueKind.String && message.GetString() == EmbedNotEnabledMessage;
+    } catch (Exception e) when (e is JsonException or ArgumentException) {
+      return false;
+    }
+  }
+
   /// The cap object of a JSON text; null when the text is not one: not JSON,
   /// not an object, an error answer, or a field of the wrong type.
   public static DataCap? Parse(string? json) {
@@ -112,9 +134,14 @@ internal sealed record DataCap {
   }
 }
 
+/// One finished cap read: the cap object, or null for a failure.
+/// EmbedNotEnabled marks the Embed-not-enabled refusal, which clears the last
+/// reading.
+internal sealed record CapRead(DataCap? Cap, bool EmbedNotEnabled = false);
+
 /// The cap readings so far. A failed reading keeps the last successful one;
-/// before any success, a failure shows "unavailable". Owned by the status
-/// loop's thread.
+/// before any success, a failure shows "unavailable". The Embed-not-enabled
+/// refusal clears the last reading. Owned by the status loop's thread.
 internal sealed class CapReadings {
   // the latest successful reading; null until one succeeds
   public DataCap? Latest { get; private set; }
@@ -128,6 +155,14 @@ internal sealed class CapReadings {
       Latest = reading;
     }
   }
+
+  /// Records the Embed-not-enabled refusal: it clears the last reading, so
+  /// both data fields read "unavailable" and the status rules see no cap
+  /// reading.
+  public void RecordEmbedNotEnabled() {
+    Attempted = true;
+    Latest = null;
+  }
 }
 
 /// Reads the installation's own caps with its client JWT.
@@ -139,11 +174,12 @@ internal static class CapClient {
       new(new HttpClientHandler { AllowAutoRedirect = false });
 
   /// GET /network/client-data-cap with the client JWT; the client is the
-  /// JWT's own, so no client_id is sent. Null for any failure: unreachable, a
-  /// status other than 2xx (a server without the cap routes answers 404), or
-  /// an answer that is not a cap object. Never throws.
-  public static async Task<DataCap?> ReadAsync(Uri apiOrigin, string clientJwt,
-                                               HttpMessageInvoker? invoker = null) {
+  /// JWT's own, so no client_id is sent. No cap for any failure: unreachable,
+  /// a status other than 2xx (a server without the cap routes answers 404), or
+  /// an answer that is not a cap object; the Embed-not-enabled refusal is
+  /// marked. Never throws.
+  public static async Task<CapRead> ReadAsync(Uri apiOrigin, string clientJwt,
+                                              HttpMessageInvoker? invoker = null) {
     try {
       using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(apiOrigin, CapPath));
       request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", clientJwt);
@@ -151,13 +187,14 @@ internal static class CapClient {
       using HttpResponseMessage response =
           await (invoker ?? SharedInvoker).SendAsync(request, deadline.Token);
       if (!response.IsSuccessStatusCode) {
-        return null;
+        return new CapRead(null);
       }
       string? body = await ReadBoundedAsync(response.Content, ResponseByteLimit, deadline.Token);
-      return DataCap.Parse(body);
+      return DataCap.IsEmbedNotEnabled(body) ? new CapRead(null, EmbedNotEnabled: true)
+                                             : new CapRead(DataCap.Parse(body));
     } catch (Exception e) when (e is HttpRequestException or OperationCanceledException or
                                     IOException or InvalidOperationException) {
-      return null;
+      return new CapRead(null);
     }
   }
 

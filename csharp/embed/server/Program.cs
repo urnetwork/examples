@@ -2,7 +2,8 @@
 // the integration allocator (../../integration/server) extended with what a
 // backend needs to embed URnetwork. It provisions one client per user
 // installation, sets and reads that client's data caps, reads every capped
-// client of the network, removes a client, and sets a client's ACL group.
+// client of the network, removes a client, sets a client's ACL group, and
+// reads the network's Embed state.
 // Your service authenticates its user first and supplies the key internally:
 // never take a key, a client ID or a cap from a raw request field.
 //
@@ -12,6 +13,7 @@
 //   dotnet run -- usage-all
 //   dotnet run -- remove <key>
 //   dotnet run -- acl <key> default|isolated
+//   dotnet run -- status
 //   dotnet run -- --self-test
 //
 // <key> is user:<service-user-id> or user:<service-user-id>:<installation-id>.
@@ -91,6 +93,7 @@ internal sealed class Api {
       string route = pathAndQuery.Split('?')[0];
       throw new ToolException(Program.ExitFailure,
                               route == Program.AclPath ? Program.AclUnsupportedMessage
+                              : route == Program.EmbedPath ? Program.EmbedUnsupportedMessage
                               : route.StartsWith(Program.CapPath, StringComparison.Ordinal)
                                   ? $"{route} answered 404: the server predates the data-cap routes"
                                   : $"{route} answered 404");
@@ -238,10 +241,23 @@ internal static class Program {
   public const string CapsPath = "/network/client-data-caps";
   public const string RemovePath = "/network/remove-client";
   public const string AclPath = "/network/client-acl-group";
+  public const string EmbedPath = "/network/embed";
   public const string UnmappedMessage = "no client is mapped for that key; run provision first";
   public const string AclUnsupportedMessage = "/network/client-acl-group answered 404: the server predates ACL groups";
+  // The server refuses the data-cap and ACL-group routes with this message
+  // while the team has not enabled Embed for the network (EMBED_CONTRACT.md,
+  // "Embed enablement"); caps and groups set earlier stay enforced.
+  public const string EmbedNotEnabledMessage = "Embed isn't enabled for this network.";
+  // cap, usage, usage-all and acl print this for the refusal and exit 78
+  public const string EmbedNotEnabledLine =
+      "embed not enabled: Embed isn't enabled for this network; see https://ur.io/services";
+  // provision prints this on stderr when the client's default ACL group stays
+  // pending because Embed isn't enabled, and exits 0
+  public const string EmbedPendingLine =
+      "embed not enabled: the client's defaults stay pending until Embed is enabled; see https://ur.io/services";
+  public const string EmbedUnsupportedMessage = "/network/embed answered 404: the server predates Embed enablement";
   public const string Usage =
-      "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test";
+      "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | status | --self-test";
 
   public static readonly Regex Keys = new(@"\Auser:[A-Za-z0-9][A-Za-z0-9_.:@-]{0,122}\z");
   public static readonly Regex Ids = new(@"\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z");
@@ -279,7 +295,7 @@ internal static class Program {
         stdout.WriteLine("embed backend tool self-test passed");
         return ExitOk;
       case ["provision", var key, var jwtFile]:
-        Provision(CheckKey(key), CheckJwtFile(jwtFile), Settings(env, transport, map: true), stdout);
+        Provision(CheckKey(key), CheckJwtFile(jwtFile), Settings(env, transport, map: true), stdout, stderr);
         return ExitOk;
       case ["cap", var key, .. var options]:
         Cap(CheckKey(key), ParseCapOptions(options), Settings(env, transport, map: true), stdout);
@@ -296,6 +312,9 @@ internal static class Program {
       case ["acl", var key, var group]:
         Acl(CheckKey(key), group is "default" or "isolated" ? group : throw Config(Usage),
             Settings(env, transport, map: true), stdout);
+        return ExitOk;
+      case ["status"]:
+        Status(Settings(env, transport, map: false), stdout);
         return ExitOk;
       default:
         throw Config(Usage);
@@ -320,8 +339,10 @@ internal static class Program {
   /// client JWT to jwtFile. A reissue that answers "Client does not exist."
   /// (a client deactivated after 30 days without connecting) drops the
   /// mapping and provisions a new client. Prints {"client_id": ...}, never the
-  /// token.
-  private static void Provision(string key, string jwtFile, ToolSettings settings, TextWriter stdout) {
+  /// token. While Embed isn't enabled the default ACL group stays pending, with
+  /// a line on stderr, and a provision after the team enables Embed applies it.
+  private static void Provision(string key, string jwtFile, ToolSettings settings, TextWriter stdout,
+                                TextWriter stderr) {
     string mapFile = settings.MapFile!;
     using MapLock _ = MapLock.Take(mapFile);
     ClientMap map = ClientMap.Load(mapFile);
@@ -351,17 +372,24 @@ internal static class Program {
       }
       map.Save(mapFile);
     }
+    bool embedEnabled = true;
     if (map.PendingAcl.Contains(key)) {
       // a new client is "default": only an isolated default needs the request.
       // A failure throws with the record kept, before any client JWT is written.
       if (settings.AclGroup == "isolated") {
-        PostAclGroup(settings.Api, result.Value.ClientId, "isolated");
+        embedEnabled = PostAclGroup(settings.Api, result.Value.ClientId, "isolated", allowNotEnabled: true);
       }
-      map.PendingAcl.Remove(key);
-      map.Save(mapFile);
+      // while Embed isn't enabled the record stays and the client works
+      if (embedEnabled) {
+        map.PendingAcl.Remove(key);
+        map.Save(mapFile);
+      }
     }
     WritePrivate(jwtFile, Encoding.UTF8.GetBytes(result.Value.Jwt + "\n"));
     stdout.WriteLine(new JsonObject { ["client_id"] = result.Value.ClientId }.ToJsonString());
+    if (!embedEnabled) {
+      stderr.WriteLine(EmbedPendingLine);
+    }
   }
 
   /// Posts only the given cap fields for the key's client and prints the cap
@@ -443,13 +471,44 @@ internal static class Program {
   }
 
   /// Posts the client's ACL group; the answer must name the client and the
-  /// group. A refusal or another answer fails (1).
-  private static void PostAclGroup(Api api, string clientId, string group) {
+  /// group. A refusal or another answer fails (1), and the Embed-not-enabled
+  /// refusal exits 78, or returns false when allowNotEnabled is set.
+  private static bool PostAclGroup(Api api, string clientId, string group, bool allowNotEnabled = false) {
     JsonObject answer = api.Call("POST", AclPath, new JsonObject { ["client_id"] = clientId, ["acl_group"] = group });
+    if (allowNotEnabled && EmbedNotEnabled(answer)) {
+      return false;
+    }
     CheckRefusal(answer);
     if (Text(answer["client_id"]) != clientId || Text(answer["acl_group"]) != group) {
       throw new ToolException(ExitFailure, "the URnetwork API answered another client or ACL group");
     }
+    return true;
+  }
+
+  /// Prints the network's Embed state from GET /network/embed as one line,
+  /// "embed enabled: yes | client limit: 5000 | active clients: 1234". A
+  /// refusal, such as for a client JWT, is a configuration error (78).
+  private static void Status(ToolSettings settings, TextWriter stdout) {
+    JsonObject answer = settings.Api.Call("GET", EmbedPath, null);
+    if (answer["error"] is { } error) {
+      string message = error is JsonObject errorObject ? Text(errorObject["message"]) ?? "" : "";
+      throw Config($"the URnetwork API refused the request: {Printable(message)}");
+    }
+    if (answer["enabled"] is not JsonValue enabledValue || !enabledValue.TryGetValue(out bool enabled) ||
+        Count(answer["client_limit"]) is not long clientLimit ||
+        Count(answer["active_client_count"]) is not long activeClientCount) {
+      throw new ToolException(ExitFailure, "the URnetwork API answered network/embed with something invalid");
+    }
+    stdout.WriteLine(string.Create(CultureInfo.InvariantCulture,
+        $"embed enabled: {(enabled ? "yes" : "no")} | client limit: {clientLimit} | active clients: {activeClientCount}"));
+  }
+
+  /// A non-negative JSON integer, or null.
+  private static long? Count(JsonNode? node) {
+    return node is JsonValue value && value.GetValueKind() == JsonValueKind.Number &&
+           value.TryGetValue(out long count) && count >= 0
+               ? count
+               : null;
   }
 
   /// The auth-client request: a new client without client_id, or a reissue of
@@ -569,11 +628,20 @@ internal static class Program {
     return answer.ToJsonString();
   }
 
-  /// Fails when an answer carries a refusal.
+  /// Fails when an answer carries a refusal: the Embed-not-enabled refusal is
+  /// a configuration error (78) with the fixed line, another one fails (1).
   private static void CheckRefusal(JsonObject answer) {
+    if (EmbedNotEnabled(answer)) {
+      throw Config(EmbedNotEnabledLine);
+    }
     if (answer["error"] is { } error) {
       throw Refused(error is JsonObject errorObject ? Text(errorObject["message"]) ?? "" : "");
     }
+  }
+
+  /// Whether an answer is the Embed-not-enabled refusal.
+  private static bool EmbedNotEnabled(JsonObject answer) {
+    return answer["error"] is JsonObject error && Text(error["message"]) == EmbedNotEnabledMessage;
   }
 
   /// The client mapped to key; an unmapped key is a configuration error.

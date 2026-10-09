@@ -135,6 +135,14 @@ internal static class SelfTest {
     return capReadings;
   }
 
+  /// Cap readings after the given readings, then the Embed-not-enabled
+  /// refusal.
+  private static CapReadings NotEnabled(params DataCap?[] readings) {
+    CapReadings capReadings = Readings(readings);
+    capReadings.RecordEmbedNotEnabled();
+    return capReadings;
+  }
+
   /// The status lines match the contract's golden lines.
   private static void CheckStatusLines() {
     const string none = StatusRules.ClientLimitStatusNone;
@@ -144,6 +152,13 @@ internal static class SelfTest {
       (Line(none, 0, Readings(new DataCap { MonthlyByteLimit = 5000000000, MonthlyUsedByteCount = 1234567890 }), 1),
        "status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap"),
       (Line(none, 0, Readings((DataCap?)null), 1),
+       "status: connected | data this month: unavailable | data total: unavailable"),
+      (Line(none, 0, NotEnabled(), 1),
+       "status: connected | data this month: unavailable | data total: unavailable"),
+      (Line(none, 0, NotEnabled(new DataCap {
+         MonthlyByteLimit = 5000000000, MonthlyUsedByteCount = 5000000000,
+         MonthlyPeriodEnd = "2026-11-01T00:00:00Z", Capped = true, CappedReason = "monthly",
+       }), 1),
        "status: connected | data this month: unavailable | data total: unavailable"),
       (Line(none, 0, Readings(new DataCap {
          MonthlyByteLimit = 5000000000, MonthlyUsedByteCount = 5000000000,
@@ -227,6 +242,11 @@ internal static class SelfTest {
     var total = new DataCap { TotalByteLimit = 10000000000, TotalUsedByteCount = 1000 };
     Expect(StatusRules.DataField(Readings(total), monthly: false) == "1.0 kB of 10.0 GB",
            "the total field is wrong");
+    // the Embed-not-enabled refusal clears the last reading
+    CapReadings cleared = NotEnabled(good, total);
+    Expect(cleared.Latest == null && StatusRules.DataField(cleared, monthly: true) == "unavailable" &&
+           StatusRules.DataField(cleared, monthly: false) == "unavailable",
+           "the Embed-not-enabled refusal does not clear the last reading");
   }
 
   /// The cap object parsing.
@@ -256,8 +276,13 @@ internal static class SelfTest {
       """{"capped_reason":7}""",
     ];
     foreach (string? text in invalid) {
-      Expect(DataCap.Parse(text) == null, $"invalid cap object {text ?? "null"} parsed");
+      Expect(DataCap.Parse(text) == null && !DataCap.IsEmbedNotEnabled(text),
+             $"invalid cap object {text ?? "null"} parsed");
     }
+    // the Embed-not-enabled refusal is no cap object, and is recognized
+    const string notEnabled = """{"error":{"message":"Embed isn't enabled for this network."}}""";
+    Expect(DataCap.Parse(notEnabled) == null && DataCap.IsEmbedNotEnabled(notEnabled),
+           "the Embed-not-enabled refusal is misread");
   }
 
   /// A JWT with the given claims, unsigned: the app checks the shape and the
@@ -411,25 +436,29 @@ internal static class SelfTest {
   }
 
   /// The cap read presents the client JWT and treats any failure as no
-  /// reading.
+  /// reading; the Embed-not-enabled refusal is marked.
   private static void CheckCapRead() {
     string jwt = Jwt(new { client_id = ClientId });
     var ok = new StandIn(HttpStatusCode.OK, """{"monthly_byte_limit":5,"capped":false,"capped_reason":""}""");
-    DataCap? cap = Read(ok, jwt);
-    Expect(cap is { MonthlyByteLimit: 5 }, "a cap answer is not read");
+    CapRead read = Read(ok, jwt);
+    Expect(read is { Cap.MonthlyByteLimit: 5, EmbedNotEnabled: false }, "a cap answer is not read");
     Expect(ok.Method == "GET" && ok.PathAndQuery == "/network/client-data-cap" &&
            ok.Authorization == "Bearer " + jwt,
            $"the cap read is {ok.Method} {ok.PathAndQuery}");
-    Expect(Read(new StandIn(HttpStatusCode.NotFound, "404 page not found"), jwt) == null,
+    Expect(Read(new StandIn(HttpStatusCode.NotFound, "404 page not found"), jwt) is { Cap: null, EmbedNotEnabled: false },
            "a server without the cap routes is a reading");
-    Expect(Read(new StandIn(HttpStatusCode.OK, """{"error":{"message":"denied"}}"""), jwt) == null,
+    Expect(Read(new StandIn(HttpStatusCode.OK, """{"error":{"message":"denied"}}"""), jwt) is
+               { Cap: null, EmbedNotEnabled: false },
            "an error answer is a reading");
-    Expect(Read(new StandIn(HttpStatusCode.OK, "", unreachable: true), jwt) == null,
+    Expect(Read(new StandIn(HttpStatusCode.OK, "", unreachable: true), jwt) is { Cap: null, EmbedNotEnabled: false },
            "an unreachable API is a reading");
+    Expect(Read(new StandIn(HttpStatusCode.OK, """{"error":{"message":"Embed isn't enabled for this network."}}"""),
+                jwt) is { Cap: null, EmbedNotEnabled: true },
+           "the Embed-not-enabled refusal is not marked");
   }
 
   /// CapClient.ReadAsync against a stand-in API.
-  private static DataCap? Read(StandIn standIn, string jwt) {
+  private static CapRead Read(StandIn standIn, string jwt) {
     using var invoker = new HttpMessageInvoker(standIn);
     return CapClient.ReadAsync(ApiOrigin, jwt, invoker).GetAwaiter().GetResult();
   }
