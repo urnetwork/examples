@@ -35,6 +35,7 @@ That jar carries the native SDK runtime for the OS and architecture that built i
 ```sh
 mvn -q package
 java -jar target/urnetwork-embed.jar --self-test
+java -jar target/urnetwork-embed.jar --licenses > licenses.json
 java -jar target/urnetwork-embed.jar --version
 ```
 
@@ -43,10 +44,11 @@ On Windows, in PowerShell:
 ```powershell
 mvn -q package
 java -jar target\urnetwork-embed.jar --self-test
+java -jar target\urnetwork-embed.jar --licenses > licenses.json
 java -jar target\urnetwork-embed.jar --version
 ```
 
-`mvn package` builds `target/urnetwork-embed.jar`, copies the SDK and JNA jars into `target/dependency`, which the jar's manifest names, and runs the self-test (`-DskipTests` skips it). Keep the `dependency` directory next to the jar when you move it. `--self-test` needs no credentials and no network, and does not load the native runtime. It checks the data amounts, the reset time, the client limit text, the status lines and rules, the data fields, the cap object, the client JWT claim, the token fetch against a stand-in token server, the cap read and the state directory, and the usage exit code. `--version` loads the native runtime and prints its SDK version.
+`mvn package` builds `target/urnetwork-embed.jar`, copies the SDK and JNA jars into `target/dependency`, which the jar's manifest names, and runs the self-test (`-DskipTests` skips it). Keep the `dependency` directory next to the jar when you move it. `--self-test` needs no credentials and no network, and does not load the native runtime. It checks the data amounts, the reset time, the client limit text, the status lines and rules, the data fields, the cap object, the client JWT claim, the token fetch against a stand-in token server, the cap read and the state directory, the usage exit code and the start line. `--licenses` prints the SDK's licenses and data attributions as a JSON array, to publish with your app. `--version` loads the native runtime and prints its SDK version.
 
 The backend tool needs only Jackson. From `java/embed/server` (the classpath uses the POSIX separator; use `;` on Windows):
 
@@ -59,7 +61,7 @@ java -cp 'target/classes:target/dependency/*' EmbedServer --self-test
 
 Only your backend holds the root credential. For production make it an **API key**: `POST /account/api-key`, called with a network JWT, creates a long-lived key that begins `urn_` and is shown only once. An API key authenticates as your network exactly like the root JWT, with the same full-network scope, so treat it like a production database password: keep it in your secret store and out of apps, logs and repositories. To rotate it, create a new key, deploy it, then remove the old one with `POST /account/api-key/remove`; remove a leaked key at once. The tools read either kind from `URNETWORK_ROOT_JWT`.
 
-The [Go token server](../../go/embed/README.md) is the reference backend: it authenticates your app's session, provisions or reissues the installation's client, applies default caps to new clients, and answers the client JWT at `POST /urnetwork/client-token`. The app calls it when `URNETWORK_TOKEN_SERVER_URL` is set. From `go/embed/server`:
+The [Go token server](../../go/embed/README.md) is the reference backend: it authenticates your app's session, provisions or reissues the installation's client, puts new clients in their ACL group (`isolated` unless `URNETWORK_DEFAULT_ACL_GROUP` is `default`), applies default caps to them, and answers the client JWT at `POST /urnetwork/client-token`. The app calls it when `URNETWORK_TOKEN_SERVER_URL` is set. From `go/embed/server`:
 
 ```sh
 go build -o token-server .
@@ -69,6 +71,7 @@ mkdir -p /absolute/path/to/private-service-state/embed
 export URNETWORK_ROOT_JWT='api-key-or-network-jwt-from-your-secret-store'
 export URNETWORK_CLIENT_MAP='/absolute/path/to/private-service-state/embed/token-server-clients.json'
 export URNETWORK_DEMO_SESSIONS='/absolute/path/to/private-service-state/embed/sessions.json'
+export URNETWORK_DEFAULT_ACL_GROUP=isolated
 export URNETWORK_DEFAULT_MONTHLY_BYTE_LIMIT=10000000000
 ./token-server
 ```
@@ -80,21 +83,26 @@ The Java backend tool runs the same provisioning from a Java backend, and sets c
 ```sh
 export URNETWORK_ROOT_JWT='api-key-or-network-jwt-from-your-secret-store'
 export URNETWORK_CLIENT_MAP='/absolute/path/to/private-service-state/embed/java-clients.json'
+export URNETWORK_DEFAULT_ACL_GROUP=isolated
 CP='target/classes:target/dependency/*'
 java -cp "$CP" EmbedServer provision user:alice:22222222-2222-2222-2222-222222222222 /absolute/path/to/alice-laptop.jwt
 java -cp "$CP" EmbedServer cap user:alice:22222222-2222-2222-2222-222222222222 --monthly 10000000000
 java -cp "$CP" EmbedServer usage user:alice:22222222-2222-2222-2222-222222222222
 java -cp "$CP" EmbedServer usage-all
+java -cp "$CP" EmbedServer acl user:alice:22222222-2222-2222-2222-222222222222 default
 java -cp "$CP" EmbedServer remove user:alice:22222222-2222-2222-2222-222222222222
 ```
 
-`provision` reissues the key's client or creates one (a client deactivated after 30 days without connecting is replaced), writes its client JWT to the file you name with owner-only permissions and prints only `{"client_id": "..."}`. `cap` sends only the options you give: `--monthly` and `--total` take a byte count or `null` (clear that cap), and `--reset-total` starts a new running-total period. Each cap is optional: the monthly cap resets at 00:00 UTC on the first of the month, the running total only when you reset it. At a cap the client gets no new transfer contracts; usage is counted as contracts settle, so it lags live traffic and can pass a cap by up to the contracts still open. `usage-all` pages through every capped client of your network. Exit codes are 0, 78 for a configuration or credential problem and 1 for any other failure. With curl:
+`provision` reissues the key's client or creates one (a client deactivated after 30 days without connecting is replaced), writes its client JWT to the file you name with owner-only permissions and prints only `{"client_id": "..."}`. `cap` sends only the options you give: `--monthly` and `--total` take a byte count or `null` (clear that cap), and `--reset-total` starts a new running-total period. Each cap is optional: the monthly cap resets at 00:00 UTC on the first of the month, the running total only when you reset it. At a cap the client gets no new transfer contracts; usage is counted as contracts settle, so it lags live traffic and can pass a cap by up to the contracts still open. `usage-all` pages through every capped client of your network. New clients go into the ACL group that `URNETWORK_DEFAULT_ACL_GROUP` names: `isolated` when it is unset, so your users never see each other in your network's peer list, or `default` for an app that uses Messages. `provision` saves a new client's mapping with a `pending_acl` record, applies the group with `POST /network/client-acl-group`, and only then writes the client JWT; after a failure the record stays and the next `provision` applies the group. `acl <key> default` or `acl <key> isolated` moves a client later and prints `{"client_id": "...", "acl_group": "..."}`. `cap`, `usage`, `remove` and `acl` exit 78 with `no client is mapped for that key; run provision first` for a key without a client, and a held map lock exits 1. On a server that predates a route the tool exits 1 with `/network/client-acl-group answered 404: the server predates ACL groups`, or `<path> answered 404: the server predates the data-cap routes` for the cap routes; set `URNETWORK_DEFAULT_ACL_GROUP=default` to provision on a server without ACL groups ([contract](../../EMBED_CONTRACT.md#backend-acl-groups)). Exit codes are 0, 78 for a configuration or credential problem and 1 for any other failure. With curl:
 
 ```sh
 API=https://api.bringyour.com
 curl -fsS -X POST "$API/network/auth-client" \
   -H "Authorization: Bearer $URNETWORK_ROOT_JWT" -H 'Content-Type: application/json' \
   --data '{"description": "embed client", "device_spec": "urnetwork-examples/curl"}'
+curl -fsS -X POST "$API/network/client-acl-group" \
+  -H "Authorization: Bearer $URNETWORK_ROOT_JWT" -H 'Content-Type: application/json' \
+  --data '{"client_id": "11111111-1111-1111-1111-111111111111", "acl_group": "isolated"}'
 curl -fsS -X POST "$API/network/client-data-cap" \
   -H "Authorization: Bearer $URNETWORK_ROOT_JWT" -H 'Content-Type: application/json' \
   --data '{"client_id": "11111111-1111-1111-1111-111111111111", "monthly_byte_limit": 10000000000}'
@@ -147,6 +155,7 @@ java -jar target/urnetwork-embed.jar
 On Windows run `java -jar target\urnetwork-embed.jar`. The app prints its client and installation IDs, then a status line on stdout whenever a field changes, and at least once a minute:
 
 ```text
+embed client 11111111-1111-1111-1111-111111111111, installation 22222222-2222-2222-2222-222222222222
 status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap
 ```
 
@@ -158,11 +167,11 @@ status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap
 
 `client limit` means the platform disconnected this client because your network reached its plan's limit for concurrently connected clients; the SDK reconnects by itself after 15 to 20 minutes, at the time the status shows. `data cap reached` means a cap your backend set is reached: the client gets no new data until the month rolls over or your backend raises, clears or resets the cap. The app reads its caps at start, every 5 minutes and soon after the contract status changes. Data amounts are in decimal units (1 GB is 1,000,000,000 bytes), as data plans are sold.
 
-Ctrl-C or SIGTERM stops the Device and exits with code 0. Exit code 78 means a configuration or credential problem that a restart does not fix: a missing state directory, no token server and no `client.jwt`, a network JWT, a token server answer of 401 or 409, or a credential the server rejected; sign in again or provision a new client JWT. Exit code 1 is any other failure, such as an unreachable token server. The SDK copies its log lines to stderr; its full log is in `logs/`.
+Ctrl-C or SIGTERM stops the Device and exits with code 0. Exit code 78 means a configuration or credential problem that a restart does not fix: a missing state directory, no token server and no `client.jwt`, a network JWT, a token server answer of 401 or 409, or a credential the server rejected; sign in again or provision a new client JWT. Exit code 1 is any other failure, such as an unreachable token server or any other token server answer. The commands are `run` (the default), `--self-test`, `--licenses` and `--version`; any other argument is a usage error (78). The SDK copies its log lines to stderr; its full log is in `logs/`.
 
 ## Next
 
-The embed example ends where your app's own traffic begins. With the same state directory, the [Java Sockets example](../socket/README.md) routes TCP, UDP and HTTP clients through the Device, and the [Java Messages example](../messages/README.md) exchanges messages with other clients of your network:
+The embed example ends where your app's own traffic begins. With the same state directory, the [Java Sockets example](../socket/README.md) routes TCP, UDP and HTTP clients through the Device, and the [Java Messages example](../messages/README.md) takes the same identity for a Device of its own, as below:
 
 ```sh
 export URNETWORK_CLIENT_JWT="$(cat "$URNETWORK_EMBED_STATE_DIR/client.jwt")"
@@ -174,4 +183,6 @@ $env:URNETWORK_CLIENT_JWT = (Get-Content "$env:URNETWORK_EMBED_STATE_DIR\client.
 $env:URNETWORK_INSTANCE_ID = (Get-Content "$env:URNETWORK_EMBED_STATE_DIR\instance-id" -Raw).Trim()
 ```
 
-Run one program at a time with one identity. Every embed client is a top-level client of your network, so it appears in your network's peer list while the network has 100 or fewer recently active top-level clients; the Messages example depends on that list, and your app decides what of it to show.
+Run one program at a time with one identity.
+
+Messages exchange the [URMS](../../MESSAGES_PROTOCOL.md) text and ACK protocol with other clients of your network, but not on the embed Device, which does not provide. A Messages program starts its own provider-capable Device for the installation, and that Device provides to your network: your network's other clients can route traffic through the installation, so ask your users first. Messages also need the client in the `default` [ACL group](../../EMBED_CONTRACT.md#backend-acl-groups): provision with `URNETWORK_DEFAULT_ACL_GROUP=default`, or move the client with the backend tool's `acl <key> default`. An `isolated` client, the examples' default, never appears in your network's peer list; a `default` client appears there while the network has 100 or fewer recently active top-level clients that are not isolated, and your app decides what of it to show.

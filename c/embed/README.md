@@ -2,7 +2,7 @@
 
 [Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Embed](README.md)
 
-This console app embeds the URnetwork SDK in your own product on Windows, macOS and Linux, on the SDK's C ABI (`urnetwork_sdk.h`). It obtains its installation's scoped client JWT from your backend, starts a local device with it, and shows the status and the data caps your backend set for the installation. The device carries only the app's own traffic: it is not a device VPN and it does not provide. What the app sends through it continues in the [Sockets](../socket/README.md) and [Messages](../messages/README.md) examples. It follows the [embed contract](../../EMBED_CONTRACT.md) and the [Go reference](../../go/embed/README.md).
+This console app embeds the URnetwork SDK in your own product on Windows, macOS and Linux, on the SDK's C ABI (`urnetwork_sdk.h`). It obtains its installation's scoped client JWT from your backend, starts a local device with it, and shows the status and the data caps your backend set for the installation. The device carries only the app's own traffic: it is not a device VPN and it does not provide. What the app sends through it continues in the [Sockets](../socket/README.md) examples; the [Messages](../messages/README.md) examples run on a provider-capable device of their own ([Next](#next-traffic-through-the-device)). It follows the [embed contract](../../EMBED_CONTRACT.md) and the [Go reference](../../go/embed/README.md).
 
 ## Files
 
@@ -18,7 +18,7 @@ This console app embeds the URnetwork SDK in your own product on Windows, macOS 
 | [embed.h](embed.h) | Declarations shared by the files. |
 | [selftest.c](selftest.c), [selftest_main.c](selftest_main.c) | Credential-free self-test: `./embed --self-test`, and `make self-test` without the SDK library or libcurl. |
 | [Makefile](Makefile), [CMakeLists.txt](CMakeLists.txt) | Builds for Make and for CMake with the SDK package. |
-| [server/embed_server.c](server/embed_server.c) | The backend tool: `provision`, `cap`, `usage`, `usage-all` and `remove`. |
+| [server/embed_server.c](server/embed_server.c) | The backend tool: `provision`, `cap`, `usage`, `usage-all`, `remove` and `acl`. |
 
 ## Build and self-test
 
@@ -28,6 +28,7 @@ Use a C11 compiler, libcurl, and a native SDK build with `urnet_device_get_clien
 make SDK_INCLUDE=/absolute/path/to/include SDK_LIBDIR=/absolute/path/to/lib
 make self-test SDK_INCLUDE=/absolute/path/to/include
 ./embed --self-test
+./embed --licenses > licenses.json
 ./embed --version
 ```
 
@@ -48,12 +49,13 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH=C:\path\to\urnetwork-sdk -DCMAKE_TOOLCHA
 cmake --build build --config Release
 ctest --test-dir build -C Release
 .\build\Release\embed.exe --self-test
+.\build\Release\embed.exe --licenses > licenses.json
 .\build\Release\embed.exe --version
 ```
 
 The CMake build copies `URnetworkSdk.dll` beside `embed.exe`, and vcpkg's toolchain copies libcurl's DLL; keep both there.
 
-`--self-test` needs no credentials and no network and creates no device. It checks the contract's byte, reset time, client limit and status line vectors and the order of the status rules; the data fields (`checking`, `unavailable`, a later failure keeping the last reading, `no cap` for a null limit); the cap object (null and absent limits, `capped` and `capped_reason`, an unknown reason, refused answers); the JWT `client_id` claim; the token fetch against a stand-in server (the request, saving `client.jwt` atomically, a mismatched client refused, and each answer mapped to its exit code); the cap read; the state files (private permissions, atomic replacement, `instance-id` created once, a symlink refused); and the configuration errors. `make self-test` and the CMake `embed-self-test` target run the same checks in a binary that links neither the SDK library nor libcurl. This example was built and its self-tests run on macOS arm64 against a local build of sdk main; the Linux and Windows builds were not run.
+`--self-test` needs no credentials and no network and creates no device. It checks the contract's byte, reset time, client limit and status line vectors and the order of the status rules; the data fields (`checking`, `unavailable`, a later failure keeping the last reading, `no cap` for a null limit); the cap object (null and absent limits, `capped` and `capped_reason`, an unknown reason, refused answers); the JWT `client_id` claim; the token fetch against a stand-in server (the request, saving `client.jwt` atomically, a mismatched client refused, and each answer mapped to its exit code); the cap read; the state files (private permissions, atomic replacement, `instance-id` created once, a symlink refused); the configuration errors; and the start line. `make self-test` and the CMake `embed-self-test` target run the same checks in a binary that links neither the SDK library nor libcurl. This example was built and its self-tests run on macOS arm64 against a local build of sdk main; the Linux and Windows builds were not run.
 
 The backend tool in [server](server/embed_server.c) is a POSIX command-line program on libcurl and json-c, like the [integration allocator](../integration/server/allocator.c) it extends:
 
@@ -75,20 +77,25 @@ umask 077
 mkdir -p /absolute/path/to/private-service-state
 export URNETWORK_ROOT_JWT='api-key-or-network-jwt-from-your-secret-store'
 export URNETWORK_CLIENT_MAP='/absolute/path/to/private-service-state/embed-clients.json'
+export URNETWORK_DEFAULT_ACL_GROUP=isolated
 KEY='user:alice:22222222-2222-2222-2222-222222222222'
 ./embed-server provision "$KEY" /absolute/path/to/private-service-state/alice.jwt
 ./embed-server cap "$KEY" --monthly 10000000000
 ./embed-server usage "$KEY"
 ./embed-server usage-all
+./embed-server acl "$KEY" default
 ```
 
-`provision` reissues the key's client or provisions a new one, provisions again when the old client was deactivated after 30 days without connecting, writes the client JWT to the file you name with owner-only permissions, never prints it, and prints `{"client_id": "..."}`. Your backend delivers that token to the installation as its `client.jwt`. `cap` posts only the options you give: `--monthly` and `--total` take a byte count or `null` (clear the cap), and `--reset-total` starts a new running total. The monthly cap resets at 00:00 UTC on the first of the month; a cap of `0` pauses the installation. `usage` prints the key's cap object and `usage-all` prints every capped client of your network, one per line. Without the tool, the backend sends the requests itself:
+`provision` reissues the key's client or provisions a new one, provisions again when the old client was deactivated after 30 days without connecting, writes the client JWT to the file you name with owner-only permissions, never prints it, and prints `{"client_id": "..."}`. Your backend delivers that token to the installation as its `client.jwt`. `cap` posts only the options you give: `--monthly` and `--total` take a byte count or `null` (clear the cap), and `--reset-total` starts a new running total. The monthly cap resets at 00:00 UTC on the first of the month; a cap of `0` pauses the installation. `usage` prints the key's cap object and `usage-all` prints every capped client of your network, one per line. New clients go into the ACL group that `URNETWORK_DEFAULT_ACL_GROUP` names: `isolated` when it is unset, so your users never see each other in your network's peer list, or `default` for an app that uses Messages. `provision` saves a new client's mapping with a `pending_acl` record, applies the group with `POST /network/client-acl-group`, and only then writes the client JWT; after a failure the record stays and the next `provision` applies the group. `acl <key> default` or `acl <key> isolated` moves a client later and prints `{"client_id": "...", "acl_group": "..."}`. `cap`, `usage`, `remove` and `acl` exit 78 with `no client is mapped for that key; run provision first` for a key without a client, and a held map lock exits 1. On a server that predates a route the tool exits 1 with `/network/client-acl-group answered 404: the server predates ACL groups`, or `<path> answered 404: the server predates the data-cap routes` for the cap routes; set `URNETWORK_DEFAULT_ACL_GROUP=default` to provision on a server without ACL groups ([contract](../../EMBED_CONTRACT.md#backend-acl-groups)). Without the tool, the backend sends the requests itself:
 
 ```sh
 API=https://api.bringyour.com
 curl -fsS -X POST "$API/network/auth-client" \
   -H "Authorization: Bearer $URNETWORK_ROOT_JWT" -H 'Content-Type: application/json' \
   --data '{"description": "embed client", "device_spec": "urnetwork-examples/curl"}'
+curl -fsS -X POST "$API/network/client-acl-group" \
+  -H "Authorization: Bearer $URNETWORK_ROOT_JWT" -H 'Content-Type: application/json' \
+  --data '{"client_id": "11111111-1111-1111-1111-111111111111", "acl_group": "isolated"}'
 curl -fsS -X POST "$API/network/client-data-cap" \
   -H "Authorization: Bearer $URNETWORK_ROOT_JWT" -H 'Content-Type: application/json' \
   --data '{"client_id": "11111111-1111-1111-1111-111111111111", "monthly_byte_limit": 10000000000}'
@@ -159,7 +166,7 @@ status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap
 
 `client limit` means the platform disconnected this client because your network reached its plan's limit on concurrently connected clients; the SDK reconnects by itself at the time shown. At a data cap the device gets no new transfer contracts until the month rolls over at 00:00 UTC on the first, or your backend raises, clears or resets the cap; usage can pass a cap by up to the size of the contracts still open. The app reads its caps with its own client JWT at start, every 5 minutes and within 5 seconds of a contract change; a server without the cap routes shows `unavailable`.
 
-SDK log lines also appear on stderr, and the full log is in `logs/`. Ctrl-C (or SIGTERM) stops the device and exits with code 0. Exit code 78 is a configuration or credential problem that a restart does not fix: missing or invalid state, a network JWT, a credential the server rejected, or a token server answer of 401 or 409. Exit code 1 is any other failure.
+SDK log lines also appear on stderr, and the full log is in `logs/`. Ctrl-C (or SIGTERM) stops the device and exits with code 0. Exit code 78 is a configuration or credential problem that a restart does not fix: missing or invalid state, a network JWT, a credential the server rejected, or a token server answer of 401 or 409. Exit code 1 is any other failure, including any other token server answer. The commands are `run` (the default), `--self-test`, `--licenses` and `--version`; any other argument is a usage error (78).
 
 ## Next: traffic through the device
 
@@ -170,4 +177,6 @@ export URNETWORK_CLIENT_JWT="$(cat "$URNETWORK_EMBED_STATE_DIR/client.jwt")"
 export URNETWORK_INSTANCE_ID="$(cat "$URNETWORK_EMBED_STATE_DIR/instance-id")"
 ```
 
-Run one program at a time with one identity.
+Run one program at a time with one identity. Sockets route TCP, UDP and HTTP clients through the device.
+
+Messages exchange the [URMS](../../MESSAGES_PROTOCOL.md) text and ACK protocol with other clients of your network, but not on the embed device, which does not provide. A Messages program starts its own provider-capable device for the installation, and that device provides to your network: your network's other clients can route traffic through the installation, so ask your users first. Messages also need the client in the `default` [ACL group](../../EMBED_CONTRACT.md#backend-acl-groups): provision with `URNETWORK_DEFAULT_ACL_GROUP=default`, or move the client with the backend tool's `acl <key> default`. An `isolated` client, the examples' default, never appears in your network's peer list; a `default` client appears there while the network has 100 or fewer recently active top-level clients that are not isolated, and your app decides what of it to show.

@@ -2,7 +2,7 @@
 
 [Rust installation](../../rust/README.md) · [Rust embed](../../rust/embed/README.md) · [Embed](README.md)
 
-This desktop app embeds a URnetwork Device inside a Tauri 2 app on Windows, macOS and Linux: the Device runs in the app's Rust core, in process, through the SDK's C ABI with the `urnetwork-sdk` crate, with no sidecar. The app obtains its installation's scoped client JWT from your backend's token server, starts the Device, connects to the best available location and shows the status, the data used this month and the running total, with the client and installation IDs. The Device carries **only the app's own traffic**: it uses no VPN APIs, and what the app sends through it continues in the [Sockets](../../rust/socket/README.md) and [Messages](../../rust/messages/README.md) examples. The embed core (state, token fetch, status rules and the session) is the library of the [Rust embed example](../../rust/embed/README.md), so the console app and this app share one tested core. Both follow the [embed contract](../../EMBED_CONTRACT.md#tauri).
+This desktop app embeds a URnetwork Device inside a Tauri 2 app on Windows, macOS and Linux: the Device runs in the app's Rust core, in process, through the SDK's C ABI with the `urnetwork-sdk` crate, with no sidecar. The app obtains its installation's scoped client JWT from your backend's token server, starts the Device, connects to the best available location and shows the status, the data used this month and the running total, with the client and installation IDs. The Device carries **only the app's own traffic**: it uses no VPN APIs, and what the app sends through it continues in the [Sockets](../../rust/socket/README.md) examples; the [Messages](../../rust/messages/README.md) examples run on a provider-capable Device of their own ([Next](#next)). The embed core (state, token fetch, status rules and the session) is the library of the [Rust embed example](../../rust/embed/README.md), so the console app and this app share one tested core. Both follow the [embed contract](../../EMBED_CONTRACT.md#tauri).
 
 ## Files
 
@@ -44,10 +44,14 @@ Only your backend holds the root credential, an **API key** for production: it a
 
 This app gets its client JWT from the [Go token server](../../EMBED_CONTRACT.md#the-token-server) in `go/embed/server`: it posts its `instance-id` to `POST /urnetwork/client-token` with a demo session as the bearer token, and the server provisions or reissues the installation's client, applies your default caps to new clients and answers the client JWT. For local testing, run the token server on loopback (`127.0.0.1:8790` by default) with a private demo session file, and enter that origin and a session token in the window.
 
-Set and read caps, pause, and remove clients with the token server's commands or the [Rust backend tool](../../rust/embed/README.md#backend), whose `cap`, `usage`, `usage-all` and `remove` commands post the same requests as these:
+**ACL groups.** The token server puts each new client in `URNETWORK_DEFAULT_ACL_GROUP`, `isolated` unless you set `default`, before it answers the client JWT, so your users never see each other in your network's peer list; an app that uses Messages keeps `default`, and the token server's `acl <key> default|isolated` command moves a client later. On a server without ACL groups the token server logs that once and still answers the token ([contract](../../EMBED_CONTRACT.md#backend-acl-groups)).
+
+Set and read caps, pause, and remove clients with the token server's commands or the [Rust backend tool](../../rust/embed/README.md#backend), whose `cap`, `usage`, `usage-all`, `remove` and `acl` commands post the same requests as these:
 
 ```sh
 API=https://api.bringyour.com
+curl -fsS -X POST "$API/network/client-acl-group" -H "Authorization: Bearer $URNETWORK_ROOT_JWT" \
+  -H 'Content-Type: application/json' --data '{"client_id": "<client id>", "acl_group": "isolated"}'
 curl -fsS -X POST "$API/network/client-data-cap" -H "Authorization: Bearer $URNETWORK_ROOT_JWT" \
   -H 'Content-Type: application/json' --data '{"client_id": "<client id>", "monthly_byte_limit": 10000000000}'
 curl -fsS "$API/network/client-data-cap?client_id=<client id>" -H "Authorization: Bearer $URNETWORK_ROOT_JWT"
@@ -94,4 +98,6 @@ The console example prints the same values as `status: connected | data this mon
 
 ## Next
 
-The Device carries your app's own traffic: route it with the [Sockets](../../rust/socket/README.md) and [Messages](../../rust/messages/README.md) examples, using the same identity, one program at a time. The state directory holds it: `URNETWORK_CLIENT_JWT` is the content of `client.jwt` and `URNETWORK_INSTANCE_ID` the content of `instance-id`. Every embed client is a top-level client, so it appears in your network's peer list while the network has 100 or fewer recently active top-level clients; your app decides what of it to show.
+The Device carries your app's own traffic: route it with the [Sockets](../../rust/socket/README.md) examples, using the same identity, one program at a time. The state directory holds it: `URNETWORK_CLIENT_JWT` is the content of `client.jwt` and `URNETWORK_INSTANCE_ID` the content of `instance-id`. 
+
+The [Messages](../../rust/messages/README.md) examples exchange the [URMS](../../MESSAGES_PROTOCOL.md) text and ACK protocol with other clients of your network, but not on the embed Device, which does not provide. A Messages program starts its own provider-capable Device for the installation, and that Device provides to your network: your network's other clients can route traffic through the installation, so ask your users first. Messages also need the client in the `default` [ACL group](../../EMBED_CONTRACT.md#backend-acl-groups): provision with `URNETWORK_DEFAULT_ACL_GROUP=default`, or move the client with the backend tool's `acl <key> default`. An `isolated` client, the examples' default, never appears in your network's peer list; a `default` client appears there while the network has 100 or fewer recently active top-level clients that are not isolated, and your app decides what of it to show.

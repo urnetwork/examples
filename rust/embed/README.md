@@ -2,7 +2,7 @@
 
 [Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Embed](README.md)
 
-This console app embeds a URnetwork Device inside your own product on Windows, macOS and Linux. Your backend provisions a URnetwork client for each installation of your app and delivers its scoped client JWT; the app starts a Device with it, connects to the best available location and shows the status, the data used this month and the running total. The Device carries **only the app's own traffic**: it uses no VPN APIs, and what the app sends through it continues in the [Sockets](../socket/README.md) and [Messages](../messages/README.md) examples. It follows the [embed contract](../../EMBED_CONTRACT.md) over the SDK's C ABI. Its embed core is a library that the [Tauri embed app](../../tauri/embed/README.md) shares.
+This console app embeds a URnetwork Device inside your own product on Windows, macOS and Linux. Your backend provisions a URnetwork client for each installation of your app and delivers its scoped client JWT; the app starts a Device with it, connects to the best available location and shows the status, the data used this month and the running total. The Device carries **only the app's own traffic**: it uses no VPN APIs, and what the app sends through it continues in the [Sockets](../socket/README.md) examples; the [Messages](../messages/README.md) examples run on a provider-capable Device of their own ([Next](#next)). It follows the [embed contract](../../EMBED_CONTRACT.md) over the SDK's C ABI. Its embed core is a library that the [Tauri embed app](../../tauri/embed/README.md) shares.
 
 ## Files
 
@@ -28,6 +28,7 @@ Use Rust 1.85 or later (edition 2024). [Cargo.toml](Cargo.toml) requires the SDK
 cargo build --release
 cargo test
 ./target/release/embed --self-test
+./target/release/embed --licenses > licenses.json
 ./target/release/embed --version
 ```
 
@@ -44,6 +45,7 @@ Or patch in the source crate `sdk/rust` and point `URNETWORK_SDK_LIBRARY` at a C
 ```sh
 cargo build --release --config 'patch.crates-io.urnetwork-sdk.path="/absolute/path/to/sdk/rust"'
 export URNETWORK_SDK_LIBRARY=/absolute/path/to/sdk/cgo/build/darwin/arm64/libURnetworkSdk.dylib
+./target/release/embed --licenses > licenses.json
 ./target/release/embed --version
 ```
 
@@ -55,7 +57,7 @@ Only your backend holds the root credential, as `URNETWORK_ROOT_JWT`: an **API k
 
 Each installation that can run at the same time as another needs its **own client**: the platform keeps one resident connection per client, so two installations sharing one would keep displacing each other. The backend keys each client by `user:<service-user-id>:<installation-id>`, where the installation ID is the app's `instance-id`. Data caps belong to a client, so they apply per installation ([contract](../../EMBED_CONTRACT.md#one-client-per-running-installation)).
 
-**With the token server.** The [Go token server](../../EMBED_CONTRACT.md#the-token-server) in `go/embed/server` is the reference backend: the app posts its `instance-id` with a demo session, and the server provisions or reissues the installation's client, applies default caps to new clients and answers the client JWT. Run it with your root credential and point the app at it ([Configure the installation](#configure-the-installation)).
+**With the token server.** The [Go token server](../../EMBED_CONTRACT.md#the-token-server) in `go/embed/server` is the reference backend: the app posts its `instance-id` with a demo session, and the server provisions or reissues the installation's client, puts new clients in their ACL group (`isolated` unless `URNETWORK_DEFAULT_ACL_GROUP` is `default`), applies default caps to them and answers the client JWT. Run it with your root credential and point the app at it ([Configure the installation](#configure-the-installation)).
 
 **With the Rust backend tool.** [server/src/main.rs](server/src/main.rs) extends the [integration allocator](../integration/README.md#backend-allocator) with the embed commands; it has the same settings, map format, key pattern, lock and response checks, and no SDK dependency. From `rust/embed/server`:
 
@@ -66,12 +68,14 @@ umask 077
 mkdir -p /absolute/path/to/private-service-state
 chmod 700 /absolute/path/to/private-service-state
 export URNETWORK_CLIENT_MAP='/absolute/path/to/private-service-state/clients.json'
+export URNETWORK_DEFAULT_ACL_GROUP=isolated
 export URNETWORK_ROOT_JWT='urn_...an-api-key-from-your-secret-store'
 KEY='user:alice:22222222-2222-2222-2222-222222222222'   # the installation's instance-id
 ./target/debug/urnetwork-embed-server provision "$KEY" /absolute/path/to/private-service-state/alice.jwt
 ./target/debug/urnetwork-embed-server cap "$KEY" --monthly 10000000000
 ./target/debug/urnetwork-embed-server usage "$KEY"
 ./target/debug/urnetwork-embed-server usage-all
+./target/debug/urnetwork-embed-server acl "$KEY" default
 ```
 
 | Command | Does |
@@ -81,8 +85,9 @@ KEY='user:alice:22222222-2222-2222-2222-222222222222'   # the installation's ins
 | `usage <key>` | Prints the key's cap object. |
 | `usage-all` | Pages through every capped client of the network, one cap object per line. |
 | `remove <key>` | Removes the key's client and its mapping and prints `{"removed": ...}`. |
+| `acl <key> default\|isolated` | Sets the key's client's ACL group with `POST /network/client-acl-group` and prints `{"client_id": ..., "acl_group": ...}`. |
 
-On Windows, in PowerShell, set the variables with `$env:URNETWORK_CLIENT_MAP = '...'` and run `.\target\debug\urnetwork-embed-server.exe`. The tool exits 0 on success, 78 for a configuration or credential problem (missing settings, an invalid key or map, the root credential refused, the client limit) and 1 for any other failure, with one stderr line that never holds a secret. It refuses the token server's map, which has an extra `pending_caps` field, so the two never rewrite each other's map.
+On Windows, in PowerShell, set the variables with `$env:URNETWORK_CLIENT_MAP = '...'` and run `.\target\debug\urnetwork-embed-server.exe`. The tool exits 0 on success, 78 for a configuration or credential problem (missing settings, an invalid key or map, the root credential refused, the client limit) and 1 for any other failure, with one stderr line that never holds a secret. It refuses the token server's map, which has an extra `pending_caps` field, so the two never rewrite each other's map. New clients go into the ACL group that `URNETWORK_DEFAULT_ACL_GROUP` names: `isolated` when it is unset, so your users never see each other in your network's peer list, or `default` for an app that uses Messages. `provision` saves a new client's mapping with a `pending_acl` record, applies the group with `POST /network/client-acl-group`, and only then writes the client JWT; after a failure the record stays and the next `provision` applies the group. `acl <key> default` or `acl <key> isolated` moves a client later and prints `{"client_id": "...", "acl_group": "..."}`. `cap`, `usage`, `remove` and `acl` exit 78 with `no client is mapped for that key; run provision first` for a key without a client, and a held map lock exits 1. On a server that predates a route the tool exits 1 with `/network/client-acl-group answered 404: the server predates ACL groups`, or `<path> answered 404: the server predates the data-cap routes` for the cap routes; set `URNETWORK_DEFAULT_ACL_GROUP=default` to provision on a server without ACL groups ([contract](../../EMBED_CONTRACT.md#backend-acl-groups)).
 
 The same requests with curl:
 
@@ -90,6 +95,8 @@ The same requests with curl:
 API=https://api.bringyour.com
 curl -fsS -X POST "$API/network/auth-client" -H "Authorization: Bearer $URNETWORK_ROOT_JWT" \
   -H 'Content-Type: application/json' --data '{"description": "embed client", "device_spec": "urnetwork-examples/curl"}'
+curl -fsS -X POST "$API/network/client-acl-group" -H "Authorization: Bearer $URNETWORK_ROOT_JWT" \
+  -H 'Content-Type: application/json' --data '{"client_id": "<client id>", "acl_group": "isolated"}'
 curl -fsS -X POST "$API/network/client-data-cap" -H "Authorization: Bearer $URNETWORK_ROOT_JWT" \
   -H 'Content-Type: application/json' --data '{"client_id": "<client id>", "monthly_byte_limit": 10000000000}'
 curl -fsS "$API/network/client-data-cap?client_id=<client id>" -H "Authorization: Bearer $URNETWORK_ROOT_JWT"
@@ -141,6 +148,7 @@ Without a token server, the app uses the `client.jwt` already in the directory, 
 On Windows, `.\target\release\embed.exe`. The app prints the client and installation IDs, then a status line whenever a field changes and otherwise once a minute:
 
 ```text
+embed client 11111111-1111-1111-1111-111111111111, installation 22222222-2222-2222-2222-222222222222
 status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap
 ```
 
@@ -152,7 +160,7 @@ status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap
 
 `client limit` means the platform disconnected this client because your network reached its plan's concurrent client limit; the SDK retries by itself after about 15 to 20 minutes, at the time the status shows. At a data cap the client gets no new transfer contracts: the monthly cap resets at 00:00 UTC on the first of the month, and the running total until your backend raises, clears or resets it. Usage lags live traffic and can pass a cap by up to the size of the contracts still open. The app reads its caps with its client JWT at start, every 5 minutes and within 5 seconds of a contract change.
 
-Ctrl-C or SIGTERM stops the Device and exits 0. The app exits 78 for a configuration or credential problem that a restart does not fix (missing or invalid state, a network JWT, a credential the server rejected, or a token server answer of 401 or 409) and 1 for any other failure.
+Ctrl-C or SIGTERM stops the Device and exits 0. The app exits 78 for a configuration or credential problem that a restart does not fix (missing or invalid state, a network JWT, a credential the server rejected, or a token server answer of 401 or 409) and 1 for any other failure, including any other token server answer. The commands are `run` (the default), `--self-test`, `--licenses` and `--version`; any other argument is a usage error (78).
 
 ## Next
 
@@ -169,4 +177,4 @@ $env:URNETWORK_INSTANCE_ID = (Get-Content "$env:URNETWORK_EMBED_STATE_DIR\instan
 ```
 
 - [Sockets](../socket/README.md): TCP, UDP and HTTP clients through the Device; libraries that need an operating system socket use the loopback proxy ([networking matrix](../../NETWORK_EXAMPLES.md)).
-- [Messages](../messages/README.md): the [URMS](../../MESSAGES_PROTOCOL.md) text and ACK protocol with other clients of your network. Every embed client is a top-level client, so it appears in your network's peer list while the network has 100 or fewer recently active top-level clients; your app decides what of it to show.
+- [Messages](../messages/README.md): Messages exchange the [URMS](../../MESSAGES_PROTOCOL.md) text and ACK protocol with other clients of your network, but not on the embed Device, which does not provide. A Messages program starts its own provider-capable Device for the installation, and that Device provides to your network: your network's other clients can route traffic through the installation, so ask your users first. Messages also need the client in the `default` [ACL group](../../EMBED_CONTRACT.md#backend-acl-groups): provision with `URNETWORK_DEFAULT_ACL_GROUP=default`, or move the client with the backend tool's `acl <key> default`. An `isolated` client, the examples' default, never appears in your network's peer list; a `default` client appears there while the network has 100 or fewer recently active top-level clients that are not isolated, and your app decides what of it to show.

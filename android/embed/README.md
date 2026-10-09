@@ -61,7 +61,7 @@ Only your backend holds the root credential. For production, make it an **API ke
 
 Each installation gets **its own client**: the platform keeps one live connection per client, so two installations sharing one client would keep displacing each other. The token server keys each client by `user:<service-user-id>:<installation-id>`, where the installation ID is the app's `instance-id`, and it allows 5 installations per user by default. Data caps belong to a client, so they apply per installation.
 
-The [Go token server](../../EMBED_CONTRACT.md#the-token-server) is the backend this app calls. It authenticates the app's demo session, provisions or reissues the installation's client with `POST /network/auth-client`, applies optional default caps to new clients and answers with the client JWT, never the root credential. From `android/embed`, on macOS and Linux:
+The [Go token server](../../EMBED_CONTRACT.md#the-token-server) is the backend this app calls. It authenticates the app's demo session, provisions or reissues the installation's client with `POST /network/auth-client`, puts new clients in their ACL group (`isolated` unless `URNETWORK_DEFAULT_ACL_GROUP` is `default`), applies optional default caps to them and answers with the client JWT, never the root credential. From `android/embed`, on macOS and Linux:
 
 ```sh
 cd ../../go/embed/server
@@ -72,17 +72,22 @@ mkdir -p /absolute/path/to/private-service-state
 export URNETWORK_ROOT_JWT='urn_your-api-key-from-your-secret-store'
 export URNETWORK_CLIENT_MAP='/absolute/path/to/private-service-state/token-server-map.json'
 export URNETWORK_DEMO_SESSIONS='/absolute/path/to/private-service-state/demo-sessions.json'
+export URNETWORK_DEFAULT_ACL_GROUP=isolated
 export URNETWORK_DEFAULT_MONTHLY_BYTE_LIMIT=10000000000
 ./token-server
 ```
 
 The demo session file stands in for your service's sign-in: `{"version": 1, "sessions": {"<random token, at least 32 characters>": "alice"}}`, private like the map. The server listens on `127.0.0.1:8790`; serve the internet through your own HTTPS front end.
 
+**ACL groups.** The token server puts each new client in `URNETWORK_DEFAULT_ACL_GROUP`, `isolated` unless you set `default`, before it answers the client JWT, so your users never see each other in your network's peer list; an app that uses Messages keeps `default`, and the token server's `acl <key> default|isolated` command moves a client later. On a server without ACL groups the token server logs that once and still answers the token ([contract](../../EMBED_CONTRACT.md#backend-acl-groups)).
+
 Caps are set with the root credential and **merge**: omit a field to keep it, send `null` to clear that cap, or a byte count to set it ([contract](../../EMBED_CONTRACT.md#backend-per-user-data-caps)). The monthly cap resets at 00:00 UTC on the first of the month; the running-total cap resets only when the backend sends `reset_total`. With curl, where `C` is the installation's client ID (the app shows it):
 
 ```sh
 API=https://api.bringyour.com
 # 10 GB a month for this installation
+curl -fsS -X POST "$API/network/client-acl-group" -H "Authorization: Bearer $URNETWORK_ROOT_JWT" \
+  -H 'Content-Type: application/json' --data '{"client_id": "C", "acl_group": "isolated"}'
 curl -fsS -X POST "$API/network/client-data-cap" -H "Authorization: Bearer $URNETWORK_ROOT_JWT" \
   -H 'Content-Type: application/json' --data '{"client_id": "C", "monthly_byte_limit": 10000000000}'
 # pause it at once, then resume by setting the cap back
@@ -147,4 +152,4 @@ Android apps have no exit codes. What the console examples report with exit code
 
 ## Next
 
-The embed example ends where your app's own traffic begins. Use the same device: `DeviceLocal` is a dialer, so your app opens its TCP, UDP and TLS connections on it, as the [Kotlin Sockets](../../kotlin/socket/README.md) example does on the desktop SDK; the [networking matrix](../../NETWORK_EXAMPLES.md) maps HTTP stacks to adapters. The [Kotlin Messages](../../kotlin/messages/README.md) example exchanges [URMS](../../MESSAGES_PROTOCOL.md) messages with other clients of your network. To run those desktop examples with this installation's identity, use the content of `client.jwt` as `URNETWORK_CLIENT_JWT` and of `instance-id` as `URNETWORK_INSTANCE_ID`, one program at a time.
+The embed example ends where your app's own traffic begins. Use the same device: `DeviceLocal` is a dialer, so your app opens its TCP, UDP and TLS connections on it, as the [Kotlin Sockets](../../kotlin/socket/README.md) example does on the desktop SDK; the [networking matrix](../../NETWORK_EXAMPLES.md) maps HTTP stacks to adapters. The [Kotlin Messages](../../kotlin/messages/README.md) example exchanges [URMS](../../MESSAGES_PROTOCOL.md) messages with other clients of your network on a provider-capable device of its own, not the embed device, which does not provide: that device provides to your network, so ask your users first, and the client must be in the `default` [ACL group](../../EMBED_CONTRACT.md#backend-acl-groups) rather than the token server's default `isolated`. To run those desktop examples with this installation's identity, use the content of `client.jwt` as `URNETWORK_CLIENT_JWT` and of `instance-id` as `URNETWORK_INSTANCE_ID`, one program at a time.

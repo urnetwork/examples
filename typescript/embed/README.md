@@ -33,6 +33,7 @@ cd ../../../typescript/embed
 npm ci
 npm test
 node main.ts --self-test
+node main.ts --licenses > licenses.json
 node main.ts --version
 cd server
 npm ci
@@ -50,6 +51,7 @@ cd ..\..\..\typescript\embed
 npm ci
 npm test
 node main.ts --self-test
+node main.ts --licenses > licenses.json
 node main.ts --version
 cd server
 npm ci
@@ -58,30 +60,32 @@ npm run self-test
 
 The app runs the companion from `../../javascript/integration/companion/bin/ur-companion` (`ur-companion.exe` on Windows); set `URNETWORK_COMPANION_PATH` to its absolute path to use another one. The companion is pure Go, so any host builds every desktop target, for example `GOOS=windows GOARCH=amd64 go build -o bin/ur-companion.exe .`.
 
-`node main.ts --self-test` needs no credentials, no network, no companion and no installed packages. It checks the contract's byte, reset time, client limit and status line vectors, the status rules and their order, the data fields, the cap object parsing, the JWT `client_id` claim, the token fetch against a stand-in token server on loopback, the state directory and the configuration errors. `npm test` type-checks, runs the same checks, plus the exit codes, the companion child process and two whole runs against a stand-in companion script, token server and cap API (macOS and Linux). The backend tool's self-test (`node server/embed-server.ts --self-test`, after `npm run build` type-checks it) checks the [contract's backend rules](../../EMBED_CONTRACT.md#backend-tools) against a scripted API and a loopback stand-in.
+`node main.ts --self-test` needs no credentials, no network, no companion and no installed packages. It checks the contract's byte, reset time, client limit and status line vectors, the status rules and their order, the data fields, the cap object parsing, the JWT `client_id` claim, the token fetch against a stand-in token server on loopback, the state directory, the configuration errors and the start line. `--licenses` prints the SDK's licenses and data attributions as a JSON array, from the companion's `--licenses`, to publish with your app. `npm test` type-checks, runs the same checks, plus the exit codes, the companion child process and two whole runs against a stand-in companion script, token server and cap API (macOS and Linux). The backend tool's self-test (`node server/embed-server.ts --self-test`, after `npm run build` type-checks it) checks the [contract's backend rules](../../EMBED_CONTRACT.md#backend-tools) against a scripted API and a loopback stand-in.
 
 ## Backend
 
 Only your backend holds the root credential, `URNETWORK_ROOT_JWT`. For production make it an [API key](../../EMBED_CONTRACT.md#the-root-credential) (`POST /account/api-key`): it authenticates as your network exactly like a network JWT, with the same full scope, and you rotate it by creating a new key, deploying it and removing the old one. Treat it like a production database password. Your backend provisions **one client per running installation**, keyed `user:<service-user-id>:<installation-id>`, because the platform keeps one resident connection per client ([contract](../../EMBED_CONTRACT.md#one-client-per-running-installation)).
 
-**With the token server.** The [Go token server](../../go/embed/README.md) is the reference backend: the app posts its `instance-id` with a demo session token, and the server provisions or reissues the installation's client, applies default caps to new clients and answers the client JWT ([HTTP contract](../../EMBED_CONTRACT.md#the-token-server)). The app fetches on every start.
+**With the token server.** The [Go token server](../../go/embed/README.md) is the reference backend: the app posts its `instance-id` with a demo session token, and the server provisions or reissues the installation's client, puts new clients in their ACL group (`isolated` unless `URNETWORK_DEFAULT_ACL_GROUP` is `default`), applies default caps to them and answers the client JWT ([HTTP contract](../../EMBED_CONTRACT.md#the-token-server)). The app fetches on every start.
 
 **With the backend tool.** `server/embed-server.ts` runs the same steps from your own backend, with the [integration allocator's](../integration/README.md#backend-allocator) settings, map and lock (`URNETWORK_ROOT_JWT`, `URNETWORK_CLIENT_MAP`, optional `URNETWORK_API_URL`). Keep its map separate from the token server's. On macOS or Linux:
 
 ```sh
 export URNETWORK_ROOT_JWT='urn_...'            # from your secret store
 export URNETWORK_CLIENT_MAP=/srv/myservice/urnetwork/clients.json
+export URNETWORK_DEFAULT_ACL_GROUP=isolated           # the default; default for an app that uses Messages
 KEY=user:alice:22222222-2222-2222-2222-222222222222
 node server/embed-server.ts provision "$KEY" /path/to/state/client.jwt   # prints {"client_id": "..."}
 node server/embed-server.ts cap "$KEY" --monthly 10000000000              # 10 GB a month
 node server/embed-server.ts cap "$KEY" --total null --reset-total         # clear the total cap
 node server/embed-server.ts usage "$KEY"
 node server/embed-server.ts usage-all                                     # one cap object per line
+node server/embed-server.ts acl "$KEY" default                       # move it to the default ACL group
 node server/embed-server.ts cap "$KEY" --monthly 0                        # pause the installation
 node server/embed-server.ts remove "$KEY"
 ```
 
-The curl equivalents are in the contract: [provision](../../EMBED_CONTRACT.md#backend-provision-clients), [caps](../../EMBED_CONTRACT.md#backend-per-user-data-caps). Caps merge: an omitted option keeps its cap, `null` clears it. The monthly cap resets at 00:00 UTC on the first of the month; the running total only when you reset it. Usage is accounted when contracts settle, so a client can pass a cap by up to its open contracts. A cap of `0` pauses the installation until that cap changes; `remove` deactivates its client, which loses access at its next reconnect.
+The curl equivalents are in the contract: [provision](../../EMBED_CONTRACT.md#backend-provision-clients), [caps](../../EMBED_CONTRACT.md#backend-per-user-data-caps). Caps merge: an omitted option keeps its cap, `null` clears it. The monthly cap resets at 00:00 UTC on the first of the month; the running total only when you reset it. Usage is accounted when contracts settle, so a client can pass a cap by up to its open contracts. A cap of `0` pauses the installation until that cap changes; `remove` deactivates its client, which loses access at its next reconnect. New clients go into the ACL group that `URNETWORK_DEFAULT_ACL_GROUP` names: `isolated` when it is unset, so your users never see each other in your network's peer list, or `default` for an app that uses Messages. `provision` saves a new client's mapping with a `pending_acl` record, applies the group with `POST /network/client-acl-group`, and only then writes the client JWT; after a failure the record stays and the next `provision` applies the group. `acl <key> default` or `acl <key> isolated` moves a client later and prints `{"client_id": "...", "acl_group": "..."}`. `cap`, `usage`, `remove` and `acl` exit 78 with `no client is mapped for that key; run provision first` for a key without a client, and a held map lock exits 1. On a server that predates a route the tool exits 1 with `/network/client-acl-group answered 404: the server predates ACL groups`, or `<path> answered 404: the server predates the data-cap routes` for the cap routes; set `URNETWORK_DEFAULT_ACL_GROUP=default` to provision on a server without ACL groups ([contract](../../EMBED_CONTRACT.md#backend-acl-groups)).
 
 **The client limit.** A network can have 100 active top-level clients by default; provider installs and child clients never count, and a client stops counting when it is removed or after 30 days without connecting. Provisioning past the limit is refused, and the tool prints `client limit reached: your network is at its client limit; see https://ur.io/services` and exits with 78. An **Embed plan** raises your network's limit: [request one on the Services page](https://ur.io/services).
 
@@ -138,11 +142,11 @@ status: connected | data this month: 1.2 GB of 10.0 GB | data total: no cap
 | Data this month | `checking`, `unavailable`, `no cap`, or the bytes used this UTC month of the monthly cap. |
 | Data total | The same for the running-total cap. |
 
-`client limit` means the platform holds this client off for your network's concurrent client limit; the SDK retries by itself at the time shown. `data cap reached` means a cap is reached: the device gets no new data until the month rolls over, or until your backend raises, clears or resets the cap. Ctrl-C stops the app. Exit codes: **0** after a requested stop, **78** for a configuration or credential problem that a restart does not fix (missing or invalid state, a network JWT, an auth logout, or a token server answer of 401 or 409), and **1** for any other failure.
+`client limit` means the platform holds this client off for your network's concurrent client limit; the SDK retries by itself at the time shown. `data cap reached` means a cap is reached: the device gets no new data until the month rolls over, or until your backend raises, clears or resets the cap. Ctrl-C stops the app. Exit codes: **0** after a requested stop, **78** for a configuration or credential problem that a restart does not fix (missing or invalid state, a network JWT, an auth logout, or a token server answer of 401 or 409), and **1** for any other failure, including any other token server answer. The commands are `run` (the default), `--self-test`, `--licenses` and `--version`; any other argument is a usage error (78).
 
 ## Next
 
 The embed example ends where the app's own traffic begins ([contract](../../EMBED_CONTRACT.md#next-traffic-through-the-device)). The installation's state works with the other examples: export `URNETWORK_CLIENT_JWT` as the content of `client.jwt` and `URNETWORK_INSTANCE_ID` as the content of `instance-id`, and run one program at a time with one identity.
 
 - [Sockets](../socket/README.md): the TypeScript Sockets examples use a hosted Device today.
-- [Messages](../messages/README.md): the Messages examples run the native companion in its messaging mode with that identity.
+- [Messages](../messages/README.md): the Messages examples run the native companion in its messaging mode with that identity. That companion's Device provides to your network, unlike the embed Device, so ask your users first, and the client must be in the `default` [ACL group](../../EMBED_CONTRACT.md#backend-acl-groups) (provision with `URNETWORK_DEFAULT_ACL_GROUP=default`, or move it with the backend tool's `acl <key> default`). An `isolated` client, the examples' default, never appears in your network's peer list.
