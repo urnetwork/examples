@@ -1,0 +1,35 @@
+// The protobuf protocol of SUBPROTOCOLS.md: an application protocol on
+// subprotocol 4097 in which every message is one Envelope.
+syntax = "proto3";
+
+// The package name is not on the wire. The examples keep it short; an
+// application uses a package of its own.
+package notes.v1;
+
+option go_package = "github.com/urnetwork/examples/go/messages/subprotocol";
+option java_package = "io.ur.examples.notes";
+option java_multiple_files = true;
+
+// One message of the protocol. Exactly one kind is set. A receiver drops an
+// envelope with no kind it knows, which is also how a kind added by a later
+// version reaches it.
+message Envelope {
+  oneof kind {
+    Note note = 1;
+    Ack ack = 2;
+  }
+}
+
+// Application text. The sender picks message_id: nonzero, kept when the same
+// note is sent again, and not reused while an earlier note to the same peer is
+// unacknowledged. text is at most 4096 UTF-8 bytes.
+message Note {
+  uint64 message_id = 1;
+  string text = 2;
+}
+
+// The receiver parsed and accepted the note with this message_id. It is sent
+// to the note's source and is never itself acknowledged.
+message Ack {
+  uint64 message_id = 1;
+}

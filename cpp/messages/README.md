@@ -56,3 +56,61 @@ export URNETWORK_PEER_CLIENT_ID='client-id-discovered-in-terminal-a'
 The sender queries the selected peer's supported subprotocols before sending and requires `4096`. A failed query, enqueue failure or ACK timeout is reported as a failure. A matching application ACK means the receiver parsed and accepted the TEXT; correlation uses **(source client ID, message ID)**. Use the discovered client ID as the destination, not an instance UUID or display name. For text containing spaces, keep the message in one quoted argument (or inside the quoted Maven/Gradle argument string).
 
 Incoming bytes and retained source identity are copied before the native callback returns; queued work parses frames and sends ACKs outside that callback. Keep subscriptions and Device owners alive through shutdown. Some FFI bridges keep a small callback root until process exit because native close can race a late callback. The [protocol](../../MESSAGES_PROTOCOL.md) defines exact validation, UTF-8 limits, golden bytes and timeout semantics.
+
+## Custom protobuf messages
+
+Your own protocol runs on its own subprotocol ID beside URMS; [Subprotocols](../../SUBPROTOCOLS.md) covers choosing the ID, the peer query, receive lifetime, versioning and acknowledgements. This example drives the shared C runtime, and the C++ header `urnetwork_sdk.hpp` wraps the same ABI: `urnet::DeviceLocal` (for example from `urnet::newDeviceLocalWithDefaults`) has `enableSubprotocol`, `querySubprotocols`, `sendSubprotocolBytes`, `disableSubprotocol`, `enabledSubprotocols`, `subprotocolReceivedCount` and `subprotocolStats`. `enableSubprotocol` throws `urnet::Error` for a refused ID and returns a `urnet::Sub` that closes when destroyed, so keep it for the session.
+
+This sketch carries [notes.proto](../../go/messages/subprotocol/notes.proto) on subprotocol 4097 with libprotobuf. Generate `notes.pb.h` and `notes.pb.cc` with `protoc -I ../../go/messages/subprotocol --cpp_out=. notes.proto`, then compile `notes.pb.cc` and link libprotobuf with its Abseil libraries (`pkg-config --cflags --libs protobuf`, or `protobuf::libprotobuf` in CMake):
+
+```cpp
+#include "notes.pb.h"
+#include "urnetwork_sdk.hpp"
+
+constexpr int64_t kNotes = 4097;
+constexpr size_t kMaxMessageBytes = 4608;
+
+bool sendEnvelope(const urnet::DeviceLocal& device, const std::string& destination,
+                  const notes::v1::Envelope& envelope) {
+  std::string bytes;
+  if (!envelope.SerializeToString(&bytes) || bytes.size() > kMaxMessageBytes)
+    return false;
+  return device.sendSubprotocolBytes(kNotes, destination,
+                                     reinterpret_cast<const uint8_t*>(bytes.data()),
+                                     static_cast<int32_t>(bytes.size()));
+}
+
+// On the worker, with source and bytes copied in the listener.
+void receiveEnvelope(const urnet::DeviceLocal& device, const std::string& source,
+                     const std::string& bytes) {
+  notes::v1::Envelope envelope;
+  if (bytes.size() > kMaxMessageBytes || !envelope.ParseFromString(bytes))
+    return;  // malformed: drop and count, never acknowledge
+  switch (envelope.kind_case()) {
+    case notes::v1::Envelope::kNote:
+      if (envelope.note().message_id() != 0 && envelope.note().text().size() <= 4096) {
+        notes::v1::Envelope reply;
+        reply.mutable_ack()->set_message_id(envelope.note().message_id());
+        sendEnvelope(device, source, reply);
+      }
+      break;
+    case notes::v1::Envelope::kAck:
+      // match an outstanding note on (source, envelope.ack().message_id())
+      break;
+    default:  // KIND_NOT_SET: no kind this version knows
+      break;
+  }
+}
+```
+
+The listener only copies and queues; `inbox` stands for your bounded, thread-safe queue:
+
+```cpp
+urnet::Sub sub = device.enableSubprotocol(
+    kNotes, [&inbox](int64_t id, std::string source, const uint8_t* bytes, int32_t length) {
+      if (id == kNotes && length > 0 && static_cast<size_t>(length) <= kMaxMessageBytes)
+        inbox.tryPush(std::move(source), std::string(reinterpret_cast<const char*>(bytes), static_cast<size_t>(length)));
+    });
+```
+
+The wrapper passes `source` as an owned `std::string`, but `bytes` is valid only during the call. Parse and reply on the worker, never in the listener: `sendSubprotocolBytes` can wait for room in the send queue.

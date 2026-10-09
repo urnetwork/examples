@@ -3,8 +3,10 @@ module github.com/urnetwork/examples/go/messages
 go 1.26.7
 
 require (
+	github.com/urnetwork/connect/v2026 v2026.9.14-1046068620
 	github.com/urnetwork/examples/go/integration v0.0.0
 	github.com/urnetwork/sdk/v2026 v2026.9.14-1046068620
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -72,7 +74,6 @@ require (
 	github.com/quic-go/quic-go v0.61.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
-	github.com/urnetwork/connect/v2026 v2026.9.14-1046068620 // indirect
 	github.com/urnetwork/glog/v2026 v2026.9.14-1046068620 // indirect
 	github.com/urnetwork/goidenticons/v2026 v2026.9.14-1046068620 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
@@ -84,7 +85,6 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	gvisor.dev/gvisor v0.0.0-20260909230408-9b1144b679cb // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 	src.agwa.name/tlshacks v0.0.4 // indirect
