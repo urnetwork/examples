@@ -1,7 +1,7 @@
 // The token server's client map (EMBED_CONTRACT.md, "The token server"): the
 // allocators' map (INTEGRATION_CONTRACT.md) from key to client_id, plus
-// pending_caps, the new clients that still owe their default caps. It stores
-// client ids, never tokens.
+// pending_caps and pending_acl, the new clients that still owe their default
+// caps and their default ACL group. It stores client ids, never tokens.
 //
 // Every provision holds the map lock: an in-process mutex and the allocators'
 // exclusive <map>.lock directory, through the remote calls and the map
@@ -55,11 +55,12 @@ func (self *busyError) Error() string {
 }
 
 // The map file. PendingCaps is always written, so a language backend tool,
-// which accepts only version and clients, refuses this map.
+// which accepts only version, clients and pending_acl, refuses this map.
 type clientMap struct {
 	Version     int               `json:"version"`
 	Clients     map[string]string `json:"clients"`
 	PendingCaps []string          `json:"pending_caps"`
+	PendingAcl  []string          `json:"pending_acl"`
 }
 
 // An empty map.
@@ -68,6 +69,7 @@ func newClientMap() *clientMap {
 		Version:     clientMapVersion,
 		Clients:     map[string]string{},
 		PendingCaps: []string{},
+		PendingAcl:  []string{},
 	}
 }
 
@@ -86,10 +88,26 @@ func (self *clientMap) SetPending(key string, pending bool) {
 	}
 }
 
-// Drops key's mapping and its pending caps.
+// Whether key still owes its default ACL group.
+func (self *clientMap) AclPending(key string) bool {
+	return slices.Contains(self.PendingAcl, key)
+}
+
+// Records or clears that key owes its default ACL group.
+func (self *clientMap) SetAclPending(key string, pending bool) {
+	self.PendingAcl = slices.DeleteFunc(self.PendingAcl, func(pendingKey string) bool {
+		return pendingKey == key
+	})
+	if pending {
+		self.PendingAcl = append(self.PendingAcl, key)
+	}
+}
+
+// Drops key's mapping and its pending records.
 func (self *clientMap) Remove(key string) {
 	delete(self.Clients, key)
 	self.SetPending(key, false)
+	self.SetAclPending(key, false)
 }
 
 // The key that maps clientId, if any.
@@ -146,7 +164,8 @@ func (self *mapStore) Lock() (func(), error) {
 
 // Reads the map; a missing file is an empty map. Keys must match the key
 // pattern, client ids must be distinct lowercase uuids, and pending keys must
-// be mapped. A field other than version, clients and pending_caps is refused.
+// be mapped. A field other than version, clients, pending_caps and
+// pending_acl is refused.
 func (self *mapStore) Load() (*clientMap, error) {
 	data, err := readPrivateFile(self.path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -159,7 +178,7 @@ func (self *mapStore) Load() (*clientMap, error) {
 	decoder.DisallowUnknownFields()
 	loaded := &clientMap{}
 	if err := decoder.Decode(loaded); err != nil || decoder.More() || loaded.Version != clientMapVersion || loaded.Clients == nil {
-		return nil, &mapError{message: "the client map is not a version 1 map with only version, clients and pending_caps"}
+		return nil, &mapError{message: "the client map is not a version 1 map with only version, clients, pending_caps and pending_acl"}
 	}
 	mappedClientIds := map[string]bool{}
 	for key, clientId := range loaded.Clients {
@@ -178,6 +197,16 @@ func (self *mapStore) Load() (*clientMap, error) {
 		}
 		pendingKeys[key] = true
 	}
+	if loaded.PendingAcl == nil {
+		loaded.PendingAcl = []string{}
+	}
+	aclPendingKeys := map[string]bool{}
+	for _, key := range loaded.PendingAcl {
+		if _, mapped := loaded.Clients[key]; !mapped || aclPendingKeys[key] {
+			return nil, &mapError{message: "the client map has an invalid pending_acl entry"}
+		}
+		aclPendingKeys[key] = true
+	}
 	return loaded, nil
 }
 
@@ -185,6 +214,9 @@ func (self *mapStore) Load() (*clientMap, error) {
 func (self *mapStore) Save(saved *clientMap) error {
 	if saved.PendingCaps == nil {
 		saved.PendingCaps = []string{}
+	}
+	if saved.PendingAcl == nil {
+		saved.PendingAcl = []string{}
 	}
 	data, err := json.Marshal(saved)
 	if err != nil {

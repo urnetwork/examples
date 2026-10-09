@@ -40,6 +40,8 @@ func runSelfTest() error {
 		checkTokenFetch,
 		checkStateFiles,
 		checkConfigErrors,
+		checkLicenseApp,
+		checkStartLine,
 	}
 	for _, check := range checks {
 		if err := check(); err != nil {
@@ -84,7 +86,8 @@ func readCaps(reading *capReading) capState {
 	return caps
 }
 
-// Decimal units, one decimal, ties to even, moving up at 1000.0.
+// Decimal units, one decimal, ties to even on the exact value, moving up at
+// 1000.0.
 func checkFormatByteCount() error {
 	cases := []struct {
 		byteCount int64
@@ -94,8 +97,11 @@ func checkFormatByteCount() error {
 		{byteCount: 999, text: "999 B"},
 		{byteCount: 1000, text: "1.0 kB"},
 		{byteCount: 999949, text: "999.9 kB"},
+		{byteCount: 1050, text: "1.0 kB"},
+		{byteCount: 1150, text: "1.2 kB"},
 		{byteCount: 1250, text: "1.2 kB"},
 		{byteCount: 1750, text: "1.8 kB"},
+		{byteCount: 999950, text: "1.0 MB"},
 		{byteCount: 999999, text: "1.0 MB"},
 		{byteCount: 1234567890, text: "1.2 GB"},
 		{byteCount: 5000000000, text: "5.0 GB"},
@@ -596,10 +602,28 @@ func checkConfigErrors() error {
 			return fmt.Errorf("arguments %q are not a usage error", args)
 		}
 	}
-	for _, args := range [][]string{{}, {"run"}, {"--self-test"}, {"--version"}} {
+	for _, args := range [][]string{{}, {"run"}, {"--self-test"}, {"--licenses"}, {"--version"}} {
 		if _, ok := commandOf(args); !ok {
 			return fmt.Errorf("arguments %q are a usage error", args)
 		}
+	}
+	return nil
+}
+
+// --licenses names the GetLicenses app kind of the host OS.
+func checkLicenseApp() error {
+	for goos, app := range map[string]string{"darwin": "apple", "windows": "windows", "linux": "linux", "freebsd": "linux"} {
+		if got := licenseApp(goos); got != app {
+			return fmt.Errorf("the license app kind of %s is %q, want %q", goos, got, app)
+		}
+	}
+	return nil
+}
+
+// The start line names the client and the installation.
+func checkStartLine() error {
+	if line := startLine("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"); line != "embed client 11111111-1111-1111-1111-111111111111, installation 22222222-2222-2222-2222-222222222222" {
+		return fmt.Errorf("start line %q", line)
 	}
 	return nil
 }

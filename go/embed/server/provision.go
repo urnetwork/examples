@@ -4,16 +4,18 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 )
 
 // What one key's client is issued with: the api, the map store, the default
-// caps, and the description and device spec to send. A reissue sends the
-// same description and device spec as the provision.
+// caps and ACL group, and the description and device spec to send. A reissue
+// sends the same description and device spec as the provision.
 type issuer struct {
 	api         *apiClient
 	store       *mapStore
 	defaults    defaultCaps
+	aclGroup    string
 	description string
 	deviceSpec  string
 }
@@ -22,6 +24,9 @@ type issuer struct {
 type issuedClient struct {
 	clientId  string
 	clientJwt string
+	// the server predates ACL groups, so the key still owes its default ACL
+	// group (pending_acl keeps it, and a later issue applies it)
+	aclUnsupported bool
 }
 
 // The default caps of a new client could not be applied. The key stays in
@@ -40,19 +45,45 @@ func (self *capsError) Unwrap() error {
 	return self.err
 }
 
+// The default ACL group of a new client could not be applied. The key stays
+// in pending_acl, and the next issue applies it before it returns a token.
+type aclError struct {
+	err error
+}
+
+// The cause on one line.
+func (self *aclError) Error() string {
+	return fmt.Sprintf("the default ACL group could not be applied: %v", self.err)
+}
+
+// The cause, so a refused root credential is still a configuration error.
+func (self *aclError) Unwrap() error {
+	return self.err
+}
+
 // Issues key's client in the locked map:
 //
 //  1. A mapped key is reissued. When its client no longer exists, the
 //     mapping is dropped and the key continues as a new key.
 //  2. A new key passes beforeNew (the token server's installation limit; nil
-//     for none), is provisioned, and is mapped, together with pending_caps
-//     when default caps are configured, in one save.
-//  3. A key in pending_caps gets the default caps, and leaves pending_caps
-//     once they apply. A key never stays uncapped without a record.
+//     for none), is provisioned, and is mapped, together with pending_acl
+//     when the default ACL group is isolated and pending_caps when default
+//     caps are configured, in one save.
+//  3. A key in pending_acl gets the default ACL group and leaves pending_acl
+//     once it applies; on a server without ACL groups it stays there and the
+//     issued client says so. A key in pending_caps then gets the default
+//     caps. A key never stays in the wrong group or uncapped without a record.
 func (self *issuer) Issue(clients *clientMap, key string, beforeNew func(*clientMap) error) (*issuedClient, error) {
 	issued, err := self.reissueOrProvision(clients, key, beforeNew)
 	if err != nil {
 		return nil, err
+	}
+	if clients.AclPending(key) {
+		unsupported, err := self.applyDefaultAclGroup(clients, key, issued.clientId)
+		if err != nil {
+			return nil, err
+		}
+		issued.aclUnsupported = unsupported
 	}
 	if clients.Pending(key) {
 		if err := self.applyDefaultCaps(clients, key, issued.clientId); err != nil {
@@ -99,11 +130,30 @@ func (self *issuer) reissueOrProvision(clients *clientMap, key string, beforeNew
 		return nil, upstreamErrorf("the URnetwork API answered a new client that another key already maps")
 	}
 	clients.Clients[key] = clientId
+	clients.SetAclPending(key, self.aclGroup == aclGroupIsolated)
 	clients.SetPending(key, self.defaults.configured())
 	if err := self.store.Save(clients); err != nil {
 		return nil, err
 	}
 	return &issuedClient{clientId: clientId, clientJwt: clientJwt}, nil
+}
+
+// Applies the default ACL group that key owes, then clears its pending
+// record. A new client is already in the default group, so a default of
+// "default" only clears the record. On a server without ACL groups the record
+// stays and it returns true.
+func (self *issuer) applyDefaultAclGroup(clients *clientMap, key string, clientId string) (bool, error) {
+	if self.aclGroup == aclGroupIsolated {
+		_, err := self.api.SetAclGroup(clientId, aclGroupIsolated)
+		if errors.Is(err, errAclUnsupported) {
+			return true, nil
+		}
+		if err != nil {
+			return false, &aclError{err: err}
+		}
+	}
+	clients.SetAclPending(key, false)
+	return false, self.store.Save(clients)
 }
 
 // Applies the default caps that key owes (only the configured fields), then

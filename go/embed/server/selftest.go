@@ -52,8 +52,10 @@ func runSelfTest() error {
 		checkDemoSessions,
 		checkTokenServer,
 		checkTokenServerDefaultCaps,
+		checkTokenServerAclGroups,
 		checkTokenServerLimits,
 		checkCommands,
+		checkCommandAclGroups,
 		checkUsageAll,
 	}
 	for _, check := range checks {
@@ -109,6 +111,12 @@ type mockApi struct {
 	status int
 	pages  map[string]mockPage
 	caps   map[string]*mockCaps
+	// the clients' ACL groups; a client absent here is "default"
+	aclGroups map[string]string
+	// the next setAclFailures POST /network/client-acl-group calls answer 500
+	setAclFailures int
+	// a server without ACL groups: their route answers 404
+	aclUnsupported bool
 	// list calls so far; past mockListCallBudget the list answers 500, so a
 	// paging loop that never stops fails instead of hanging
 	listCalls int
@@ -120,9 +128,10 @@ const mockListCallBudget = 20
 // An empty mock.
 func newMockApi() *mockApi {
 	return &mockApi{
-		clients: map[string]bool{},
-		pages:   map[string]mockPage{},
-		caps:    map[string]*mockCaps{},
+		clients:   map[string]bool{},
+		pages:     map[string]mockPage{},
+		caps:      map[string]*mockCaps{},
+		aclGroups: map[string]string{},
 	}
 }
 
@@ -239,6 +248,23 @@ func (self *mockApi) handle(method string, path string, body []byte) (int, []byt
 			capObjects = append(capObjects, json.RawMessage(self.capObjectJson(clientId)))
 		}
 		data, _ := json.Marshal(map[string]any{"clients": capObjects, "next_cursor": page.nextCursor})
+		return http.StatusOK, data, nil
+	case route == "/network/client-acl-group" && self.aclUnsupported:
+		return http.StatusNotFound, []byte(`404 page not found`), nil
+	case method == http.MethodPost && route == "/network/client-acl-group":
+		if 0 < self.setAclFailures {
+			self.setAclFailures -= 1
+			return http.StatusInternalServerError, []byte(`{}`), nil
+		}
+		var args map[string]string
+		if json.Unmarshal(body, &args) != nil || (args["acl_group"] != "default" && args["acl_group"] != "isolated") {
+			return http.StatusOK, []byte(`{"error":{"message":"Invalid ACL group."}}`), nil
+		}
+		if !self.clients[args["client_id"]] {
+			return http.StatusOK, []byte(`{"error":{"message":"Client does not exist."}}`), nil
+		}
+		self.aclGroups[args["client_id"]] = args["acl_group"]
+		data, _ := json.Marshal(map[string]string{"client_id": args["client_id"], "acl_group": args["acl_group"]})
 		return http.StatusOK, data, nil
 	case method == http.MethodPost && route == "/network/remove-client":
 		var args map[string]string
@@ -1137,7 +1163,16 @@ func checkCommands() error {
 	if code, _, _ := runWith(settings, "usage", key); code != exitFailure {
 		return fmt.Errorf("a server error exit %d", code)
 	}
+	api.status = http.StatusNotFound
+	if code, _, stderr := runWith(settings, "usage", key); code != exitFailure || stderr != "/network/client-data-cap answered 404: the server predates the data-cap routes\n" {
+		return fmt.Errorf("a server without the cap routes exit %d: %q", code, stderr)
+	}
 	api.status = 0
+	for _, args := range [][]string{{"cap", "user:nobody", "--monthly", "1"}, {"usage", "user:nobody"}, {"remove", "user:nobody"}} {
+		if code, _, stderr := runWith(settings, args...); code != exitConfig || stderr != unmappedKeyMessage+"\n" {
+			return fmt.Errorf("%q for an unmapped key exit %d: %q", args, code, stderr)
+		}
+	}
 	if err := os.Mkdir(files.mapPath+".lock", 0o700); err != nil {
 		return err
 	}
@@ -1231,6 +1266,196 @@ func checkUsageAll() error {
 		if !strings.Contains(calls[0].path, "limit=1000") || strings.Contains(calls[0].path, "cursor=") || !strings.Contains(calls[1].path, "cursor=c1") {
 			return fmt.Errorf("usage-all requests %v", calls)
 		}
+	}
+	return nil
+}
+
+// The ACL route's calls with a body (POSTs).
+func (self *mockApi) aclSets() []mockCall {
+	var calls []mockCall
+	for _, call := range self.callsTo("/network/client-acl-group") {
+		if call.method == http.MethodPost {
+			calls = append(calls, call)
+		}
+	}
+	return calls
+}
+
+// The default ACL group: isolated for each new client, never again on a
+// reissue, recorded in pending_acl until it applies, retried after a failure,
+// reported without failing the token on a server without ACL groups, and
+// skipped when the default is "default".
+func checkTokenServerAclGroups() error {
+	files, err := newSelfTestFiles()
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(files.dir)
+	api := newMockApi()
+	server, logs, err := newSelfTestTokenServer(api, files.settings())
+	if err != nil {
+		return err
+	}
+	var answers []*selfTestAnswer
+	first := selfTestTokenRequest(server, &answers, selfTestAliceToken, selfTestInstallationA)
+	if err := expectAnswer(first, http.StatusOK, ""); err != nil {
+		return err
+	}
+	if calls := api.aclSets(); len(calls) != 1 || calls[0].body != fmt.Sprintf(`{"acl_group":"isolated","client_id":%q}`, first.decoded.ClientId) {
+		return fmt.Errorf("default ACL group request %v", calls)
+	}
+	clients, err := newMapStore(files.mapPath).Load()
+	if err != nil || len(clients.PendingAcl) != 0 {
+		return fmt.Errorf("pending_acl not cleared after the ACL group applied (%v)", err)
+	}
+	if err := expectAnswer(selfTestTokenRequest(server, &answers, selfTestAliceToken, selfTestInstallationA), http.StatusOK, ""); err != nil {
+		return err
+	}
+	if len(api.aclSets()) != 1 {
+		return errors.New("a reissue applied the default ACL group again")
+	}
+
+	// the apply fails: no token, and the key stays in pending_acl
+	api.setAclFailures = 1
+	if err := expectAnswer(selfTestTokenRequest(server, &answers, selfTestAliceToken, selfTestInstallationB), http.StatusBadGateway, "upstream"); err != nil {
+		return err
+	}
+	key := "user:alice:" + selfTestInstallationB
+	clients, err = newMapStore(files.mapPath).Load()
+	if err != nil || clients.Clients[key] == "" || !clients.AclPending(key) {
+		return fmt.Errorf("a failed ACL apply did not keep the key pending (%v)", err)
+	}
+	retried := selfTestTokenRequest(server, &answers, selfTestAliceToken, selfTestInstallationB)
+	if err := expectAnswer(retried, http.StatusOK, ""); err != nil {
+		return err
+	}
+	if calls := api.aclSets(); len(calls) != 3 || !strings.Contains(calls[2].body, retried.decoded.ClientId) {
+		return fmt.Errorf("the retry did not apply the ACL group: %v", calls)
+	}
+	if clients, err = newMapStore(files.mapPath).Load(); err != nil || clients.AclPending(key) {
+		return fmt.Errorf("pending_acl not cleared after the retry (%v)", err)
+	}
+
+	// a server without ACL groups: the token still answers, once reported,
+	// and the key stays pending until the server has them
+	api.aclUnsupported = true
+	bobKey := "user:bob:" + selfTestInstallationC
+	for i := 0; i < 2; i += 1 {
+		if err := expectAnswer(selfTestTokenRequest(server, &answers, selfTestBobToken, selfTestInstallationC), http.StatusOK, ""); err != nil {
+			return err
+		}
+	}
+	if clients, err = newMapStore(files.mapPath).Load(); err != nil || !clients.AclPending(bobKey) {
+		return fmt.Errorf("a server without ACL groups did not keep the key pending (%v)", err)
+	}
+	if strings.Count(logs.String(), "predates ACL groups") != 1 {
+		return fmt.Errorf("a server without ACL groups was not reported once: %q", logs.String())
+	}
+	api.aclUnsupported = false
+	if err := expectAnswer(selfTestTokenRequest(server, &answers, selfTestBobToken, selfTestInstallationC), http.StatusOK, ""); err != nil {
+		return err
+	}
+	if clients, err = newMapStore(files.mapPath).Load(); err != nil || clients.AclPending(bobKey) {
+		return fmt.Errorf("pending_acl not cleared once the server had ACL groups (%v)", err)
+	}
+
+	// URNETWORK_DEFAULT_ACL_GROUP=default: no call and no record
+	defaultFiles, err := newSelfTestFiles()
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(defaultFiles.dir)
+	defaultSettings := defaultFiles.settings()
+	defaultSettings["URNETWORK_DEFAULT_ACL_GROUP"] = "default"
+	defaultApi := newMockApi()
+	defaultServer, _, err := newSelfTestTokenServer(defaultApi, defaultSettings)
+	if err != nil {
+		return err
+	}
+	if err := expectAnswer(selfTestTokenRequest(defaultServer, &answers, selfTestAliceToken, selfTestInstallationA), http.StatusOK, ""); err != nil {
+		return err
+	}
+	if len(defaultApi.aclSets()) != 0 {
+		return errors.New("the default group \"default\" still called the ACL route")
+	}
+	if clients, err := newMapStore(defaultFiles.mapPath).Load(); err != nil || len(clients.PendingAcl) != 0 {
+		return fmt.Errorf("the default group \"default\" left a pending_acl record (%v)", err)
+	}
+	badSettings := defaultFiles.settings()
+	badSettings["URNETWORK_DEFAULT_ACL_GROUP"] = "private"
+	if _, _, err := newSelfTestTokenServer(newMockApi(), badSettings); err == nil {
+		return errors.New("an invalid URNETWORK_DEFAULT_ACL_GROUP was accepted")
+	}
+	return expectNoRootCredential(answers, logs.String())
+}
+
+// The acl command and provision's default ACL group: the request, the
+// printed answer, the usage and unmapped-key errors, and a server without
+// ACL groups (exit 1 with the fixed text, no client JWT written, the key kept
+// in pending_acl; a default of "default" then provisions).
+func checkCommandAclGroups() error {
+	files, err := newSelfTestFiles()
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(files.dir)
+	api := newMockApi()
+	runWith := func(settings map[string]string, args ...string) (int, string, string) {
+		env, stdout, stderr := selfTestEnvironment(api, settings)
+		code := run(args, env)
+		return code, stdout.String(), stderr.String()
+	}
+	settings := files.settings()
+	key := "user:alice:" + selfTestInstallationA
+	if code, _, stderr := runWith(settings, "provision", key, filepath.Join(files.dir, "a.jwt")); code != exitSuccess {
+		return fmt.Errorf("provision exit %d: %s", code, stderr)
+	}
+	clients, err := newMapStore(files.mapPath).Load()
+	if err != nil {
+		return err
+	}
+	clientId := clients.Clients[key]
+	if calls := api.aclSets(); len(calls) != 1 || !strings.Contains(calls[0].body, `"acl_group":"isolated"`) || len(clients.PendingAcl) != 0 {
+		return fmt.Errorf("provision did not apply the default ACL group: %v", calls)
+	}
+	if code, stdout, stderr := runWith(settings, "acl", key, "default"); code != exitSuccess || stdout != fmt.Sprintf("{\"acl_group\":\"default\",\"client_id\":%q}\n", clientId) {
+		return fmt.Errorf("acl exit %d printed %q (%s)", code, stdout, stderr)
+	}
+	if calls := api.aclSets(); len(calls) != 2 || calls[1].body != fmt.Sprintf(`{"acl_group":"default","client_id":%q}`, clientId) {
+		return fmt.Errorf("acl request %v", calls)
+	}
+	if code, _, _ := runWith(settings, "acl", key, "private"); code != exitConfig {
+		return fmt.Errorf("acl with an invalid group exit %d", code)
+	}
+	if code, _, stderr := runWith(settings, "acl", "user:nobody", "isolated"); code != exitConfig || stderr != unmappedKeyMessage+"\n" {
+		return fmt.Errorf("acl for an unmapped key exit %d: %q", code, stderr)
+	}
+
+	api.aclUnsupported = true
+	if code, _, stderr := runWith(settings, "acl", key, "isolated"); code != exitFailure || stderr != errAclUnsupported.Error()+"\n" {
+		return fmt.Errorf("acl on a server without ACL groups exit %d: %q", code, stderr)
+	}
+	newKey := "user:alice:" + selfTestInstallationB
+	newJwtPath := filepath.Join(files.dir, "b.jwt")
+	if code, _, stderr := runWith(settings, "provision", newKey, newJwtPath); code != exitFailure || stderr != errAclUnsupported.Error()+"\n" {
+		return fmt.Errorf("provision on a server without ACL groups exit %d: %q", code, stderr)
+	}
+	if _, err := os.Stat(newJwtPath); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("provision wrote a client JWT for a client outside its ACL group")
+	}
+	if clients, err = newMapStore(files.mapPath).Load(); err != nil || !clients.AclPending(newKey) {
+		return fmt.Errorf("provision on a server without ACL groups did not keep the key pending (%v)", err)
+	}
+	defaultSettings := files.settings()
+	defaultSettings["URNETWORK_DEFAULT_ACL_GROUP"] = "default"
+	if code, _, stderr := runWith(defaultSettings, "provision", newKey, newJwtPath); code != exitSuccess {
+		return fmt.Errorf("provision with the default group \"default\" exit %d: %s", code, stderr)
+	}
+	if clients, err = newMapStore(files.mapPath).Load(); err != nil || clients.AclPending(newKey) {
+		return fmt.Errorf("the default group \"default\" did not clear pending_acl (%v)", err)
+	}
+	if _, err := os.Stat(newJwtPath); err != nil {
+		return errors.New("provision with the default group \"default\" wrote no client JWT")
 	}
 	return nil
 }

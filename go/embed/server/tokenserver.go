@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -63,6 +64,8 @@ type tokenServer struct {
 	// one line per request: the route, the status and the latency, never
 	// keys, ids or tokens
 	logf func(format string, args ...any)
+	// reports once that the server predates ACL groups
+	aclUnsupportedReport sync.Once
 }
 
 // The answer of a successful request. DataCap is the client's cap object, or
@@ -112,6 +115,7 @@ func newTokenServer(env *environment) (*tokenServer, string, error) {
 			api:         api,
 			store:       store,
 			defaults:    shared.defaults,
+			aclGroup:    shared.defaultAclGroup,
 			description: tokenDescription,
 			deviceSpec:  tokenDeviceSpec,
 		},
@@ -254,6 +258,13 @@ func (self *tokenServer) clientToken(key string, userPrefix string) (*clientToke
 	if err != nil {
 		return nil, err
 	}
+	if issued.aclUnsupported {
+		// a server without ACL groups: the client stays in the default group,
+		// pending_acl keeps the key, and a later request applies the group
+		self.aclUnsupportedReport.Do(func() {
+			self.logf("the URnetwork API predates ACL groups: new clients stay in the default group until it adds them")
+		})
+	}
 	dataCap, err := self.api.GetDataCap(issued.clientId)
 	if err != nil {
 		dataCap = nil
@@ -272,6 +283,7 @@ func writeIssueError(w http.ResponseWriter, err error) (int, string) {
 	var upstream *upstreamError
 	var refusal *apiRefusal
 	var caps *capsError
+	var acl *aclError
 	switch {
 	case errors.As(err, &busy):
 		return writeError(w, http.StatusServiceUnavailable, "busy", "another process holds the client map; retry")
@@ -279,7 +291,7 @@ func writeIssueError(w http.ResponseWriter, err error) (int, string) {
 		return writeError(w, http.StatusConflict, "installation_limit", installationLimit.Error())
 	case isClientLimit(err):
 		return writeError(w, http.StatusConflict, "client_limit", "your network is at its client limit; see https://ur.io/services")
-	case errors.As(err, &upstream) || errors.As(err, &refusal) || errors.As(err, &caps):
+	case errors.As(err, &upstream) || errors.As(err, &refusal) || errors.As(err, &caps) || errors.As(err, &acl):
 		return writeError(w, http.StatusBadGateway, "upstream", "the URnetwork API failed; retry later")
 	default:
 		return writeError(w, http.StatusInternalServerError, "internal", "the token server failed; check its client map with token-server usage-all")

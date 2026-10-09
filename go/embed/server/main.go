@@ -8,6 +8,7 @@
 //	token-server usage <key>                        prints the key's cap object
 //	token-server usage-all                          prints the cap object of every capped client, one per line
 //	token-server remove <key>                       removes the key's client and its mapping
+//	token-server acl <key> default|isolated         sets the ACL group of the key's client
 //	token-server --self-test                        credential-free checks
 //
 // The token server and the commands share one private client map, so a key
@@ -20,6 +21,7 @@
 //	URNETWORK_API_URL                     optional https origin, default https://api.bringyour.com
 //	URNETWORK_DEFAULT_MONTHLY_BYTE_LIMIT  optional default caps, applied once to each new client
 //	URNETWORK_DEFAULT_TOTAL_BYTE_LIMIT
+//	URNETWORK_DEFAULT_ACL_GROUP           optional ACL group of each new client: isolated (default) or default
 //	URNETWORK_DEMO_SESSIONS               token server: absolute filename of the private demo session file
 //	URNETWORK_TOKEN_SERVER_ADDRESS        token server: optional bind address, default 127.0.0.1:8790
 //	URNETWORK_MAX_INSTALLATIONS_PER_USER  token server: optional, default 5
@@ -52,7 +54,7 @@ const (
 const defaultApiUrl = "https://api.bringyour.com"
 
 // the command forms
-const usage = "usage: token-server [serve] | provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | --self-test"
+const usage = "usage: token-server [serve] | provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test"
 
 // What every tool prints for a client limit refusal (either flag).
 const clientLimitMessage = "client limit reached: your network is at its client limit; see https://ur.io/services"
@@ -144,6 +146,7 @@ func runCommand(args []string, env *environment) error {
 	case command == "cap" && 3 <= len(args):
 	case (command == "usage" || command == "remove") && len(args) == 2:
 	case command == "usage-all" && len(args) == 1:
+	case command == "acl" && len(args) == 3:
 	default:
 		return configErrorf("%s", usage)
 	}
@@ -160,6 +163,8 @@ func runCommand(args []string, env *environment) error {
 		return tool.Usage(args[1])
 	case "usage-all":
 		return tool.UsageAll()
+	case "acl":
+		return tool.Acl(args[1], args[2])
 	default:
 		return tool.Remove(args[1])
 	}
@@ -171,6 +176,8 @@ type settings struct {
 	rootCredential string
 	mapPath        string
 	defaults       defaultCaps
+	// the ACL group of each new client: aclGroupIsolated or aclGroupDefault
+	defaultAclGroup string
 }
 
 // Reads and validates the shared settings.
@@ -195,11 +202,16 @@ func loadSettings(getenv func(string) string) (*settings, error) {
 	if err != nil {
 		return nil, err
 	}
+	defaultAclGroup, err := loadDefaultAclGroup(getenv)
+	if err != nil {
+		return nil, err
+	}
 	return &settings{
-		apiOrigin:      origin,
-		rootCredential: rootCredential,
-		mapPath:        mapPath,
-		defaults:       defaults,
+		apiOrigin:       origin,
+		rootCredential:  rootCredential,
+		mapPath:         mapPath,
+		defaults:        defaults,
+		defaultAclGroup: defaultAclGroup,
 	}, nil
 }
 
@@ -248,6 +260,28 @@ type defaultCaps struct {
 	// nil when not configured
 	monthly *int64
 	total   *int64
+}
+
+// The ACL groups (EMBED_CONTRACT.md, "ACL groups"). A new client is
+// "default"; an "isolated" client never appears in the network's peer list,
+// receives none, and cannot use Messages.
+const (
+	aclGroupDefault  = "default"
+	aclGroupIsolated = "isolated"
+)
+
+// Reads URNETWORK_DEFAULT_ACL_GROUP, the ACL group of each new client:
+// "isolated" when unset, so your users stay out of each other's peer list;
+// an app that uses Messages sets "default".
+func loadDefaultAclGroup(getenv func(string) string) (string, error) {
+	switch group := getenv("URNETWORK_DEFAULT_ACL_GROUP"); group {
+	case "":
+		return aclGroupIsolated, nil
+	case aclGroupDefault, aclGroupIsolated:
+		return group, nil
+	default:
+		return "", configErrorf("URNETWORK_DEFAULT_ACL_GROUP must be default or isolated")
+	}
 }
 
 // Reads URNETWORK_DEFAULT_MONTHLY_BYTE_LIMIT and URNETWORK_DEFAULT_TOTAL_BYTE_LIMIT.

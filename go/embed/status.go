@@ -6,7 +6,6 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 	"time"
 
 	sdk "github.com/urnetwork/sdk/v2026"
@@ -148,20 +147,26 @@ func resetText(monthlyPeriodEnd string) (string, bool) {
 // Decimal units, because data plans and the Embed plan's monthly data budget
 // are sold in them: below 1000 "N B", otherwise kB, MB, GB, TB, PB or EB in
 // powers of 1000 with one decimal, moving to the next unit when the rounded
-// value reaches 1000.0. The tenth rounds to nearest with ties to even, as
-// strconv does: 1250 bytes shows "1.2 kB" and 1750 bytes "1.8 kB".
+// value reaches 1000.0. The arithmetic is exact integer arithmetic, so a tie
+// rounds to even on the exact value (EMBED_CONTRACT.md, "Status"): 1250 bytes
+// shows "1.2 kB", 1750 bytes "1.8 kB" and 1050 bytes "1.0 kB". A float would
+// see 1.05 as 1.0500000000000000444 and show "1.1 kB".
 func formatByteCount(byteCount int64) string {
 	if byteCount < 1000 {
 		return fmt.Sprintf("%d B", byteCount)
 	}
 	units := []string{"kB", "MB", "GB", "TB", "PB", "EB"}
-	scale := 1000.0
+	// the byte count of one tenth of the unit
+	tenth := int64(100)
 	for i, unit := range units {
-		text := strconv.FormatFloat(float64(byteCount)/scale, 'f', 1, 64)
-		if value, _ := strconv.ParseFloat(text, 64); value < 1000 || i == len(units)-1 {
-			return text + " " + unit
+		tenths, remainder := byteCount/tenth, byteCount%tenth
+		if tenth < 2*remainder || (tenth == 2*remainder && tenths%2 == 1) {
+			tenths += 1
 		}
-		scale *= 1000
+		if tenths < 10000 || i == len(units)-1 {
+			return fmt.Sprintf("%d.%d %s", tenths/10, tenths%10, unit)
+		}
+		tenth *= 1000
 	}
 	// unreachable: the last unit always returns
 	return ""

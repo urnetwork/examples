@@ -180,8 +180,8 @@ func fetchClientJwt(client *http.Client, tokenServer *tokenServerConfig, stateDi
 }
 
 // The exit code of a startup failure: 78 for a configuration problem or a
-// token server refusal (401, 409), 1 for anything else (unreachable, 5xx, an
-// invalid answer).
+// token server refusal (401, 409), 1 for anything else (any other status,
+// such as 400 or 5xx, unreachable, or an invalid answer).
 func startupExitCode(err error) int {
 	var configErr *configError
 	var refusal *tokenServerRefusal

@@ -4,9 +4,10 @@
 // JWT from your backend, starts a local Device with it, connects to the best
 // available location and shows the status and the installation's data caps.
 // The Device carries only the app's own traffic, not the device's: the
-// Sockets and Messages examples continue from here with the same state.
+// Sockets examples continue from here with the same state. Messages need
+// their own provider-capable Device (EMBED_CONTRACT.md, "Next").
 //
-// Usage: embed [run] | --self-test | --version. The installation state is in
+// Usage: embed [run] | --self-test | --licenses | --version. The installation state is in
 // the private directory named by URNETWORK_EMBED_STATE_DIR (state.go). The
 // client JWT comes from a token server (URNETWORK_TOKEN_SERVER_URL and
 // URNETWORK_DEMO_SESSION, token.go) or from client.jwt in that directory.
@@ -17,11 +18,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	sdk "github.com/urnetwork/sdk/v2026"
@@ -34,24 +37,48 @@ const (
 	exitConfig = 78
 )
 
-const usage = "usage: embed [run] | --self-test | --version"
+const usage = "usage: embed [run] | --self-test | --licenses | --version"
 
 // Exits with the code of the command.
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
-// The command of the arguments: "run", "--self-test" or "--version". Any
-// other arguments are a usage error (exit 78).
+// The command of the arguments: "run", "--self-test", "--licenses" or
+// "--version". Any other arguments are a usage error (exit 78).
 func commandOf(args []string) (string, bool) {
 	switch {
 	case len(args) == 0 || (len(args) == 1 && args[0] == "run"):
 		return "run", true
-	case len(args) == 1 && (args[0] == "--self-test" || args[0] == "--version"):
+	case len(args) == 1 && (args[0] == "--self-test" || args[0] == "--licenses" || args[0] == "--version"):
 		return args[0], true
 	default:
 		return "", false
 	}
+}
+
+// The GetLicenses app kind of the OS the console app runs on: apple on macOS,
+// windows on Windows, linux elsewhere (EMBED_CONTRACT.md, "Console commands").
+func licenseApp(goos string) string {
+	switch goos {
+	case "darwin", "ios":
+		return sdk.LicenseAppApple
+	case "windows":
+		return sdk.LicenseAppWindows
+	default:
+		return sdk.LicenseAppLinux
+	}
+}
+
+// The SDK's licenses and data attributions for the host OS, as the JSON array
+// that the C ABI's urnet_get_licenses returns. Publish them with the app.
+func licensesJson(goos string) ([]byte, error) {
+	return json.Marshal(sdk.GetLicenses(licenseApp(goos)))
+}
+
+// The line printed at start (EMBED_CONTRACT.md, "Status").
+func startLine(clientId string, instanceId string) string {
+	return fmt.Sprintf("embed client %s, installation %s", clientId, instanceId)
 }
 
 // Keeps the SDK's log files in logDir, which the SDK bounds, instead of the
@@ -84,6 +111,14 @@ func run(args []string) int {
 		}
 		fmt.Println("embed self-test passed")
 		return exitStopped
+	case command == "--licenses":
+		licensesJson, err := licensesJson(runtime.GOOS)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not read the sdk licenses: %v\n", err)
+			return exitFailure
+		}
+		fmt.Println(string(licensesJson))
+		return exitStopped
 	case command == "--version":
 		fmt.Println(sdk.Version)
 		return exitStopped
@@ -108,7 +143,7 @@ func run(args []string) int {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	fmt.Printf("embed client %s, installation %s\n", credential.clientId, config.instanceId)
+	fmt.Println(startLine(credential.clientId, config.instanceId))
 	// 4 to 7. the manager, the device, its listeners and its connect location
 	session, err := newEmbedSession(config, credential)
 	if err != nil {

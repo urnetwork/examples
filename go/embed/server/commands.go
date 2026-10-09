@@ -35,6 +35,7 @@ func newBackendTool(env *environment) (*backendTool, error) {
 			api:         api,
 			store:       store,
 			defaults:    shared.defaults,
+			aclGroup:    shared.defaultAclGroup,
 			description: commandDescription,
 			deviceSpec:  commandDeviceSpec,
 		},
@@ -65,6 +66,11 @@ func (self *backendTool) Provision(key string, clientJwtPath string) error {
 	issued, err := self.issuer.Issue(clients, key, nil)
 	if err != nil {
 		return commandError(err)
+	}
+	if issued.aclUnsupported {
+		// fail closed: no token for a client that is not in its ACL group;
+		// pending_acl keeps the key for the next provision
+		return &upstreamError{err: errAclUnsupported}
 	}
 	// the mapping is saved before the token is written, so a failed write is
 	// repaired by provisioning again (a reissue)
@@ -109,6 +115,23 @@ func (self *backendTool) Usage(key string) error {
 	return printLine(self.out, capObject)
 }
 
+// Sets the ACL group of the key's client, "default" or "isolated", and
+// prints the answer, {"client_id": "...", "acl_group": "..."}.
+func (self *backendTool) Acl(key string, aclGroup string) error {
+	if aclGroup != aclGroupDefault && aclGroup != aclGroupIsolated {
+		return configErrorf("%s", usage)
+	}
+	clientId, err := self.mappedClientId(key)
+	if err != nil {
+		return err
+	}
+	answer, err := self.api.SetAclGroup(clientId, aclGroup)
+	if err != nil {
+		return commandError(err)
+	}
+	return printLine(self.out, answer)
+}
+
 // Pages through GET /network/client-data-caps and prints one cap object per
 // line, stopping at a null cursor or one it has already seen.
 func (self *backendTool) UsageAll() error {
@@ -149,7 +172,7 @@ func (self *backendTool) Remove(key string) error {
 	}
 	clientId, ok := clients.Clients[key]
 	if !ok {
-		return configErrorf("%s has no client in the map", key)
+		return configErrorf("%s", unmappedKeyMessage)
 	}
 	if err := self.api.RemoveClient(clientId); err != nil && !isClientDoesNotExist(err) {
 		return commandError(err)
@@ -160,6 +183,10 @@ func (self *backendTool) Remove(key string) error {
 	}
 	return printJson(self.out, map[string]string{"removed": clientId})
 }
+
+// The fixed text for a key with no mapped client (EMBED_CONTRACT.md, "Backend
+// tools"); exit 78.
+const unmappedKeyMessage = "no client is mapped for that key; run provision first"
 
 // The client id that the map holds for key.
 func (self *backendTool) mappedClientId(key string) (string, error) {
@@ -172,7 +199,7 @@ func (self *backendTool) mappedClientId(key string) (string, error) {
 	}
 	clientId, ok := clients.Clients[key]
 	if !ok {
-		return "", configErrorf("%s has no client in the map; provision it first", key)
+		return "", configErrorf("%s", unmappedKeyMessage)
 	}
 	return clientId, nil
 }

@@ -27,6 +27,11 @@ const httpTimeout = 30 * time.Second
 // or removed client, and a remove of a missing client, with this message.
 const clientDoesNotExistMessage = "Client does not exist."
 
+// A server without ACL groups answers their route with 404 (EMBED_CONTRACT.md,
+// "ACL groups"). The commands exit 1 with this text; the token server reports
+// it and still answers the token.
+var errAclUnsupported = errors.New("/network/client-acl-group answered 404: the server predates ACL groups")
+
 // Sends one api request: the method, the path (with its query) below the api
 // origin and an optional json body. Returns the http status and the bounded
 // response body.
@@ -94,6 +99,14 @@ func (self *apiClient) call(method string, path string, body []byte) ([]byte, er
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		return nil, &upstreamError{err: configErrorf("the URnetwork API refused the root credential (http %d)", status)}
+	}
+	if status == http.StatusNotFound && strings.HasPrefix(path, "/network/client-acl-group") {
+		return nil, &upstreamError{err: errAclUnsupported}
+	}
+	if status == http.StatusNotFound && strings.HasPrefix(path, "/network/client-data-cap") {
+		// a server without the data-cap routes (EMBED_CONTRACT.md, "Backend tools")
+		route, _, _ := strings.Cut(path, "?")
+		return nil, upstreamErrorf("%s answered 404: the server predates the data-cap routes", route)
 	}
 	if status < 200 || 300 <= status {
 		return nil, upstreamErrorf("the URnetwork API answered http %d", status)
@@ -209,6 +222,37 @@ func (self *apiClient) ListDataCaps(cursor string) ([]json.RawMessage, *string, 
 		capObjects = append(capObjects, capObject)
 	}
 	return capObjects, result.NextCursor, nil
+}
+
+// Sets one client's ACL group with POST /network/client-acl-group and
+// returns the answer, {"client_id": "...", "acl_group": "..."}, after
+// checking that it names the client and the group.
+func (self *apiClient) SetAclGroup(clientId string, aclGroup string) (json.RawMessage, error) {
+	request, err := json.Marshal(map[string]string{"client_id": clientId, "acl_group": aclGroup})
+	if err != nil {
+		return nil, err
+	}
+	body, err := self.call(http.MethodPost, "/network/client-acl-group", request)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		ClientId string `json:"client_id"`
+		AclGroup string `json:"acl_group"`
+		Error    *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, upstreamErrorf("the URnetwork API answered client-acl-group with something invalid")
+	}
+	if result.Error != nil {
+		return nil, &apiRefusal{message: result.Error.Message}
+	}
+	if result.ClientId != clientId || result.AclGroup != aclGroup {
+		return nil, upstreamErrorf("the URnetwork API answered client-acl-group for another client or group")
+	}
+	return json.Marshal(map[string]string{"client_id": result.ClientId, "acl_group": result.AclGroup})
 }
 
 // Removes one client. A missing client answers the "Client does not exist."
