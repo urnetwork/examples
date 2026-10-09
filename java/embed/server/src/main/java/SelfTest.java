@@ -15,6 +15,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
@@ -55,6 +56,14 @@ final class SelfTest {
     String claimOverride;
     // when set, the cap routes answer this body
     String capAnswer;
+    // the ACL group each client was set to
+    final Map<String, String> aclGroups = new HashMap<>();
+    // how many ACL requests still fail with HTTP 500
+    int aclFailures;
+    // when set, the ACL route answers 404, as a server without ACL groups does
+    boolean aclUnsupported;
+    // when set, the ACL route answers the other group
+    boolean aclMismatch;
     private int nextClient = 1;
     private int generation;
 
@@ -113,11 +122,34 @@ final class SelfTest {
         String cursor = rest.startsWith("&cursor=") ? URLDecoder.decode(rest.substring(8), StandardCharsets.UTF_8) : "";
         return new EmbedServer.ApiResponse(200, pages.getOrDefault(cursor, "{\"clients\":[],\"next_cursor\":null}"));
       }
+      if (request.method().equals("POST") && path.equals(EmbedServer.ACL_PATH) && !aclUnsupported) {
+        if (0 < aclFailures) {
+          aclFailures--;
+          return new EmbedServer.ApiResponse(500, "{}");
+        }
+        String id = body.path("client_id").asText();
+        String group = body.path("acl_group").asText();
+        if (missing.contains(id)) {
+          return new EmbedServer.ApiResponse(200, "{\"error\":{\"message\":\"Client does not exist.\"}}");
+        }
+        if (!group.equals("default") && !group.equals("isolated")) {
+          return new EmbedServer.ApiResponse(200, "{\"error\":{\"message\":\"Invalid ACL group.\"}}");
+        }
+        aclGroups.put(id, group);
+        String answered = aclMismatch ? (group.equals("default") ? "isolated" : "default") : group;
+        return new EmbedServer.ApiResponse(200, EmbedServer.JSON.createObjectNode()
+                                                    .put("client_id", id).put("acl_group", answered).toString());
+      }
       if (request.method().equals("POST") && path.equals(EmbedServer.REMOVE_PATH)) {
         String id = body.path("client_id").asText();
         return new EmbedServer.ApiResponse(200, missing.contains(id) ? "{\"error\":{\"message\":\"Client does not exist.\"}}" : "{}");
       }
       return new EmbedServer.ApiResponse(404, "404 page not found");
+    }
+
+    /** The ACL requests this stand-in answered. */
+    List<EmbedServer.ApiRequest> aclRequests() {
+      return requests.stream().filter(r -> r.pathAndQuery().equals(EmbedServer.ACL_PATH)).toList();
     }
 
     private EmbedServer.ApiResponse issue(String clientId, String claim) {
@@ -145,6 +177,8 @@ final class SelfTest {
       checkUsageAll(dir);
       checkRemove(dir);
       checkMap(dir);
+      checkAclGroups(dir);
+      checkFailureTexts(dir);
       checkNothingSecretPrinted();
     } finally {
       try (Stream<Path> paths = Files.walk(dir)) {
@@ -161,11 +195,22 @@ final class SelfTest {
     }
   }
 
-  /** The settings of a run with a map in dir. */
+  /**
+   * The settings of a run with a map in dir. The checks that do not test ACL groups keep new
+   * clients in "default", which sends no ACL request.
+   */
   private static Function<String, String> env(Path dir, String map) {
-    Map<String, String> settings = Map.of("URNETWORK_ROOT_JWT", ROOT,
-                                          "URNETWORK_CLIENT_MAP", dir.resolve(map).toString(),
-                                          "URNETWORK_API_URL", "http://127.0.0.1:1234");
+    return env(dir, map, "default");
+  }
+
+  /** The settings of a run with a map in dir and a default ACL group; null leaves it unset. */
+  private static Function<String, String> env(Path dir, String map, String aclGroup) {
+    Map<String, String> settings = new HashMap<>(Map.of("URNETWORK_ROOT_JWT", ROOT,
+                                                        "URNETWORK_CLIENT_MAP", dir.resolve(map).toString(),
+                                                        "URNETWORK_API_URL", "http://127.0.0.1:1234"));
+    if (aclGroup != null) {
+      settings.put("URNETWORK_DEFAULT_ACL_GROUP", aclGroup);
+    }
     return settings::get;
   }
 
@@ -265,6 +310,8 @@ final class SelfTest {
         {"cap", "user:a"}, {"cap", "user:a", "--monthly", "1GB"}, {"cap", "user:a", "--monthly", "-1"},
         {"cap", "user:a", "--monthly", "9223372036854775808"}, {"cap", "user:a", "--monthly", "1", "--monthly", "2"},
         {"cap", "user:a", "--foo"}, {"cap", "user:a", "--monthly"}, {"cap", "user:a", "--reset-total", "--reset-total"},
+        {"acl"}, {"acl", "user:a"}, {"acl", "user:a", "other"}, {"acl", "user:a", "Default"},
+        {"acl", "user:a", "default", "extra"}, {"acl", "alice", "default"},
     };
     for (String[] args : usage) {
       expect(exec(api, env, args).exit() == 78, "the arguments " + String.join(" ", args) + " do not exit 78");
@@ -275,7 +322,9 @@ final class SelfTest {
         Map.of("URNETWORK_ROOT_JWT", ROOT),
         Map.of("URNETWORK_ROOT_JWT", ROOT, "URNETWORK_CLIENT_MAP", "clients.json"),
         Map.of("URNETWORK_ROOT_JWT", ROOT, "URNETWORK_CLIENT_MAP", dir.resolve("clients.json").toString(),
-               "URNETWORK_API_URL", "http://api.example.com"));
+               "URNETWORK_API_URL", "http://api.example.com"),
+        Map.of("URNETWORK_ROOT_JWT", ROOT, "URNETWORK_CLIENT_MAP", dir.resolve("clients.json").toString(),
+               "URNETWORK_DEFAULT_ACL_GROUP", "private"));
     for (Map<String, String> settings : invalid) {
       expect(exec(api, settings::get, "provision", "user:a", jwtFile).exit() == 78, "missing or invalid settings do not exit 78");
     }
@@ -390,6 +439,157 @@ final class SelfTest {
     Files.createDirectory(Path.of(locked + ".lock"));
     expect(exec(api, env(dir, "locked.json"), "provision", "user:hana", dir.resolve("hana.jwt").toString()).exit() == 1,
            "a held lock does not exit 1");
+    // the C# tool's lock is a file at the same path
+    Path fileLocked = dir.resolve("file-locked.json");
+    Files.createFile(Path.of(fileLocked + ".lock"));
+    Run run = exec(api, env(dir, "file-locked.json"), "provision", "user:hana", dir.resolve("hana.jwt").toString());
+    expect(run.exit() == 1 && run.err().contains("lock") && Files.isRegularFile(Path.of(fileLocked + ".lock")),
+           "a held file lock does not exit 1 untouched");
+  }
+
+  /** The keys a map file records in pending_acl. */
+  private static List<String> pendingAcl(Path dir, String map) throws IOException, EmbedServer.ToolException {
+    List<String> keys = new ArrayList<>();
+    for (JsonNode entry : EmbedServer.loadMap(dir.resolve(map)).path("pending_acl")) {
+      keys.add(entry.asText());
+    }
+    return keys;
+  }
+
+  /**
+   * The default ACL group: applied to a new client only, with pending_acl set before and cleared
+   * after, kept and retried after a failure, kept on a server without ACL groups, and settled by
+   * acl; the acl command.
+   */
+  private static void checkAclGroups(Path dir) throws IOException, EmbedServer.ToolException {
+    StandInApi api = new StandInApi();
+    Function<String, String> isolated = env(dir, "acl.json", null);
+    Path jwtFile = dir.resolve("ivan.jwt");
+    String id = StandInApi.id(1);
+
+    // unset means isolated: one ACL request after the new client, then no record
+    Run run = exec(api, isolated, "provision", "user:ivan", jwtFile.toString());
+    expect(run.exit() == 0 && api.requests.size() == 2 && api.requests.get(1).pathAndQuery().equals(EmbedServer.ACL_PATH) &&
+           canonical(api.requests.get(1).body()).equals(canonical("{\"client_id\":\"" + id + "\",\"acl_group\":\"isolated\"}")),
+           "a new client is not put in isolated: " + run.err());
+    expect("isolated".equals(api.aclGroups.get(id)) && pendingAcl(dir, "acl.json").isEmpty() &&
+           !Files.readString(dir.resolve("acl.json")).contains("pending_acl") &&
+           Files.readString(jwtFile).equals(api.issuedJwts.get(0) + "\n"),
+           "an applied group leaves its record or no client JWT");
+    run = exec(api, isolated, "provision", "user:ivan", jwtFile.toString());
+    expect(run.exit() == 0 && api.aclRequests().size() == 1, "a reissue sends an ACL request");
+
+    // a failed request keeps the record and writes no client JWT; the next issue retries
+    api.aclFailures = 1;
+    Path judyJwt = dir.resolve("judy.jwt");
+    run = exec(api, isolated, "provision", "user:judy", judyJwt.toString());
+    expect(run.exit() == 1 && !Files.exists(judyJwt) && pendingAcl(dir, "acl.json").equals(List.of("user:judy")) &&
+           EmbedServer.loadMap(dir.resolve("acl.json")).get("clients").path("user:judy").asText().equals(StandInApi.id(2)),
+           "a failed ACL request does not keep the record: " + run.exit() + " " + run.err());
+    run = exec(api, isolated, "provision", "user:judy", judyJwt.toString());
+    expect(run.exit() == 0 && "isolated".equals(api.aclGroups.get(StandInApi.id(2))) &&
+           pendingAcl(dir, "acl.json").isEmpty() && Files.exists(judyJwt),
+           "a pending group is not applied on the next issue");
+
+    // a server without ACL groups: exit 1 with the record kept; a default of default then provisions
+    StandInApi older = new StandInApi();
+    older.aclUnsupported = true;
+    Path kimJwt = dir.resolve("kim.jwt");
+    run = exec(older, env(dir, "older.json", "isolated"), "provision", "user:kim", kimJwt.toString());
+    expect(run.exit() == 1 && run.err().strip().equals(EmbedServer.ACL_UNSUPPORTED_MESSAGE) && !Files.exists(kimJwt) &&
+           pendingAcl(dir, "older.json").equals(List.of("user:kim")),
+           "a server without ACL groups answers " + run.exit() + ": " + run.err());
+    run = exec(older, env(dir, "older.json"), "provision", "user:kim", kimJwt.toString());
+    expect(run.exit() == 0 && Files.exists(kimJwt) && pendingAcl(dir, "older.json").isEmpty() &&
+           older.aclRequests().size() == 1,
+           "a default of default does not settle the record without a request");
+    run = exec(older, env(dir, "older.json"), "provision", "user:leo", dir.resolve("leo.jwt").toString());
+    expect(run.exit() == 0 && older.aclRequests().size() == 1 && pendingAcl(dir, "older.json").isEmpty(),
+           "a default of default sends an ACL request");
+
+    // the acl command: request body, printed answer, and refusals
+    run = exec(api, isolated, "acl", "user:ivan", "default");
+    String answer = "{\"client_id\":\"" + id + "\",\"acl_group\":\"default\"}";
+    expect(run.exit() == 0 && run.out().strip().equals(answer) &&
+           canonical(api.requests.get(api.requests.size() - 1).body()).equals(canonical(answer)) &&
+           "default".equals(api.aclGroups.get(id)),
+           "acl printed " + run.out() + run.err());
+    int sent = api.requests.size();
+    expect(exec(api, isolated, "acl", "user:ivan", "public").exit() == 78 && api.requests.size() == sent,
+           "an invalid group is sent");
+    api.aclMismatch = true;
+    expect(exec(api, isolated, "acl", "user:ivan", "isolated").exit() == 1, "an answer for another group is accepted");
+    api.aclMismatch = false;
+    api.missing.add(id);
+    expect(exec(api, isolated, "acl", "user:ivan", "isolated").exit() == 1, "a refused ACL request does not exit 1");
+    api.missing.remove(id);
+    StandInApi olderAcl = new StandInApi();
+    olderAcl.aclUnsupported = true;
+    run = exec(olderAcl, isolated, "acl", "user:ivan", "isolated");
+    expect(run.exit() == 1 && run.err().strip().equals(EmbedServer.ACL_UNSUPPORTED_MESSAGE), "acl on an older server: " + run.err());
+
+    // an explicit group settles a pending record, so a later issue keeps it
+    api.aclFailures = 1;
+    exec(api, isolated, "provision", "user:mia", dir.resolve("mia.jwt").toString());
+    expect(pendingAcl(dir, "acl.json").equals(List.of("user:mia")), "the failed group is not recorded");
+    run = exec(api, isolated, "acl", "user:mia", "default");
+    expect(run.exit() == 0 && pendingAcl(dir, "acl.json").isEmpty(), "acl does not settle a pending record");
+    sent = api.aclRequests().size();
+    expect(exec(api, isolated, "provision", "user:mia", dir.resolve("mia.jwt").toString()).exit() == 0 &&
+           api.aclRequests().size() == sent && "default".equals(api.aclGroups.get(StandInApi.id(3))),
+           "a settled group is overridden on the next issue");
+
+    // remove drops a pending record with its mapping
+    api.aclFailures = 1;
+    exec(api, isolated, "provision", "user:noor", dir.resolve("noor.jwt").toString());
+    expect(exec(api, isolated, "remove", "user:noor").exit() == 0 && pendingAcl(dir, "acl.json").isEmpty(),
+           "remove keeps a pending record");
+
+    // a pending_acl that is not a list of distinct mapped keys is refused untouched
+    String[] invalid = {
+        "{\"version\":1,\"clients\":{},\"pending_acl\":[\"user:x\"]}",
+        "{\"version\":1,\"clients\":{\"user:x\":\"" + id + "\"},\"pending_acl\":[\"user:x\",\"user:x\"]}",
+        "{\"version\":1,\"clients\":{\"user:x\":\"" + id + "\"},\"pending_acl\":\"user:x\"}",
+        "{\"version\":1,\"clients\":{\"user:x\":\"" + id + "\"},\"pending_acl\":[1]}",
+    };
+    for (String text : invalid) {
+      Path map = dir.resolve("pending.json");
+      EmbedServer.writePrivate(map, text.getBytes(StandardCharsets.UTF_8));
+      StandInApi refused = new StandInApi();
+      expect(exec(refused, env(dir, "pending.json"), "provision", "user:x", dir.resolve("x.jwt").toString()).exit() == 78 &&
+             Files.readString(map).equals(text) && refused.requests.isEmpty(),
+             "the map " + text + " is accepted");
+    }
+  }
+
+  /** The unmapped-key and 404 texts. */
+  private static void checkFailureTexts(Path dir) {
+    StandInApi api = new StandInApi();
+    Function<String, String> env = env(dir, "texts.json");
+    String[][] unmapped = {
+        {"cap", "user:nobody", "--monthly", "1"}, {"usage", "user:nobody"}, {"remove", "user:nobody"},
+        {"acl", "user:nobody", "default"},
+    };
+    for (String[] args : unmapped) {
+      Run run = exec(api, env, args);
+      expect(run.exit() == 78 && run.err().strip().equals(EmbedServer.UNMAPPED_MESSAGE),
+             args[0] + " for an unmapped key answers " + run.exit() + ": " + run.err());
+    }
+    expect(api.requests.isEmpty(), "an unmapped key reached the API");
+
+    exec(api, env, "provision", "user:olga", dir.resolve("olga.jwt").toString());
+    StandInApi older = new StandInApi();
+    older.status = 404;
+    String[][] cases = {
+        {EmbedServer.CAP_PATH, "cap", "user:olga", "--monthly", "1"},
+        {EmbedServer.CAP_PATH, "usage", "user:olga"},
+        {EmbedServer.CAPS_PATH, "usage-all"},
+    };
+    for (String[] c : cases) {
+      Run run = exec(older, env, Arrays.copyOfRange(c, 1, c.length));
+      expect(run.exit() == 1 && run.err().strip().equals(c[0] + " answered 404: the server predates the data-cap routes"),
+             c[1] + " on a server without the cap routes answers " + run.exit() + ": " + run.err());
+    }
   }
 
   /** No client JWT and no root credential reached stdout or stderr in any run. */

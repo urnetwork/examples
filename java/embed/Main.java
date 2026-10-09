@@ -6,8 +6,10 @@
 // (EmbedStatus.java). In-app traffic only: no VPN APIs, and the device does
 // not provide.
 //
-// Usage: java -jar urnetwork-embed.jar [run] | --self-test | --version.
-// Installation state is in the private directory named by
+// Usage: java -jar urnetwork-embed.jar [run] | --self-test | --licenses |
+// --version. --licenses prints the SDK's licenses and data attributions, as
+// JSON, to publish with the app. Installation state is in the private
+// directory named by
 // URNETWORK_EMBED_STATE_DIR (InstallationState.java). With
 // URNETWORK_TOKEN_SERVER_URL and URNETWORK_DEMO_SESSION set, every start
 // fetches the client JWT from the token server; otherwise the app uses the
@@ -32,7 +34,7 @@ public final class Main {
   // sysexits EX_CONFIG
   static final int EXIT_CONFIG = 78;
 
-  static final String USAGE = "usage: urnetwork-embed [run] | --self-test | --version";
+  static final String USAGE = "usage: urnetwork-embed [run] | --self-test | --licenses | --version";
 
   // how long Ctrl-C or SIGTERM waits for the device to stop before the
   // process exits anyway
@@ -56,6 +58,21 @@ public final class Main {
         return EXIT_FAILURE;
       }
       out.println("embed self-test passed");
+      return EXIT_STOPPED;
+    }
+    if (args.length == 1 && args[0].equals("--licenses")) {
+      String licenses;
+      try {
+        licenses = EmbedSession.sdkLicenses(EmbedStatus.licenseApp(System.getProperty("os.name")));
+      } catch (LinkageError | RuntimeException e) {
+        err.println("could not load the URnetwork SDK runtime: " + describe(e));
+        return EXIT_FAILURE;
+      }
+      if (licenses == null) {
+        err.println("the sdk returned no licenses");
+        return EXIT_FAILURE;
+      }
+      out.println(licenses);
       return EXIT_STOPPED;
     }
     if (args.length == 1 && args[0].equals("--version")) {
@@ -135,8 +152,7 @@ public final class Main {
       err.println("could not start the embedded device: " + describe(e));
       return EXIT_FAILURE;
     }
-    out.printf("embed client %s, installation %s%n", credential.clientId(),
-               settings.instanceId());
+    out.println(EmbedStatus.startLine(credential.clientId(), settings.instanceId()));
     try {
       return session.run();
     } catch (RuntimeException | LinkageError e) {

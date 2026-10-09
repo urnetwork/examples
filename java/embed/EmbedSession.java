@@ -114,6 +114,9 @@ final class EmbedSession {
   /** The SDK version of the native runtime, which this call loads. */
   static String sdkVersion() { return Sdk.version(); }
 
+  /** The SDK's licenses and data attributions for this kind of app, as JSON; null if none. */
+  static String sdkLicenses(String app) { return Sdk.takeString(Sdk.raw.urnet_get_licenses(app)); }
+
   /**
    * Keeps the SDK's log files in logDir, which the SDK bounds, instead of the system temp
    * directory. The SDK also copies its log lines to stderr.

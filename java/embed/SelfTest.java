@@ -47,7 +47,7 @@ final class SelfTest {
         SelfTest::checkStatusLines, SelfTest::checkStatusRules, SelfTest::checkDataFields,
         SelfTest::checkCapParsing, SelfTest::checkClientJwtClaims, SelfTest::checkOrigins,
         SelfTest::checkTokenFetch, SelfTest::checkCapRead, SelfTest::checkStateFiles,
-        SelfTest::checkSettings, SelfTest::checkUsageExitCode);
+        SelfTest::checkSettings, SelfTest::checkUsageExitCode, SelfTest::checkStartLine);
     for (Check check : checks) {
       check.run();
     }
@@ -90,14 +90,14 @@ final class SelfTest {
     return capReadings;
   }
 
-  /** Decimal units, one decimal, ties to even, the next unit at 1000.0. */
+  /** Decimal units, one decimal, ties to even on the exact integer, the next unit at 1000.0. */
   private static void checkFormatByteCount() {
     Object[][] cases = {
         {0L, "0 B"}, {999L, "999 B"}, {1000L, "1.0 kB"}, {999949L, "999.9 kB"},
-        // exact halves round to even, as Go's %.1f does
-        {1250L, "1.2 kB"}, {1750L, "1.8 kB"},
-        // 999.999 kB rounds to 1000.0 kB and moves to the next unit
-        {999999L, "1.0 MB"},
+        // exact halves round to even on the integer: 1.05 is not a binary fraction
+        {1050L, "1.0 kB"}, {1150L, "1.2 kB"}, {1250L, "1.2 kB"}, {1750L, "1.8 kB"},
+        // 999.95 kB ties to the even 1000.0 kB and moves to the next unit, as does 999.999 kB
+        {999950L, "1.0 MB"}, {999999L, "1.0 MB"},
         {1234567890L, "1.2 GB"}, {5000000000L, "5.0 GB"}, {10000000000L, "10.0 GB"},
         {3000000000000L, "3.0 TB"}, {Long.MAX_VALUE, "9.2 EB"},
     };
@@ -383,6 +383,10 @@ final class SelfTest {
           {500, "{\"error\":{\"code\":\"upstream\",\"message\":\"upstream failed\"}}", 1, "stopped", "HTTP 500"},
           {503, "{\"error\":{\"code\":\"busy\",\"message\":\"retry\"}}", 1, "stopped", "HTTP 503"},
           {400, "{\"error\":{\"code\":\"invalid_request\",\"message\":\"bad\"}}", 1, "stopped", "HTTP 400"},
+          {404, "404 page not found", 1, "stopped", "HTTP 404"},
+          {405, "{\"error\":{\"code\":\"method_not_allowed\",\"message\":\"use POST\"}}", 1, "stopped", "HTTP 405"},
+          {500, "{\"error\":{\"code\":\"internal\",\"message\":\"internal error\"}}", 1, "stopped", "HTTP 500"},
+          {502, "{\"error\":{\"code\":\"upstream\",\"message\":\"upstream failed\"}}", 1, "stopped", "HTTP 502"},
           {200, "not json", 1, "stopped", "invalid"},
           {200, "{\"client_id\":\"" + CLIENT_ID + "\",\"by_client_jwt\":\"" + jwt(Map.of("network_id", CLIENT_ID)) + "\"}",
            1, "stopped", "client_id"},
@@ -521,6 +525,16 @@ final class SelfTest {
     } finally {
       deleteTree(stateDir);
     }
+  }
+
+  /** The start line and the kind of app whose licenses --licenses prints. */
+  private static void checkStartLine() {
+    expect(EmbedStatus.startLine(CLIENT_ID, INSTANCE_ID).equals("embed client " + CLIENT_ID + ", installation " + INSTANCE_ID),
+           "the start line is not the contract's");
+    expect(EmbedStatus.licenseApp("Windows 11").equals("windows") && EmbedStatus.licenseApp("Mac OS X").equals("apple") &&
+           EmbedStatus.licenseApp("Linux").equals("linux") && EmbedStatus.licenseApp("FreeBSD").equals("linux"),
+           "--licenses asks for the wrong kind of app");
+    expect(Main.USAGE.contains("--licenses"), "the usage does not name --licenses");
   }
 
   /** An unknown command is a usage error, exit 78. */

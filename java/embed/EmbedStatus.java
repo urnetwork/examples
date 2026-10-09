@@ -4,8 +4,6 @@
 // the Go field names; the readers and rules here never throw on bad input, so
 // the self-test checks them without the native SDK runtime, a network or
 // credentials.
-import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.DateTimeException;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
@@ -60,23 +58,41 @@ final class EmbedStatus {
 
   /**
    * Decimal units with one decimal: "0 B", "999 B", "1.0 kB", "5.0 GB". Data plans are sold in
-   * decimal units. A value that rounds to 1000.0 moves to the next unit; the unit check follows
-   * the Go reference: double division, rounded half up. The tenth is the nearest one with ties to
-   * even, from the exact binary value, as Go's %.1f rounds it: 1250 bytes (1.25 kB) shows "1.2 kB"
-   * and 1750 bytes "1.8 kB". String.format rounds ties up, so BigDecimal does the rounding.
+   * decimal units. The tenths round half to even on the exact integer, never on a binary fraction
+   * (1050 bytes is "1.0 kB", 1150 bytes "1.2 kB"), and a value that rounds to 1000.0 moves to the
+   * next unit (999999 bytes is "1.0 MB").
    */
   static String formatByteCount(long byteCount) {
     if (byteCount < 1000) {
       return byteCount + " B";
     }
-    double value = (double)byteCount / 1000;
-    int unitIndex = 0;
-    while (unitIndex < BYTE_UNITS.length - 1 && 1000 <= Math.round(value * 10) / 10.0) {
-      value /= 1000;
-      unitIndex += 1;
+    // the bytes in a tenth of the unit
+    long tenth = 100;
+    for (int unitIndex = 0;; unitIndex += 1) {
+      long tenths = byteCount / tenth;
+      long remainder = byteCount % tenth;
+      if (tenth < 2 * remainder || (2 * remainder == tenth && tenths % 2 == 1)) {
+        tenths += 1;
+      }
+      if (tenths < 10000 || unitIndex == BYTE_UNITS.length - 1) {
+        return tenths / 10 + "." + tenths % 10 + " " + BYTE_UNITS[unitIndex];
+      }
+      tenth *= 1000;
     }
-    return new BigDecimal(value).setScale(1, RoundingMode.HALF_EVEN).toPlainString() + " " +
-        BYTE_UNITS[unitIndex];
+  }
+
+  /** The line the console app prints once the device runs (EMBED_CONTRACT.md, "Status"). */
+  static String startLine(String clientId, String instanceId) {
+    return "embed client " + clientId + ", installation " + instanceId;
+  }
+
+  /**
+   * The kind of app whose licenses --licenses prints, from the os.name property: "windows" on
+   * Windows, "apple" on macOS, "linux" elsewhere.
+   */
+  static String licenseApp(String osName) {
+    String name = osName == null ? "" : osName.toLowerCase(Locale.ROOT);
+    return name.startsWith("windows") ? "windows" : name.startsWith("mac") ? "apple" : "linux";
   }
 
   /**

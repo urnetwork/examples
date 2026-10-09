@@ -2,24 +2,26 @@
 // tools"): the integration allocator (../../integration/server) extended with
 // what a backend needs to embed URnetwork. It provisions one client per user
 // installation, sets and reads that client's data caps, reads every capped
-// client of the network, and removes a client. Your service authenticates its
-// user first and supplies the key internally: never take a key, a client ID or
-// a cap from a raw request field.
+// client of the network, removes a client, and sets a client's ACL group.
+// Your service authenticates its user first and supplies the key internally:
+// never take a key, a client ID or a cap from a raw request field.
 //
 //   provision <key> <client-jwt-file>
 //   cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total]
 //   usage <key>
 //   usage-all
 //   remove <key>
+//   acl <key> default|isolated
 //   --self-test
 //
 // <key> is user:<service-user-id> or user:<service-user-id>:<installation-id>.
 // Settings: URNETWORK_ROOT_JWT (an API key or a network JWT, from the
 // backend's secret store), URNETWORK_CLIENT_MAP (absolute path of this tool's
 // private map, in an existing service-owned directory; never the token
-// server's map) and optional URNETWORK_API_URL. The map lock is a <map>.lock
-// directory; a crash may leave it, so remove it only after confirming that no
-// tool still runs.
+// server's map), optional URNETWORK_API_URL and optional
+// URNETWORK_DEFAULT_ACL_GROUP (the ACL group of each new client: "isolated",
+// the default, or "default"). The map lock is a <map>.lock directory; a crash
+// may leave it, so remove it only after confirming that no tool still runs.
 //
 // Exit codes: 0 success; 78 a configuration or credential problem (missing
 // settings, an invalid key or map, the root credential refused, the client
@@ -27,6 +29,7 @@
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.io.InputStream;
@@ -76,8 +79,11 @@ public final class EmbedServer {
   static final String CAP_PATH = "/network/client-data-cap";
   static final String CAPS_PATH = "/network/client-data-caps";
   static final String REMOVE_PATH = "/network/remove-client";
+  static final String ACL_PATH = "/network/client-acl-group";
+  static final String UNMAPPED_MESSAGE = "no client is mapped for that key; run provision first";
+  static final String ACL_UNSUPPORTED_MESSAGE = "/network/client-acl-group answered 404: the server predates ACL groups";
   static final String USAGE =
-      "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | --self-test";
+      "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test";
 
   static final Pattern KEY = Pattern.compile("user:[A-Za-z0-9][A-Za-z0-9_.:@-]{0,122}");
   static final Pattern ID = Pattern.compile("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}");
@@ -128,8 +134,11 @@ public final class EmbedServer {
     boolean resetTotal;
   }
 
-  /** The settings of one run: the transport and, for the commands that use it, the map file. */
-  private record Settings(Transport transport, Path mapFile) {}
+  /**
+   * The settings of one run: the transport, for the commands that use it the map file, and the
+   * ACL group of each new client ("isolated" or "default").
+   */
+  private record Settings(Transport transport, Path mapFile, String aclGroup) {}
 
   /** The mapped client no longer exists. */
   private static final class ClientMissingException extends Exception {
@@ -193,6 +202,12 @@ public final class EmbedServer {
           }
           remove(checkKey(args[1]), settings(env, transport, true), out);
         }
+        case "acl" -> {
+          if (args.length != 3 || !(args[2].equals("default") || args[2].equals("isolated"))) {
+            throw config(USAGE);
+          }
+          acl(checkKey(args[1]), args[2], settings(env, transport, true), out);
+        }
         default -> throw config(USAGE);
       }
       return EXIT_OK;
@@ -235,6 +250,7 @@ public final class EmbedServer {
           result = authClientResult(call(settings, "POST", AUTH_CLIENT_PATH, authClientBody(mapped)), mapped);
         } catch (ClientMissingException e) {
           clients.remove(key);
+          setAclPending(map, key, false);
           saveMap(mapFile, map);
         }
       }
@@ -250,6 +266,19 @@ public final class EmbedServer {
           }
         }
         clients.put(key, result[0]);
+        // the mapping and the record that the client owes its group, in one save
+        if (settings.aclGroup().equals("isolated")) {
+          setAclPending(map, key, true);
+        }
+        saveMap(mapFile, map);
+      }
+      if (aclPending(map, key)) {
+        // a new client is "default": only an isolated default needs the request. A failure throws
+        // with the record kept, before any client JWT is written.
+        if (settings.aclGroup().equals("isolated")) {
+          postAclGroup(settings, result[0], "isolated");
+        }
+        setAclPending(map, key, false);
         saveMap(mapFile, map);
       }
       writePrivate(jwtFile, (result[1] + "\n").getBytes(StandardCharsets.UTF_8));
@@ -328,11 +357,68 @@ public final class EmbedServer {
         }
       }
       ((ObjectNode)map.get("clients")).remove(key);
+      setAclPending(map, key, false);
       saveMap(mapFile, map);
       out.println(JSON.writeValueAsString(JSON.createObjectNode().put("removed", clientId)));
     } finally {
       Files.deleteIfExists(lock);
     }
+  }
+
+  /**
+   * Sets the ACL group of the key's client and prints {"client_id": ..., "acl_group": ...}. An
+   * explicit group settles a pending default group, so the record is dropped.
+   */
+  private static void acl(String key, String group, Settings settings, PrintStream out)
+      throws ToolException, IOException {
+    Path mapFile = settings.mapFile();
+    Path lock = takeLock(mapFile);
+    try {
+      ObjectNode map = loadMap(mapFile);
+      String clientId = mappedClient(map, key);
+      postAclGroup(settings, clientId, group);
+      if (aclPending(map, key)) {
+        setAclPending(map, key, false);
+        saveMap(mapFile, map);
+      }
+      out.println(JSON.writeValueAsString(JSON.createObjectNode().put("client_id", clientId).put("acl_group", group)));
+    } finally {
+      Files.deleteIfExists(lock);
+    }
+  }
+
+  /** Posts the client's ACL group; the answer must name the client and the group. */
+  private static void postAclGroup(Settings settings, String clientId, String group) throws ToolException, IOException {
+    ObjectNode answer = call(settings, "POST", ACL_PATH,
+                             JSON.createObjectNode().put("client_id", clientId).put("acl_group", group));
+    checkRefusal(answer);
+    if (!clientId.equals(answer.path("client_id").textValue()) || !group.equals(answer.path("acl_group").textValue())) {
+      throw new ToolException(EXIT_FAILURE, "the URnetwork API answered another client or ACL group");
+    }
+  }
+
+  /** Whether key owes its default ACL group: the map's pending_acl. */
+  static boolean aclPending(ObjectNode map, String key) {
+    for (JsonNode entry : map.path("pending_acl")) {
+      if (key.equals(entry.textValue())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Records that key owes its default ACL group, or drops the record. */
+  static void setAclPending(ObjectNode map, String key, boolean pending) {
+    ArrayNode keys = JSON.createArrayNode();
+    for (JsonNode entry : map.path("pending_acl")) {
+      if (!key.equals(entry.textValue())) {
+        keys.add(entry);
+      }
+    }
+    if (pending) {
+      keys.add(key);
+    }
+    map.set("pending_acl", keys);
   }
 
   /**
@@ -474,7 +560,7 @@ public final class EmbedServer {
   private static String mappedClient(ObjectNode map, String key) throws ToolException {
     String clientId = map.get("clients").path(key).textValue();
     if (clientId == null) {
-      throw config("no client is mapped for this key; provision it first");
+      throw config(UNMAPPED_MESSAGE);
     }
     return clientId;
   }
@@ -526,7 +612,11 @@ public final class EmbedServer {
         throw config("set URNETWORK_CLIENT_MAP to an absolute file path in an existing private, service-owned directory");
       }
     }
-    return new Settings(transport.create(origin, root), mapFile);
+    String aclGroup = Objects.toString(env.apply("URNETWORK_DEFAULT_ACL_GROUP"), "");
+    if (!Set.of("", "isolated", "default").contains(aclGroup)) {
+      throw config("URNETWORK_DEFAULT_ACL_GROUP must be default or isolated");
+    }
+    return new Settings(transport.create(origin, root), mapFile, aclGroup.isEmpty() ? "isolated" : aclGroup);
   }
 
   /** The API origin: HTTPS, or explicit loopback HTTP for local mocks. */
@@ -567,7 +657,11 @@ public final class EmbedServer {
       throw new ToolException(EXIT_CONFIG, "the URnetwork API refused the root credential");
     }
     if (response.status() == 404) {
-      throw new ToolException(EXIT_FAILURE, "the URnetwork API answered HTTP 404; a server without this route answers 404");
+      // a server that predates a route (EMBED_CONTRACT.md, "Backend tools")
+      String route = pathAndQuery.split("\\?", 2)[0];
+      throw new ToolException(EXIT_FAILURE, route.equals(ACL_PATH) ? ACL_UNSUPPORTED_MESSAGE
+                                            : route.startsWith(CAP_PATH) ? route + " answered 404: the server predates the data-cap routes"
+                                                                         : route + " answered 404");
     }
     if (response.status() < 200 || 299 < response.status()) {
       throw new ToolException(EXIT_FAILURE, "the URnetwork API answered HTTP " + response.status());
@@ -612,9 +706,10 @@ public final class EmbedServer {
   }
 
   /**
-   * The map in file; an empty map when the file does not exist. A map with fields this tool does
-   * not write, such as the token server's pending_caps, is refused, so that two tools never rewrite
-   * each other's map.
+   * The map in file; an empty map when the file does not exist. Besides version and clients it may
+   * hold pending_acl, the keys whose new clients still owe their default ACL group. A map with
+   * fields this tool does not write, such as the token server's pending_caps, is refused, so that
+   * two tools never rewrite each other's map.
    */
   static ObjectNode loadMap(Path file) throws ToolException, IOException {
     if (Files.isSymbolicLink(file)) {
@@ -643,7 +738,7 @@ public final class EmbedServer {
     }
     for (Map.Entry<String, JsonNode> member : map.properties()) {
       String name = member.getKey();
-      if (!name.equals("version") && !name.equals("clients")) {
+      if (!name.equals("version") && !name.equals("clients") && !name.equals("pending_acl")) {
         throw config("the client map has fields this tool does not write, such as the token server's pending_caps; give each tool its own map");
       }
     }
@@ -657,14 +752,30 @@ public final class EmbedServer {
         throw config("the client map has an invalid entry");
       }
     }
+    if (map.has("pending_acl")) {
+      Set<String> pending = new HashSet<>();
+      JsonNode keys = map.get("pending_acl");
+      if (!keys.isArray()) {
+        throw config("the client map's pending_acl is not a list of mapped keys");
+      }
+      for (JsonNode entry : keys) {
+        String key = entry.textValue();
+        if (key == null || !map.get("clients").has(key) || !pending.add(key)) {
+          throw config("the client map's pending_acl is not a list of mapped keys");
+        }
+      }
+    }
     return map;
   }
 
-  /** Replaces the map atomically, private to its owner. */
+  /** Replaces the map atomically, private to its owner; pending_acl only while it is not empty. */
   static void saveMap(Path file, ObjectNode map) throws IOException {
     Map<String, Object> ordered = new LinkedHashMap<>();
     ordered.put("version", 1);
     ordered.put("clients", map.get("clients"));
+    if (!map.path("pending_acl").isEmpty()) {
+      ordered.put("pending_acl", map.get("pending_acl"));
+    }
     writePrivate(file, JSON.writeValueAsBytes(ordered));
   }
 
