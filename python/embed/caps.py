@@ -12,6 +12,19 @@ CAP_ROUTE = "/network/client-data-cap"
 CAPPED_REASON_MONTHLY = "monthly"
 CAPPED_REASON_TOTAL = "total"
 
+# The server refuses the cap read with this message while the team has not
+# enabled Embed for the network (EMBED_CONTRACT.md, "Embed enablement").
+EMBED_NOT_ENABLED_MESSAGE = "Embed isn't enabled for this network."
+
+
+class EmbedNotEnabled:
+    """What read_own_caps returns for the Embed-not-enabled refusal. Unlike a
+    failed read, it clears the last reading, so both data fields read
+    unavailable."""
+
+
+EMBED_NOT_ENABLED = EmbedNotEnabled()
+
 
 @dataclass(frozen=True)
 class CapReading:
@@ -82,6 +95,13 @@ def parse_cap_object(fields) -> CapReading | None:
     return CapReading(capped=capped, **values)
 
 
+def is_embed_not_enabled(fields) -> bool:
+    """Whether parsed JSON is the Embed-not-enabled refusal,
+    {"error": {"message": "Embed isn't enabled for this network."}}."""
+    error = fields.get("error") if isinstance(fields, dict) else None
+    return isinstance(error, dict) and error.get("message") == EMBED_NOT_ENABLED_MESSAGE
+
+
 def parse_cap_answer(answer: bytes) -> CapReading | None:
     """The cap object in an answer body, or None."""
     try:
@@ -90,10 +110,11 @@ def parse_cap_answer(answer: bytes) -> CapReading | None:
         return None
 
 
-def read_own_caps(api_origin: str, client_jwt: str, transport) -> CapReading | None:
+def read_own_caps(api_origin: str, client_jwt: str, transport) -> CapReading | EmbedNotEnabled | None:
     """GET /network/client-data-cap with the client JWT: this client's own caps.
     None for any failure: the API unreachable, an HTTP error (a server without
-    the cap routes answers 404), or an answer that is not a cap object."""
+    the cap routes answers 404), or an answer that is not a cap object;
+    EMBED_NOT_ENABLED for the Embed-not-enabled refusal."""
     headers = {"Authorization": "Bearer " + client_jwt, "Accept": "application/json"}
     try:
         status, answer = transport("GET", api_origin + CAP_ROUTE, headers, None)
@@ -101,4 +122,10 @@ def read_own_caps(api_origin: str, client_jwt: str, transport) -> CapReading | N
         return None
     if status != 200:
         return None
-    return parse_cap_answer(answer)
+    try:
+        fields = json.loads(answer)
+    except ValueError:
+        return None
+    if is_embed_not_enabled(fields):
+        return EMBED_NOT_ENABLED
+    return parse_cap_object(fields)

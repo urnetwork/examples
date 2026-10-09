@@ -23,7 +23,7 @@ from types import SimpleNamespace
 import unittest
 
 import selftest
-from caps import read_own_caps
+from caps import EMBED_NOT_ENABLED, read_own_caps
 from client_token import TokenServerRefused, fetch_client_jwt
 from session import (
     CONNECT_LOCATION_JSON,
@@ -437,6 +437,15 @@ class SessionLifecycle(unittest.TestCase):
         self.assertEqual(self.fake.unfreed_strings, {})
         session.close()
 
+    def test_embed_not_enabled_clears_the_cap_reading(self):
+        reading = selftest.cap_reading(monthly_byte_limit=5000000000, monthly_used_byte_count=5000000000, capped=True, capped_reason="monthly")
+        self.fake.window_status_json = '{"ProviderStateAdded":1}'
+        session = self.start(first_cap_reading=reading)
+        self.assertEqual(session.status().line(), "status: data cap reached | data this month: 5.0 GB of 5.0 GB | data total: no cap")
+        session.apply_event((EVENT_CAPS_READ, EMBED_NOT_ENABLED))
+        self.assertEqual(session.status().line(), "status: connected | data this month: unavailable | data total: unavailable")
+        session.close()
+
     def test_caps_read_uses_the_latest_client_jwt(self):
         server = selftest.StandInServer((200, {"client_id": TEST_CLIENT_ID, "monthly_byte_limit": 9}))
         session = self.start(transport=server)
@@ -606,6 +615,10 @@ class TransportOverHttp(unittest.TestCase):
     def test_cap_routes_missing_is_a_failed_read(self):
         with LoopbackServer((404, {"error": {"message": "not found"}})) as server:
             self.assertIsNone(read_own_caps(server.origin, TEST_CLIENT_JWT, urllib_transport))
+
+    def test_embed_not_enabled_is_marked(self):
+        with LoopbackServer((200, {"error": {"message": "Embed isn't enabled for this network."}})) as server:
+            self.assertIs(read_own_caps(server.origin, TEST_CLIENT_JWT, urllib_transport), EMBED_NOT_ENABLED)
 
 
 @unittest.skipIf(BINDINGS is None, "the urnetwork package source is not importable")

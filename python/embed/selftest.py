@@ -17,7 +17,16 @@ import subprocess
 import sys
 import tempfile
 
-from caps import CAPPED_REASON_MONTHLY, CAPPED_REASON_TOTAL, CapReading, parse_cap_answer, parse_cap_object, read_own_caps
+from caps import (
+    CAPPED_REASON_MONTHLY,
+    CAPPED_REASON_TOTAL,
+    EMBED_NOT_ENABLED,
+    CapReading,
+    is_embed_not_enabled,
+    parse_cap_answer,
+    parse_cap_object,
+    read_own_caps,
+)
 from client_token import TOKEN_ROUTE, TokenServerError, TokenServerRefused, fetch_client_jwt
 from sdk_load import EXIT_CONFIG as SDK_EXIT_CONFIG, SdkLoadError, load_urnetwork, sdk_mismatch_message
 from state import (
@@ -239,6 +248,20 @@ def check_status_lines():
     """The contract's console status line vectors."""
     failed = CapState()
     failed.record(None)
+    # the first reading answers the Embed-not-enabled refusal; and a capped
+    # monthly reading, then the refusal
+    refused = CapState()
+    refused.record(EMBED_NOT_ENABLED)
+    cleared = CapState(
+        cap_reading(
+            monthly_byte_limit=5000000000,
+            monthly_used_byte_count=5000000000,
+            monthly_period_end="2026-11-01T00:00:00Z",
+            capped=True,
+            capped_reason=CAPPED_REASON_MONTHLY,
+        )
+    )
+    cleared.record(EMBED_NOT_ENABLED)
     cases = [
         # connecting, caps not read yet
         ("", 0, CapState(), 0, "status: connecting | data this month: checking | data total: checking"),
@@ -250,6 +273,8 @@ def check_status_lines():
             "status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap",
         ),
         ("", 0, failed, 1, "status: connected | data this month: unavailable | data total: unavailable"),
+        ("", 0, refused, 1, "status: connected | data this month: unavailable | data total: unavailable"),
+        ("", 0, cleared, 1, "status: connected | data this month: unavailable | data total: unavailable"),
         (
             "",
             0,
@@ -339,8 +364,9 @@ def check_status_rules():
 
 
 def check_data_fields():
-    """checking, unavailable, a later failure keeping the last value, no cap for an
-    unset limit even with a used count, and <used> of <limit>."""
+    """checking, unavailable, a later failure keeping the last value, the
+    Embed-not-enabled refusal clearing it, no cap for an unset limit even with a
+    used count, and <used> of <limit>."""
     cap_state = CapState()
     expect(data_field_text(cap_state, True) == "checking", "data this month before a reading must be checking")
     expect(data_field_text(cap_state, False) == "checking", "data total before a reading must be checking")
@@ -353,6 +379,11 @@ def check_data_fields():
     expect(data_field_text(cap_state, False) == "no cap", "an unset cap shows no cap, never its used count")
     cap_state.record(None)
     expect(data_field_text(cap_state, True) == "1.2 kB of 2.0 kB", "a later failure must keep the last value")
+    cap_state.record(EMBED_NOT_ENABLED)
+    expect(
+        cap_state.reading is None and data_field_text(cap_state, True) == "unavailable" and data_field_text(cap_state, False) == "unavailable",
+        "the Embed-not-enabled refusal must clear the last reading",
+    )
 
 
 def check_cap_parsing():
@@ -402,7 +433,12 @@ def check_cap_parsing():
         [TEST_CLIENT_ID],
         None,
     ):
-        expect(parse_cap_object(invalid) is None, f"{invalid!r} must not parse as a cap object")
+        expect(parse_cap_object(invalid) is None and not is_embed_not_enabled(invalid), f"{invalid!r} must not parse as a cap object")
+    # the Embed-not-enabled refusal is no cap object, and is recognized
+    refusal = {"error": {"message": "Embed isn't enabled for this network."}}
+    expect(parse_cap_object(refusal) is None and is_embed_not_enabled(refusal), "the Embed-not-enabled refusal must be recognized")
+    expect(read_own_caps(TEST_API, TEST_CLIENT_JWT, StandInServer((200, refusal))) is EMBED_NOT_ENABLED, "the cap read must mark the Embed-not-enabled refusal")
+    expect(read_own_caps(TEST_API, TEST_CLIENT_JWT, StandInServer((200, {"error": {"message": "no permission"}}))) is None, "another refusal must be a failed read")
     expect(parse_cap_answer(b"not json") is None, "an answer that is not JSON must not parse")
     # the app's own read: a 404 from a server without the cap routes is a failure
     expect(read_own_caps(TEST_API, TEST_CLIENT_JWT, StandInServer((404, b"not found"))) is None, "a 404 must be a failed read")

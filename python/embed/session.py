@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 
-from caps import CapReading, read_own_caps
+from caps import CapReading, EmbedNotEnabled, read_own_caps
 from state import ConfigError, save_client_jwt
 from status import (
     CapState,
@@ -102,10 +102,12 @@ class EmbedConfig:
 class CapReader:
     """Reads the client's own caps on a thread of its own: at start unless a first
     reading is known, every five minutes, and at once when woken. Each reading,
-    None for a failed read, reaches the run loop as an EVENT_CAPS_READ event."""
+    None for a failed read and EMBED_NOT_ENABLED for the Embed-not-enabled
+    refusal, reaches the run loop as an EVENT_CAPS_READ event."""
 
     def __init__(self, read, events: queue.SimpleQueue, interval_seconds: float = CAP_READ_INTERVAL_SECONDS):
-        """read() returns a CapReading or None and may block on the network."""
+        """read() returns a CapReading, EMBED_NOT_ENABLED or None and may block on
+        the network."""
         self._read = read
         self._events = events
         self._interval_seconds = interval_seconds
@@ -319,7 +321,7 @@ class EmbedSession:
         with self._client_jwt_lock:
             return self._client_jwt
 
-    def _read_caps(self) -> CapReading | None:
+    def _read_caps(self) -> CapReading | EmbedNotEnabled | None:
         """Reads this client's own caps with its latest client JWT. Runs on the cap
         reader's thread."""
         return read_own_caps(self._config.api_origin, self._current_client_jwt(), self._transport)

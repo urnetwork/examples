@@ -9,6 +9,7 @@ checks, plus the embed commands.
   python3 backend.py usage-all
   python3 backend.py remove <key>
   python3 backend.py acl <key> default|isolated
+  python3 backend.py status
   python3 backend.py --self-test
 
 <key> is user:<service-user-id>, or user:<service-user-id>:<installation-id>
@@ -55,6 +56,7 @@ REMOVE_CLIENT_ROUTE = "/network/remove-client"
 CAP_ROUTE = "/network/client-data-cap"
 CAPS_ROUTE = "/network/client-data-caps"
 ACL_ROUTE = "/network/client-acl-group"
+EMBED_ROUTE = "/network/embed"
 USAGE_ALL_PAGE_LIMIT = 1000
 
 MAX_BYTE_COUNT = 9223372036854775807
@@ -64,6 +66,16 @@ CLIENT_DOES_NOT_EXIST = "Client does not exist."
 CLIENT_LIMIT_MESSAGE = "client limit reached: your network is at its client limit; see https://ur.io/services"
 UNMAPPED_MESSAGE = "no client is mapped for that key; run provision first"
 ACL_UNSUPPORTED_MESSAGE = "/network/client-acl-group answered 404: the server predates ACL groups"
+# The server refuses the data-cap and ACL-group routes with this message while
+# the team has not enabled Embed for the network (EMBED_CONTRACT.md, "Embed
+# enablement"); caps and groups set earlier stay enforced.
+EMBED_NOT_ENABLED_MESSAGE = "Embed isn't enabled for this network."
+# cap, usage, usage-all and acl print this for the refusal and exit 78
+EMBED_NOT_ENABLED_LINE = "embed not enabled: Embed isn't enabled for this network; see https://ur.io/services"
+# provision prints this on stderr when the client's default ACL group stays
+# pending because Embed isn't enabled, and exits 0
+EMBED_PENDING_LINE = "embed not enabled: the client's defaults stay pending until Embed is enabled; see https://ur.io/services"
+EMBED_UNSUPPORTED_MESSAGE = "/network/embed answered 404: the server predates Embed enablement"
 
 ACL_GROUP_DEFAULT = "default"
 ACL_GROUP_ISOLATED = "isolated"
@@ -83,7 +95,7 @@ ERROR_MESSAGE_LIMIT = 300
 
 USAGE = (
     "usage: backend.py provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] "
-    "[--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test"
+    "[--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | status | --self-test"
 )
 
 
@@ -226,8 +238,22 @@ def check_client_limit(answer: dict):
         raise config_problem(CLIENT_LIMIT_MESSAGE)
 
 
+def is_embed_not_enabled(answer: dict) -> bool:
+    error = answer.get("error")
+    return isinstance(error, dict) and error.get("message") == EMBED_NOT_ENABLED_MESSAGE
+
+
+def check_embed_enabled(answer: dict):
+    """The Embed-not-enabled refusal is a configuration problem with the fixed
+    line."""
+    if is_embed_not_enabled(answer):
+        raise config_problem(EMBED_NOT_ENABLED_LINE)
+
+
 def check_cap_object(value) -> dict:
     """A cap object: a JSON object with a client_id and no error."""
+    if isinstance(value, dict):
+        check_embed_enabled(value)
     if isinstance(value, dict) and value.get("error") is not None:
         raise failure("the cap request was refused: " + message_of(value["error"]))
     if not isinstance(value, dict) or not isinstance(value.get("client_id"), str):
@@ -299,6 +325,8 @@ class Api:
                 raise failure(ACL_UNSUPPORTED_MESSAGE)
             if route in (CAP_ROUTE, CAPS_ROUTE):
                 raise failure(f"{route} answered 404: the server predates the data-cap routes")
+            if route == EMBED_ROUTE:
+                raise failure(EMBED_UNSUPPORTED_MESSAGE)
             raise failure(f"{route} answered 404")
         if not 200 <= status < 300:
             raise failure(f"{route} failed with HTTP {status}")
@@ -347,7 +375,10 @@ def provision(api: Api, path: Path, key: str, client_jwt_file: str, acl_group: s
     exist. it drops the mapping and provisions a new client. A new client goes
     into acl_group, with a pending_acl record until the group is applied, before
     any client JWT is written. Writes the client JWT to client_jwt_file and
-    prints only the client ID."""
+    prints only the client ID. While Embed isn't enabled the record stays, with
+    a line on stderr, and a provision after the team enables Embed applies
+    it."""
+    embed_enabled = True
     with map_lock(path):
         data = load_map(path)
         old = data["clients"].get(key)
@@ -381,14 +412,18 @@ def provision(api: Api, path: Path, key: str, client_jwt_file: str, acl_group: s
             # a new client is "default": only an isolated default needs the request.
             # A failure raises with the record kept, before any client JWT is written.
             if acl_group == ACL_GROUP_ISOLATED:
-                post_acl_group(api, result["client_id"], ACL_GROUP_ISOLATED)
-            set_acl_pending(data, key, False)
-            save_map(path, data)
+                embed_enabled = post_acl_group(api, result["client_id"], ACL_GROUP_ISOLATED, allow_not_enabled=True)
+            # while Embed isn't enabled the record stays and the client works
+            if embed_enabled:
+                set_acl_pending(data, key, False)
+                save_map(path, data)
         try:
             write_private_file(client_jwt_file, (result["by_client_jwt"] + "\n").encode())
         except OSError as error:
             raise failure(f"write the client JWT file: {error}") from None
     print(compact({"client_id": result["client_id"]}))
+    if not embed_enabled:
+        print(EMBED_PENDING_LINE, file=sys.stderr)
 
 
 def mapped_client(path: Path, key: str) -> str:
@@ -398,14 +433,19 @@ def mapped_client(path: Path, key: str) -> str:
     return client
 
 
-def post_acl_group(api: Api, client: str, acl_group: str):
+def post_acl_group(api: Api, client: str, acl_group: str, allow_not_enabled=False) -> bool:
     """Sets the client's ACL group; the answer must name the client and the
-    group."""
+    group. The Embed-not-enabled refusal exits 78, or returns False when
+    allow_not_enabled is set."""
     answer = api.call("POST", ACL_ROUTE, {"client_id": client, "acl_group": acl_group})
+    if allow_not_enabled and is_embed_not_enabled(answer):
+        return False
+    check_embed_enabled(answer)
     if answer.get("error") is not None:
         raise failure("the ACL group request was refused: " + message_of(answer["error"]))
     if answer.get("client_id") != client or answer.get("acl_group") != acl_group:
         raise failure("the API answered another client or ACL group")
+    return True
 
 
 def acl(api: Api, path: Path, key: str, acl_group: str):
@@ -450,6 +490,7 @@ def usage_all(api: Api):
         if cursor is not None:
             query["cursor"] = cursor
         answer = api.call("GET", CAPS_ROUTE + "?" + urllib.parse.urlencode(query))
+        check_embed_enabled(answer)
         if answer.get("error") is not None:
             raise failure("the cap list was refused: " + message_of(answer["error"]))
         clients = answer.get("clients")
@@ -467,6 +508,25 @@ def usage_all(api: Api):
             return
         seen.add(next_cursor)
         cursor = next_cursor
+
+
+def is_count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value
+
+
+def status(api: Api):
+    """Prints the network's Embed state from GET /network/embed as one line,
+    "embed enabled: yes | client limit: 5000 | active clients: 1234". A refusal,
+    such as for a client JWT, is a configuration problem."""
+    answer = api.call("GET", EMBED_ROUTE)
+    if answer.get("error") is not None:
+        raise config_problem("the Embed state request was refused: " + message_of(answer["error"]))
+    enabled = answer.get("enabled")
+    client_limit = answer.get("client_limit")
+    active_client_count = answer.get("active_client_count")
+    if not isinstance(enabled, bool) or not is_count(client_limit) or not is_count(active_client_count):
+        raise failure(f"{EMBED_ROUTE} answered something that is not an Embed state")
+    print(f"embed enabled: {'yes' if enabled else 'no'} | client limit: {client_limit} | active clients: {active_client_count}")
 
 
 def remove(api: Api, path: Path, key: str):
@@ -500,7 +560,7 @@ def run(args: list, environ=None, transport_factory=urllib_transport) -> int:
                 return EXIT_FAILURE
             print("embed backend self-test passed")
             return EXIT_OK
-        if not args or args[0] not in ("provision", "cap", "usage", "usage-all", "remove", "acl"):
+        if not args or args[0] not in ("provision", "cap", "usage", "usage-all", "remove", "acl", "status"):
             raise config_problem(USAGE)
         command, operands = args[0], args[1:]
         if command == "provision" and len(operands) != 2:
@@ -509,11 +569,11 @@ def run(args: list, environ=None, transport_factory=urllib_transport) -> int:
             raise config_problem(USAGE)
         if command == "cap" and not operands:
             raise config_problem(USAGE)
-        if command == "usage-all" and operands:
+        if command in ("usage-all", "status") and operands:
             raise config_problem(USAGE)
         if command == "acl" and (len(operands) != 2 or operands[1] not in ACL_GROUPS):
             raise config_problem(USAGE)
-        key = check_key(operands[0]) if command != "usage-all" else None
+        key = check_key(operands[0]) if command not in ("usage-all", "status") else None
         fields = parse_cap_options(operands[1:]) if command == "cap" else None
 
         root = environ.get("URNETWORK_ROOT_JWT", "")
@@ -524,7 +584,7 @@ def run(args: list, environ=None, transport_factory=urllib_transport) -> int:
         if acl_group not in ACL_GROUPS:
             raise config_problem("URNETWORK_DEFAULT_ACL_GROUP must be default or isolated")
         path = None
-        if command != "usage-all":
+        if command not in ("usage-all", "status"):
             map_name = environ.get("URNETWORK_CLIENT_MAP", "")
             if not map_name:
                 raise config_problem("set URNETWORK_CLIENT_MAP to this tool's private client map")
@@ -542,6 +602,8 @@ def run(args: list, environ=None, transport_factory=urllib_transport) -> int:
             usage_all(api)
         elif command == "acl":
             acl(api, path, key, operands[1])
+        elif command == "status":
+            status(api)
         else:
             remove(api, path, key)
         return EXIT_OK
@@ -735,7 +797,7 @@ def self_test():
         expect(code == EXIT_CONFIG, "a map with pending_caps must be refused")
 
         # key and argument rejection, settings, credential refusal and the network
-        for args in (["provision", SELF_TEST_CLIENT, jwt_path], ["provision", "user:../a", jwt_path], ["provision", SELF_TEST_KEY], ["usage"], ["usage-all", "extra"], ["bogus"], []):
+        for args in (["provision", SELF_TEST_CLIENT, jwt_path], ["provision", "user:../a", jwt_path], ["provision", SELF_TEST_KEY], ["usage"], ["usage-all", "extra"], ["status", "extra"], ["bogus"], []):
             code, _, _ = tool(args, StandInApi())
             expect(code == EXIT_CONFIG, f"{args} must be a usage error")
         missing_root = dict(environ, URNETWORK_ROOT_JWT="")
@@ -756,6 +818,8 @@ def self_test():
         expect(code == EXIT_CONFIG and err.strip() == "URNETWORK_DEFAULT_ACL_GROUP must be default or isolated", "an invalid default ACL group must exit 78")
 
         self_test_acl_groups(directory, environ, tool, expect)
+        self_test_embed_not_enabled(directory, environ, tool, expect)
+        self_test_embed_status(environ, tool, expect)
         self_test_failure_texts(directory, environ, tool, expect)
 
 
@@ -849,6 +913,63 @@ def self_test_acl_groups(directory, environ, tool, expect):
         api = StandInApi()
         code, _, _ = tool(["provision", "user:x", jwt_path], api, dict(environ, URNETWORK_CLIENT_MAP=pending_map))
         expect(code == EXIT_CONFIG and Path(pending_map).read_bytes() == text and not api.requests, f"the map {value} must be refused untouched")
+
+
+def self_test_embed_not_enabled(directory, environ, tool, expect):
+    """The Embed-not-enabled refusal: cap, usage, usage-all and acl exit 78 with
+    the fixed line; provision still provisions and writes the client JWT, keeps
+    the default group pending with the fixed stderr line, and a provision after
+    the team enables Embed applies it."""
+    embed_map = os.path.join(directory, "embed.json")
+    isolated = {name: value for name, value in dict(environ, URNETWORK_CLIENT_MAP=embed_map).items() if name != "URNETWORK_DEFAULT_ACL_GROUP"}
+    refusal = (200, {"error": {"message": EMBED_NOT_ENABLED_MESSAGE}})
+    pia = "88888888-8888-8888-8888-888888888888"
+    pia_answer = (200, {"client_id": pia, "by_client_jwt": self_test_jwt(pia)})
+    code, _, _ = tool(["provision", "user:pia", os.path.join(directory, "pia.jwt")], StandInApi(pia_answer, (200, {"client_id": pia, "acl_group": ACL_GROUP_ISOLATED})), isolated)
+    expect(code == EXIT_OK, "provision before the refusal failed")
+    for args in (["cap", "user:pia", "--monthly", "1"], ["usage", "user:pia"], ["usage-all"], ["acl", "user:pia", ACL_GROUP_ISOLATED]):
+        code, out, err = tool(args, StandInApi(refusal), isolated)
+        expect(code == EXIT_CONFIG and out == "" and err == EMBED_NOT_ENABLED_LINE + "\n", f"{args[0]} while Embed isn't enabled: {code} {err}")
+    quinn = "99999999-9999-9999-9999-999999999999"
+    quinn_jwt = os.path.join(directory, "quinn.jwt")
+    quinn_answer = (200, {"client_id": quinn, "by_client_jwt": self_test_jwt(quinn)})
+    api = StandInApi(quinn_answer, refusal)
+    code, out, err = tool(["provision", "user:quinn", quinn_jwt], api, isolated)
+    expect(code == EXIT_OK and json.loads(out) == {"client_id": quinn} and err == EMBED_PENDING_LINE + "\n", f"provision while Embed isn't enabled: {code} {out} {err}")
+    expect([request["path"] for request in api.requests] == [AUTH_CLIENT_ROUTE, ACL_ROUTE], "provision while Embed isn't enabled must try the group")
+    expect(Path(quinn_jwt).read_text() == self_test_jwt(quinn) + "\n" and load_map(Path(embed_map))["pending_acl"] == ["user:quinn"], "provision while Embed isn't enabled must write the client JWT and keep the record")
+    api = StandInApi(quinn_answer, (200, {"client_id": quinn, "acl_group": ACL_GROUP_ISOLATED}))
+    code, _, err = tool(["provision", "user:quinn", quinn_jwt], api, isolated)
+    expect(code == EXIT_OK and err == "" and load_map(Path(embed_map))["pending_acl"] == [], f"provision after Embed was enabled must apply the group: {err}")
+    expect(api.requests[1]["body"] == {"client_id": quinn, "acl_group": ACL_GROUP_ISOLATED}, "provision after Embed was enabled must post isolated")
+
+
+def self_test_embed_status(environ, tool, expect):
+    """The status command: GET /network/embed with the root credential, printed
+    as the fixed line for an enabled and a not enabled network; a refusal exits
+    78; a server without the route and an invalid answer exit 1."""
+    api = StandInApi((200, {"enabled": True, "client_limit": 5000, "active_client_count": 1234}))
+    code, out, err = tool(["status"], api)
+    expect(code == EXIT_OK and out == "embed enabled: yes | client limit: 5000 | active clients: 1234\n" and err == "", f"status printed {out} {err}")
+    expect(api.requests == [{"method": "GET", "path": EMBED_ROUTE, "body": None}], "status must GET /network/embed")
+    code, out, _ = tool(["status"], StandInApi((200, {"enabled": False, "client_limit": 100, "active_client_count": 0})))
+    expect(code == EXIT_OK and out == "embed enabled: no | client limit: 100 | active clients: 0\n", f"status while Embed isn't enabled printed {out}")
+    code, out, err = tool(["status"], StandInApi((200, {"error": {"message": "Invalid credential."}})))
+    expect(code == EXIT_CONFIG and out == "" and "Invalid credential." in err and err.count("\n") == 1, f"status on a refusal: {code} {err}")
+    code, _, _ = tool(["status"], StandInApi((401, {})))
+    expect(code == EXIT_CONFIG, "status with a refused root credential must exit 78")
+    code, _, err = tool(["status"], StandInApi((404, {})))
+    expect(code == EXIT_FAILURE and err.strip() == EMBED_UNSUPPORTED_MESSAGE, f"status on a server without Embed enablement: {code} {err}")
+    for value in (
+        {"enabled": True},
+        {"enabled": "yes", "client_limit": 1, "active_client_count": 1},
+        {"enabled": True, "client_limit": -1, "active_client_count": 0},
+        {"enabled": True, "client_limit": 1.5, "active_client_count": 0},
+        {"enabled": 1, "client_limit": 1, "active_client_count": 1},
+        {"enabled": True, "client_limit": True, "active_client_count": 1},
+    ):
+        code, out, _ = tool(["status"], StandInApi((200, value)))
+        expect(code == EXIT_FAILURE and out == "", f"status must refuse {value}")
 
 
 def self_test_failure_texts(directory, environ, tool, expect):

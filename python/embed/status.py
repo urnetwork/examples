@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import re
 
-from caps import CAPPED_REASON_MONTHLY, CAPPED_REASON_TOTAL, CapReading
+from caps import CAPPED_REASON_MONTHLY, CAPPED_REASON_TOTAL, EMBED_NOT_ENABLED, CapReading, EmbedNotEnabled
 
 # the status field, in rule order. Console examples never show the first two.
 STATUS_SIGNED_OUT = "signed out"
@@ -158,17 +158,22 @@ def embed_status(
 
 class CapState:
     """The cap readings behind the data fields: none yet, a first reading that
-    failed, or the latest successful reading, which a later failure keeps. Owned
-    by the run loop's thread."""
+    failed, or the latest successful reading, which a later failure keeps; the
+    Embed-not-enabled refusal clears it. Owned by the run loop's thread."""
 
     def __init__(self, reading: CapReading | None = None):
         """No reading yet, or a first reading such as the token server's data_cap."""
         self.reading = reading
         self.failed = False
 
-    def record(self, reading: CapReading | None):
-        """Records a reading; None is a failed read."""
-        if reading is not None:
+    def record(self, reading: CapReading | EmbedNotEnabled | None):
+        """Records a reading; None is a failed read, and EMBED_NOT_ENABLED, the
+        Embed-not-enabled refusal, clears the last reading, so both data fields
+        read unavailable and the status rules see no cap reading."""
+        if reading is EMBED_NOT_ENABLED:
+            self.reading = None
+            self.failed = True
+        elif reading is not None:
             self.reading = reading
             self.failed = False
         elif self.reading is None:
