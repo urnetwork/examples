@@ -14,6 +14,15 @@ module Embed
   CAPPED_REASON_MONTHLY = "monthly"
   CAPPED_REASON_TOTAL = "total"
 
+  # The server refuses the cap read with this message while the team has not
+  # enabled Embed for the network (EMBED_CONTRACT.md, "Embed enablement").
+  EMBED_NOT_ENABLED_MESSAGE = "Embed isn't enabled for this network."
+
+  # What read_own_caps returns for the Embed-not-enabled refusal. Unlike a
+  # failed read, it clears the last reading, so both data fields read
+  # unavailable.
+  EMBED_NOT_ENABLED = :embed_not_enabled
+
   # One cap object. A limit is nil when that cap is not set; a used count is
   # in bytes. monthly_period_end is RFC 3339 in UTC; capped is true while a cap
   # is reached; capped_reason is "monthly", "total", or "" when not capped.
@@ -80,6 +89,13 @@ module Embed
       CapReading.new(capped: capped, **values)
     end
 
+    # Whether parsed JSON is the Embed-not-enabled refusal,
+    # {"error": {"message": "Embed isn't enabled for this network."}}.
+    def embed_not_enabled?(fields)
+      error = fields.is_a?(Hash) ? fields["error"] : nil
+      error.is_a?(Hash) && error["message"] == EMBED_NOT_ENABLED_MESSAGE
+    end
+
     # The cap object in an answer body, or nil.
     def parse_cap_answer(answer)
       parse_cap_object(JSON.parse(answer))
@@ -89,7 +105,8 @@ module Embed
 
     # GET /network/client-data-cap with the client JWT: this client's own caps.
     # nil for any failure: the API unreachable, an HTTP error (a server without
-    # the cap routes answers 404), or an answer that is not a cap object.
+    # the cap routes answers 404), or an answer that is not a cap object;
+    # EMBED_NOT_ENABLED for the Embed-not-enabled refusal.
     def read_own_caps(api_origin, client_jwt, transport)
       headers = {"Authorization" => "Bearer #{client_jwt}", "Accept" => "application/json"}
       begin
@@ -99,7 +116,15 @@ module Embed
       end
       return nil unless status == 200
 
-      parse_cap_answer(answer)
+      fields =
+        begin
+          JSON.parse(answer)
+        rescue JSON::ParserError, EncodingError, TypeError
+          return nil
+        end
+      return EMBED_NOT_ENABLED if embed_not_enabled?(fields)
+
+      parse_cap_object(fields)
     end
   end
 

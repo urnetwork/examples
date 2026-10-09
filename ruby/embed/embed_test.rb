@@ -491,6 +491,13 @@ class TransportOverHttpTest < Minitest::Test
     server&.close
   end
 
+  def test_embed_not_enabled_is_marked
+    server = LoopbackServer.new([200, {"error" => {"message" => "Embed isn't enabled for this network."}}])
+    assert_equal Embed::EMBED_NOT_ENABLED, Embed::Caps.read_own_caps(server.origin, Embed::SelfTest.test_client_jwt, Embed::Transport::NET_HTTP)
+  ensure
+    server&.close
+  end
+
   def test_unreachable_server_is_a_transport_error
     port = TCPServer.new("127.0.0.1", 0).then { |socket| socket.addr[1].tap { socket.close } }
     assert_raises(Embed::TransportError) { Embed::Transport.net_http("GET", "http://127.0.0.1:#{port}/", {}, nil) }
@@ -571,6 +578,16 @@ class SessionLifecycleTest < Minitest::Test
     assert_equal "status: client limit, retry at 19:05 UTC | data this month: 0 B of 5.0 GB | data total: no cap", session.status.line
     # every returned string was freed
     assert_empty @fake.unfreed_strings
+    session.close
+  end
+
+  def test_embed_not_enabled_clears_the_cap_reading
+    @fake.window_status_json = '{"ProviderStateAdded":1}'
+    reading = Embed::SelfTest.cap_reading(monthly_byte_limit: 5_000_000_000, monthly_used_byte_count: 5_000_000_000, capped: true, capped_reason: "monthly")
+    session = start(first_cap_reading: reading)
+    assert_equal "status: data cap reached | data this month: 5.0 GB of 5.0 GB | data total: no cap", session.status.line
+    session.apply_event([Embed::EVENT_CAPS_READ, Embed::EMBED_NOT_ENABLED])
+    assert_equal "status: connected | data this month: unavailable | data total: unavailable", session.status.line
     session.close
   end
 

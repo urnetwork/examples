@@ -11,6 +11,7 @@
 #   ruby backend.rb usage-all
 #   ruby backend.rb remove <key>
 #   ruby backend.rb acl <key> default|isolated
+#   ruby backend.rb status
 #   ruby backend.rb --self-test
 #
 # <key> is user:<service-user-id>, or user:<service-user-id>:<installation-id>
@@ -51,6 +52,7 @@ module EmbedBackend
   CAP_ROUTE = "/network/client-data-cap"
   CAPS_ROUTE = "/network/client-data-caps"
   ACL_ROUTE = "/network/client-acl-group"
+  EMBED_ROUTE = "/network/embed"
   USAGE_ALL_PAGE_LIMIT = 1000
 
   MAX_BYTE_COUNT = 9_223_372_036_854_775_807
@@ -60,6 +62,16 @@ module EmbedBackend
   CLIENT_LIMIT_MESSAGE = "client limit reached: your network is at its client limit; see https://ur.io/services"
   UNMAPPED_MESSAGE = "no client is mapped for that key; run provision first"
   ACL_UNSUPPORTED_MESSAGE = "/network/client-acl-group answered 404: the server predates ACL groups"
+  # The server refuses the data-cap and ACL-group routes with this message
+  # while the team has not enabled Embed for the network (EMBED_CONTRACT.md,
+  # "Embed enablement"); caps and groups set earlier stay enforced.
+  EMBED_NOT_ENABLED_MESSAGE = "Embed isn't enabled for this network."
+  # cap, usage, usage-all and acl print this for the refusal and exit 78
+  EMBED_NOT_ENABLED_LINE = "embed not enabled: Embed isn't enabled for this network; see https://ur.io/services"
+  # provision prints this on stderr when the client's default ACL group stays
+  # pending because Embed isn't enabled, and exits 0
+  EMBED_PENDING_LINE = "embed not enabled: the client's defaults stay pending until Embed is enabled; see https://ur.io/services"
+  EMBED_UNSUPPORTED_MESSAGE = "/network/embed answered 404: the server predates Embed enablement"
 
   ACL_GROUP_DEFAULT = "default"
   ACL_GROUP_ISOLATED = "isolated"
@@ -77,11 +89,11 @@ module EmbedBackend
   # the longest API error message the tool shows
   ERROR_MESSAGE_LIMIT = 300
 
-  COMMANDS = %w[provision cap usage usage-all remove acl].freeze
+  COMMANDS = %w[provision cap usage usage-all remove acl status].freeze
 
   USAGE = "usage: backend.rb provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] " \
           "[--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | " \
-          "acl <key> default|isolated | --self-test"
+          "acl <key> default|isolated | status | --self-test"
 
   # A failure with its exit code and its stderr line, which never carries a
   # secret.
@@ -224,8 +236,20 @@ module EmbedBackend
     raise config_problem(CLIENT_LIMIT_MESSAGE)
   end
 
+  def embed_not_enabled?(answer)
+    error = answer["error"]
+    error.is_a?(Hash) && error["message"] == EMBED_NOT_ENABLED_MESSAGE
+  end
+
+  # The Embed-not-enabled refusal is a configuration problem with the fixed
+  # line.
+  def check_embed_enabled(answer)
+    raise config_problem(EMBED_NOT_ENABLED_LINE) if embed_not_enabled?(answer)
+  end
+
   # A cap object: a JSON object with a client_id and no error.
   def check_cap_object(value)
+    check_embed_enabled(value) if value.is_a?(Hash)
     raise failure("the cap request was refused: #{message_of(value['error'])}") if value.is_a?(Hash) && !value["error"].nil?
     raise failure("the API answered something that is not a cap object") unless value.is_a?(Hash) && value["client_id"].is_a?(String)
 
@@ -291,6 +315,7 @@ module EmbedBackend
         # a server that predates the route (EMBED_CONTRACT.md, "Backend tools")
         raise EmbedBackend.failure(ACL_UNSUPPORTED_MESSAGE) if route == ACL_ROUTE
         raise EmbedBackend.failure("#{route} answered 404: the server predates the data-cap routes") if [CAP_ROUTE, CAPS_ROUTE].include?(route)
+        raise EmbedBackend.failure(EMBED_UNSUPPORTED_MESSAGE) if route == EMBED_ROUTE
 
         raise EmbedBackend.failure("#{route} answered 404")
       end
@@ -347,9 +372,12 @@ module EmbedBackend
   # exist." it drops the mapping and provisions a new client. A new client
   # goes into acl_group, with a pending_acl record until the group is applied,
   # before any client JWT is written. Writes the client JWT to client_jwt_file
-  # and prints only the client ID.
+  # and prints only the client ID. While Embed isn't enabled the record stays,
+  # with a line on stderr, and a provision after the team enables Embed applies
+  # it.
   def provision(api, file, key, client_jwt_file, acl_group)
     result = nil
+    embed_enabled = true
     with_map_lock(file) do
       map = load_map(file)
       old = map["clients"][key]
@@ -385,9 +413,12 @@ module EmbedBackend
       if map["pending_acl"].include?(key)
         # a new client is "default": only an isolated default needs the request.
         # A failure raises with the record kept, before any client JWT is written.
-        post_acl_group(api, result["client_id"], ACL_GROUP_ISOLATED) if acl_group == ACL_GROUP_ISOLATED
-        set_acl_pending(map, key, false)
-        save_map(file, map)
+        embed_enabled = post_acl_group(api, result["client_id"], ACL_GROUP_ISOLATED, allow_not_enabled: true) if acl_group == ACL_GROUP_ISOLATED
+        # while Embed isn't enabled the record stays and the client works
+        if embed_enabled
+          set_acl_pending(map, key, false)
+          save_map(file, map)
+        end
       end
       begin
         write_private_file(client_jwt_file, "#{result['by_client_jwt']}\n")
@@ -396,6 +427,7 @@ module EmbedBackend
       end
     end
     puts JSON.generate({"client_id" => result["client_id"]})
+    warn EMBED_PENDING_LINE unless embed_enabled
   end
 
   def mapped_client(file, key)
@@ -406,11 +438,17 @@ module EmbedBackend
   end
 
   # Sets the client's ACL group; the answer must name the client and the
-  # group.
-  def post_acl_group(api, client, acl_group)
+  # group. The Embed-not-enabled refusal exits 78, or returns false when
+  # allow_not_enabled is set.
+  def post_acl_group(api, client, acl_group, allow_not_enabled: false)
     answer = api.call("POST", ACL_ROUTE, {"client_id" => client, "acl_group" => acl_group})
+    return false if allow_not_enabled && embed_not_enabled?(answer)
+
+    check_embed_enabled(answer)
     raise failure("the ACL group request was refused: #{message_of(answer['error'])}") unless answer["error"].nil?
     raise failure("the API answered another client or ACL group") unless answer["client_id"] == client && answer["acl_group"] == acl_group
+
+    true
   end
 
   # Sets the ACL group of the key's client and prints {"client_id": ...,
@@ -459,6 +497,7 @@ module EmbedBackend
       query = [["limit", USAGE_ALL_PAGE_LIMIT.to_s]]
       query << ["cursor", cursor] unless cursor.nil?
       answer = api.call("GET", "#{CAPS_ROUTE}?#{URI.encode_www_form(query)}")
+      check_embed_enabled(answer)
       raise failure("the cap list was refused: #{message_of(answer['error'])}") unless answer["error"].nil?
 
       clients = answer["clients"]
@@ -474,6 +513,27 @@ module EmbedBackend
       seen[next_cursor] = true
       cursor = next_cursor
     end
+  end
+
+  def count?(value)
+    value.is_a?(Integer) && value >= 0
+  end
+
+  # Prints the network's Embed state from GET /network/embed as one line,
+  # "embed enabled: yes | client limit: 5000 | active clients: 1234". A
+  # refusal, such as for a client JWT, is a configuration problem.
+  def status(api)
+    answer = api.call("GET", EMBED_ROUTE)
+    raise config_problem("the Embed state request was refused: #{message_of(answer['error'])}") unless answer["error"].nil?
+
+    enabled = answer["enabled"]
+    client_limit = answer["client_limit"]
+    active_client_count = answer["active_client_count"]
+    unless (enabled == true || enabled == false) && count?(client_limit) && count?(active_client_count)
+      raise failure("#{EMBED_ROUTE} answered something that is not an Embed state")
+    end
+
+    puts "embed enabled: #{enabled ? 'yes' : 'no'} | client limit: #{client_limit} | active clients: #{active_client_count}"
   end
 
   # Removes the key's client, then its mapping, also when the client is
@@ -515,10 +575,10 @@ module EmbedBackend
     raise config_problem(USAGE) if command == "provision" && operands.length != 2
     raise config_problem(USAGE) if %w[usage remove].include?(command) && operands.length != 1
     raise config_problem(USAGE) if command == "cap" && operands.empty?
-    raise config_problem(USAGE) if command == "usage-all" && !operands.empty?
+    raise config_problem(USAGE) if %w[usage-all status].include?(command) && !operands.empty?
     raise config_problem(USAGE) if command == "acl" && (operands.length != 2 || !ACL_GROUPS.include?(operands[1]))
 
-    key = command == "usage-all" ? nil : check_key(operands.first)
+    key = %w[usage-all status].include?(command) ? nil : check_key(operands.first)
     fields = command == "cap" ? parse_cap_options(operands.drop(1)) : nil
 
     root = env.fetch("URNETWORK_ROOT_JWT", "")
@@ -530,7 +590,7 @@ module EmbedBackend
     acl_group = ACL_GROUP_ISOLATED if acl_group.empty?
     raise config_problem("URNETWORK_DEFAULT_ACL_GROUP must be default or isolated") unless ACL_GROUPS.include?(acl_group)
     file = nil
-    unless command == "usage-all"
+    unless %w[usage-all status].include?(command)
       file = env.fetch("URNETWORK_CLIENT_MAP", "")
       raise config_problem("set URNETWORK_CLIENT_MAP to this tool's private client map") if file.empty?
       unless File.absolute_path?(file) && File.directory?(File.dirname(file))
@@ -544,6 +604,7 @@ module EmbedBackend
     when "usage" then usage(api, file, key)
     when "usage-all" then usage_all(api)
     when "acl" then acl(api, file, key, operands[1])
+    when "status" then status(api)
     else remove(api, file, key)
     end
     EXIT_OK
@@ -749,7 +810,7 @@ module EmbedBackend
 
       # key and argument rejection, settings, credential refusal and the network
       [["provision", SELF_TEST_CLIENT, jwt_path], ["provision", "user:../a", jwt_path], ["provision", SELF_TEST_KEY], ["usage"],
-       ["usage-all", "extra"], ["bogus"], []].each do |args|
+       ["usage-all", "extra"], ["status", "extra"], ["bogus"], []].each do |args|
         code, = tool.call(args, StandInApi.new)
         expect.call(code == EXIT_CONFIG, "#{args} must be a usage error")
       end
@@ -772,6 +833,8 @@ module EmbedBackend
       expect.call(code == EXIT_CONFIG && err.strip == "URNETWORK_DEFAULT_ACL_GROUP must be default or isolated", "an invalid default ACL group must exit 78")
 
       self_test_acl_groups(directory, env, expect)
+      self_test_embed_not_enabled(directory, env, expect)
+      self_test_embed_status(env, expect)
       self_test_failure_texts(directory, env, expect)
     end
   end
@@ -861,6 +924,67 @@ module EmbedBackend
       api = StandInApi.new
       code, = self_test_tool(["provision", "user:x", jwt_path], env.merge("URNETWORK_CLIENT_MAP" => pending_map), api)
       expect.call(code == EXIT_CONFIG && File.read(pending_map) == text && api.requests.empty?, "the map #{value} must be refused untouched")
+    end
+  end
+
+  # The Embed-not-enabled refusal: cap, usage, usage-all and acl exit 78 with
+  # the fixed line; provision still provisions and writes the client JWT,
+  # keeps the default group pending with the fixed stderr line, and a
+  # provision after the team enables Embed applies it.
+  def self_test_embed_not_enabled(directory, env, expect)
+    embed_map = File.join(directory, "embed.json")
+    isolated = env.merge("URNETWORK_CLIENT_MAP" => embed_map).reject { |name, _| name == "URNETWORK_DEFAULT_ACL_GROUP" }
+    refusal = [200, {"error" => {"message" => EMBED_NOT_ENABLED_MESSAGE}}]
+    pia = "88888888-8888-8888-8888-888888888888"
+    pia_answer = [200, {"client_id" => pia, "by_client_jwt" => self_test_jwt(pia)}]
+    code, = self_test_tool(["provision", "user:pia", File.join(directory, "pia.jwt")], isolated,
+                           StandInApi.new(pia_answer, [200, {"client_id" => pia, "acl_group" => ACL_GROUP_ISOLATED}]))
+    expect.call(code == EXIT_OK, "provision before the refusal failed")
+    [["cap", "user:pia", "--monthly", "1"], ["usage", "user:pia"], ["usage-all"], ["acl", "user:pia", ACL_GROUP_ISOLATED]].each do |args|
+      code, out, err = self_test_tool(args, isolated, StandInApi.new(refusal))
+      expect.call(code == EXIT_CONFIG && out.empty? && err == "#{EMBED_NOT_ENABLED_LINE}\n", "#{args.first} while Embed isn't enabled: #{code} #{err}")
+    end
+    quinn = "99999999-9999-9999-9999-999999999999"
+    quinn_jwt = File.join(directory, "quinn.jwt")
+    quinn_answer = [200, {"client_id" => quinn, "by_client_jwt" => self_test_jwt(quinn)}]
+    api = StandInApi.new(quinn_answer, refusal)
+    code, out, err = self_test_tool(["provision", "user:quinn", quinn_jwt], isolated, api)
+    expect.call(code == EXIT_OK && JSON.parse(out) == {"client_id" => quinn} && err == "#{EMBED_PENDING_LINE}\n", "provision while Embed isn't enabled: #{code} #{out} #{err}")
+    expect.call(api.requests.map { |request| request[:path] } == [AUTH_CLIENT_ROUTE, ACL_ROUTE], "provision while Embed isn't enabled must try the group")
+    expect.call(File.read(quinn_jwt) == "#{self_test_jwt(quinn)}\n" && load_map(embed_map)["pending_acl"] == ["user:quinn"],
+                "provision while Embed isn't enabled must write the client JWT and keep the record")
+    api = StandInApi.new(quinn_answer, [200, {"client_id" => quinn, "acl_group" => ACL_GROUP_ISOLATED}])
+    code, _, err = self_test_tool(["provision", "user:quinn", quinn_jwt], isolated, api)
+    expect.call(code == EXIT_OK && err.empty? && load_map(embed_map)["pending_acl"].empty?, "provision after Embed was enabled must apply the group: #{err}")
+    expect.call(api.requests[1][:body] == {"client_id" => quinn, "acl_group" => ACL_GROUP_ISOLATED}, "provision after Embed was enabled must post isolated")
+  end
+
+  # The status command: GET /network/embed with the root credential, printed
+  # as the fixed line for an enabled and a not enabled network; a refusal
+  # exits 78; a server without the route and an invalid answer exit 1.
+  def self_test_embed_status(env, expect)
+    api = StandInApi.new([200, {"enabled" => true, "client_limit" => 5000, "active_client_count" => 1234}])
+    code, out, err = self_test_tool(["status"], env, api)
+    expect.call(code == EXIT_OK && out == "embed enabled: yes | client limit: 5000 | active clients: 1234\n" && err.empty?, "status printed #{out} #{err}")
+    expect.call(api.requests == [{method: "GET", path: EMBED_ROUTE, body: nil}], "status must GET /network/embed")
+    code, out, = self_test_tool(["status"], env, StandInApi.new([200, {"enabled" => false, "client_limit" => 100, "active_client_count" => 0}]))
+    expect.call(code == EXIT_OK && out == "embed enabled: no | client limit: 100 | active clients: 0\n", "status while Embed isn't enabled printed #{out}")
+    code, out, err = self_test_tool(["status"], env, StandInApi.new([200, {"error" => {"message" => "Invalid credential."}}]))
+    expect.call(code == EXIT_CONFIG && out.empty? && err.include?("Invalid credential.") && err.count("\n") == 1, "status on a refusal: #{code} #{err}")
+    code, = self_test_tool(["status"], env, StandInApi.new([401, {}]))
+    expect.call(code == EXIT_CONFIG, "status with a refused root credential must exit 78")
+    code, _, err = self_test_tool(["status"], env, StandInApi.new([404, {}]))
+    expect.call(code == EXIT_FAILURE && err.strip == EMBED_UNSUPPORTED_MESSAGE, "status on a server without Embed enablement: #{code} #{err}")
+    [
+      {"enabled" => true},
+      {"enabled" => "yes", "client_limit" => 1, "active_client_count" => 1},
+      {"enabled" => true, "client_limit" => -1, "active_client_count" => 0},
+      {"enabled" => true, "client_limit" => 1.5, "active_client_count" => 0},
+      {"enabled" => 1, "client_limit" => 1, "active_client_count" => 1},
+      {"enabled" => true, "client_limit" => true, "active_client_count" => 1},
+    ].each do |value|
+      code, out, = self_test_tool(["status"], env, StandInApi.new([200, value]))
+      expect.call(code == EXIT_FAILURE && out.empty?, "status must refuse #{value}")
     end
   end
 

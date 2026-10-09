@@ -23,10 +23,12 @@ module Embed
 
   # Reads the client's own caps on a thread of its own: at start unless a
   # first reading is known, every five minutes, and at once when woken. Each
-  # reading, nil for a failed read, reaches the run loop as an
-  # EVENT_CAPS_READ event.
+  # reading, nil for a failed read and EMBED_NOT_ENABLED for the
+  # Embed-not-enabled refusal, reaches the run loop as an EVENT_CAPS_READ
+  # event.
   class CapReader
-    # read.call returns a CapReading or nil and may block on the network.
+    # read.call returns a CapReading, EMBED_NOT_ENABLED or nil and may block on
+    # the network.
     def initialize(read, events, interval_seconds = CAP_READ_INTERVAL_SECONDS)
       @read = read
       @events = events

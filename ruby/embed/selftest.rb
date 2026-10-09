@@ -215,12 +215,21 @@ module Embed
     def check_status_lines
       failed = CapState.new
       failed.record(nil)
+      # the first reading answers the Embed-not-enabled refusal; and a capped
+      # monthly reading, then the refusal
+      refused = CapState.new
+      refused.record(EMBED_NOT_ENABLED)
+      cleared = CapState.new(cap_reading(monthly_byte_limit: 5_000_000_000, monthly_used_byte_count: 5_000_000_000,
+                                         monthly_period_end: "2026-11-01T00:00:00Z", capped: true, capped_reason: CAPPED_REASON_MONTHLY))
+      cleared.record(EMBED_NOT_ENABLED)
       [
         # connecting, caps not read yet
         ["", 0, CapState.new, 0, "status: connecting | data this month: checking | data total: checking"],
         ["", 0, CapState.new(cap_reading(monthly_byte_limit: 5_000_000_000, monthly_used_byte_count: 1_234_567_890, total_byte_limit: nil)), 1,
          "status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap"],
         ["", 0, failed, 1, "status: connected | data this month: unavailable | data total: unavailable"],
+        ["", 0, refused, 1, "status: connected | data this month: unavailable | data total: unavailable"],
+        ["", 0, cleared, 1, "status: connected | data this month: unavailable | data total: unavailable"],
         ["", 0, CapState.new(cap_reading(monthly_byte_limit: 5_000_000_000, monthly_used_byte_count: 5_000_000_000,
                                          monthly_period_end: "2026-11-01T00:00:00Z", capped: true, capped_reason: CAPPED_REASON_MONTHLY)), 3,
          "status: data cap reached, resets 2026-11-01 00:00 UTC | data this month: 5.0 GB of 5.0 GB | data total: no cap"],
@@ -266,8 +275,9 @@ module Embed
       expect(Embed.embed_status(true, false, "", 0, unparsed_end, 1) == "data cap reached", "an unparsed period end must show plain data cap reached")
     end
 
-    # checking, unavailable, a later failure keeping the last value, no cap
-    # for an unset limit even with a used count, and <used> of <limit>.
+    # checking, unavailable, a later failure keeping the last value, the
+    # Embed-not-enabled refusal clearing it, no cap for an unset limit even
+    # with a used count, and <used> of <limit>.
     def check_data_fields
       cap_state = CapState.new
       expect(Embed.data_field_text(cap_state, true) == "checking", "data this month before a reading must be checking")
@@ -281,6 +291,9 @@ module Embed
       expect(Embed.data_field_text(cap_state, false) == "no cap", "an unset cap shows no cap, never its used count")
       cap_state.record(nil)
       expect(Embed.data_field_text(cap_state, true) == "1.2 kB of 2.0 kB", "a later failure must keep the last value")
+      cap_state.record(EMBED_NOT_ENABLED)
+      expect(cap_state.reading.nil? && Embed.data_field_text(cap_state, true) == "unavailable" && Embed.data_field_text(cap_state, false) == "unavailable",
+             "the Embed-not-enabled refusal must clear the last reading")
     end
 
     # Null or absent limits, capped and capped_reason, an unknown reason read
@@ -316,8 +329,15 @@ module Embed
         [TEST_CLIENT_ID],
         nil,
       ].each do |invalid|
-        expect(Caps.parse_cap_object(invalid).nil?, "#{invalid.inspect} must not parse as a cap object")
+        expect(Caps.parse_cap_object(invalid).nil? && !Caps.embed_not_enabled?(invalid), "#{invalid.inspect} must not parse as a cap object")
       end
+      # the Embed-not-enabled refusal is no cap object, and is recognized
+      refusal = {"error" => {"message" => "Embed isn't enabled for this network."}}
+      expect(Caps.parse_cap_object(refusal).nil? && Caps.embed_not_enabled?(refusal), "the Embed-not-enabled refusal must be recognized")
+      expect(Caps.read_own_caps(TEST_API, test_client_jwt, StandInServer.new([200, refusal])) == EMBED_NOT_ENABLED,
+             "the cap read must mark the Embed-not-enabled refusal")
+      expect(Caps.read_own_caps(TEST_API, test_client_jwt, StandInServer.new([200, {"error" => {"message" => "no permission"}}])).nil?,
+             "another refusal must be a failed read")
       expect(Caps.parse_cap_answer("not json").nil?, "an answer that is not JSON must not parse")
       # the app's own read: a 404 from a server without the cap routes is a failure
       expect(Caps.read_own_caps(TEST_API, test_client_jwt, StandInServer.new([404, "not found"])).nil?, "a 404 must be a failed read")

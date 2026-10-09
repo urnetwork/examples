@@ -154,9 +154,14 @@ module Embed
       @failed = false
     end
 
-    # Records a reading; nil is a failed read.
+    # Records a reading; nil is a failed read, and EMBED_NOT_ENABLED, the
+    # Embed-not-enabled refusal, clears the last reading, so both data fields
+    # read unavailable and the status rules see no cap reading.
     def record(reading)
-      if reading.nil?
+      if reading == EMBED_NOT_ENABLED
+        @reading = nil
+        @failed = true
+      elsif reading.nil?
         @failed = true if @reading.nil?
       else
         @reading = reading
