@@ -1,14 +1,16 @@
 //! SERVER ONLY. The Rust embed backend tool (EMBED_CONTRACT.md, "Backend tools"). It extends the
 //! integration allocator (`rust/integration/server`, INTEGRATION_CONTRACT.md "Runnable backend
 //! allocators") with the embed commands: provision an installation's client, set and read its data
-//! caps, list every capped client, and remove a client. The authenticated backend supplies each
+//! caps, list every capped client, remove a client, and set a client's ACL group (`acl <key>
+//! default|isolated`). The authenticated backend supplies each
 //! `user:<service-user-id>[:<installation-id>]` key internally; never pass an untrusted request
 //! field or a URnetwork client ID.
 //!
 //! Settings: `URNETWORK_ROOT_JWT` (an API key or a network JWT, from the backend secret store),
-//! `URNETWORK_CLIENT_MAP` (absolute file path in an existing private, service-owned directory) and
-//! optional `URNETWORK_API_URL`. The map stores client IDs, never tokens; a crash-left `<map>.lock`
-//! may be removed only after confirming that no tool still owns it.
+//! `URNETWORK_CLIENT_MAP` (absolute file path in an existing private, service-owned directory),
+//! optional `URNETWORK_API_URL` and optional `URNETWORK_DEFAULT_ACL_GROUP` (the ACL group of each new
+//! client: `isolated`, the default, or `default`). The map stores client IDs, never tokens; a
+//! crash-left `<map>.lock` may be removed only after confirming that no tool still owns it.
 //!
 //! Exit codes: 0 success, 78 configuration or credential problem (missing settings, an invalid key
 //! or map, the root credential refused, the client limit), 1 any other failure. Errors are one
@@ -47,12 +49,24 @@ const CLIENT_DOES_NOT_EXIST: &str = "Client does not exist.";
 const MAX_BYTE_COUNT: u64 = i64::MAX as u64;
 /// The page size of `usage-all`.
 const USAGE_ALL_PAGE_SIZE: &str = "1000";
+/// The stderr line for `cap`, `usage`, `remove` or `acl` with a key that has no client.
+const UNMAPPED_MESSAGE: &str = "no client is mapped for that key; run provision first";
+/// The stderr line for a server without ACL groups.
+const ACL_UNSUPPORTED_MESSAGE: &str =
+    "/network/client-acl-group answered 404: the server predates ACL groups";
+const AUTH_CLIENT_PATH: &str = "/network/auth-client";
+const CAP_PATH: &str = "/network/client-data-cap";
+const CAPS_PATH: &str = "/network/client-data-caps";
+const REMOVE_PATH: &str = "/network/remove-client";
+const ACL_PATH: &str = "/network/client-acl-group";
+const ACL_GROUP_DEFAULT: &str = "default";
+const ACL_GROUP_ISOLATED: &str = "isolated";
 
 const EXIT_OK: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
 const EXIT_CONFIG: i32 = 78;
 
-const USAGE: &str = "usage: urnetwork-embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | --self-test";
+const USAGE: &str = "usage: urnetwork-embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test";
 
 /// URL-safe base64 for JWT segments, accepting missing padding, as Go's decoder does.
 const URL_SAFE_LENIENT: GeneralPurpose = GeneralPurpose::new(
@@ -62,13 +76,32 @@ const URL_SAFE_LENIENT: GeneralPurpose = GeneralPurpose::new(
         .with_decode_allow_trailing_bits(true),
 );
 
-/// The private client map: the allocators' format. A map with any other field, such as the token
-/// server's `pending_caps`, is refused, so that two tools never rewrite each other's map.
+/// The private client map: the allocators' format, plus `pending_acl`, the keys whose new clients
+/// still owe their default ACL group, written only while it is not empty. A map with any other
+/// field, such as the token server's `pending_caps`, is refused, so that two tools never rewrite
+/// each other's map.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClientMap {
     version: u32,
     clients: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_acl: Vec<String>,
+}
+
+impl ClientMap {
+    /// Records that the key's new client owes its default ACL group, or drops the record.
+    fn set_acl_pending(&mut self, key: &str, pending: bool) {
+        self.pending_acl.retain(|entry| entry != key);
+        if pending {
+            self.pending_acl.push(key.to_string());
+        }
+    }
+
+    /// Whether the key's client owes its default ACL group.
+    fn acl_pending(&self, key: &str) -> bool {
+        self.pending_acl.iter().any(|entry| entry == key)
+    }
 }
 
 /// Why a command failed: its exit code and one stderr line without a secret.
@@ -144,7 +177,31 @@ enum Command {
     Remove {
         key: String,
     },
+    Acl {
+        key: String,
+        group: &'static str,
+    },
     SelfTest,
+}
+
+/// An ACL group named on the command line or in `URNETWORK_DEFAULT_ACL_GROUP`.
+fn acl_group(text: &str) -> Option<&'static str> {
+    match text {
+        ACL_GROUP_DEFAULT => Some(ACL_GROUP_DEFAULT),
+        ACL_GROUP_ISOLATED => Some(ACL_GROUP_ISOLATED),
+        _ => None,
+    }
+}
+
+/// The ACL group of each new client from `URNETWORK_DEFAULT_ACL_GROUP`: `isolated` when it is unset
+/// or empty.
+fn default_acl_group(setting: Option<&str>) -> Result<&'static str, ToolError> {
+    match setting {
+        None | Some("") => Ok(ACL_GROUP_ISOLATED),
+        Some(text) => acl_group(text).ok_or_else(|| {
+            ToolError::Config("URNETWORK_DEFAULT_ACL_GROUP must be default or isolated".to_string())
+        }),
+    }
 }
 
 /// Whether a key matches the allocator pattern `user:[A-Za-z0-9][A-Za-z0-9_.:@-]{0,122}`, so both
@@ -227,6 +284,13 @@ fn parse_command(args: &[String]) -> Result<Command, ToolError> {
         ["remove", key] => Ok(Command::Remove {
             key: checked_key(key)?,
         }),
+        ["acl", key, group] => {
+            let group = acl_group(group).ok_or_else(usage)?;
+            Ok(Command::Acl {
+                key: checked_key(key)?,
+                group,
+            })
+        }
         ["cap", key, options @ ..] => {
             let key = checked_key(key)?;
             let (mut monthly, mut total, mut reset_total) = (None, None, false);
@@ -401,9 +465,11 @@ fn one_line(message: &str) -> String {
 }
 
 /// The JSON object of a 2xx answer, or the error for a refused credential, a missing route or
-/// another HTTP failure. `what` names the call in messages.
+/// another HTTP failure. `route` is the path that was called and `what` names the call in
+/// messages.
 fn answer_object(
     answer: &ApiAnswer,
+    route: &str,
     what: &str,
 ) -> Result<serde_json::Map<String, Value>, ToolError> {
     match answer.status {
@@ -412,10 +478,17 @@ fn answer_object(
                 "the URnetwork API refused the root credential".to_string(),
             ));
         }
-        404 => {
+        // a server that predates the route (EMBED_CONTRACT.md, "Backend tools")
+        404 if route == ACL_PATH => {
+            return Err(ToolError::Failure(ACL_UNSUPPORTED_MESSAGE.to_string()));
+        }
+        404 if route == CAP_PATH || route == CAPS_PATH => {
             return Err(ToolError::Failure(format!(
-                "{what}: the URnetwork API has no such route (an older server?)"
+                "{route} answered 404: the server predates the data-cap routes"
             )));
+        }
+        404 => {
+            return Err(ToolError::Failure(format!("{what}: {route} answered 404")));
         }
         200..=299 => {}
         status => {
@@ -486,7 +559,7 @@ fn read_auth_client_answer(
     answer: &ApiAnswer,
     expected: Option<&str>,
 ) -> Result<AuthClientAnswer, ToolError> {
-    let object = answer_object(answer, "provision")?;
+    let object = answer_object(answer, AUTH_CLIENT_PATH, "provision")?;
     if let Some(error) = object.get("error").filter(|error| !error.is_null()) {
         let flag = |name: &str| error.get(name).and_then(Value::as_bool).unwrap_or(false);
         if flag("client_limit_exceeded") || flag("upgrade_required") {
@@ -536,6 +609,7 @@ fn load_map(file: &Path) -> Result<ClientMap, ToolError> {
             return Ok(ClientMap {
                 version: 1,
                 clients: BTreeMap::new(),
+                pending_acl: Vec::new(),
             });
         }
         Err(_) => return Err(invalid("unreadable")),
@@ -548,8 +622,9 @@ fn load_map(file: &Path) -> Result<ClientMap, ToolError> {
         return Err(invalid("it must be private (0600)"));
     }
     let data = fs::read(file).map_err(|_| invalid("unreadable"))?;
-    let map: ClientMap = serde_json::from_slice(&data)
-        .map_err(|_| invalid("not the allocators' format (version and clients only)"))?;
+    let map: ClientMap = serde_json::from_slice(&data).map_err(|_| {
+        invalid("not the allocators' format (version, clients and pending_acl only)")
+    })?;
     if map.version != 1 {
         return Err(invalid("unknown version"));
     }
@@ -557,6 +632,12 @@ fn load_map(file: &Path) -> Result<ClientMap, ToolError> {
     for (key, client_id) in &map.clients {
         if !key_valid(key) || !id_valid(client_id) || !seen.insert(client_id) {
             return Err(invalid("an invalid or duplicate mapping"));
+        }
+    }
+    let mut pending = BTreeSet::new();
+    for key in &map.pending_acl {
+        if !map.clients.contains_key(key) || !pending.insert(key) {
+            return Err(invalid("pending_acl is not a list of mapped keys"));
         }
     }
     Ok(map)
@@ -630,9 +711,10 @@ fn lock_map(file: &Path) -> Result<MapLock, ToolError> {
 
 /// The mapped client of a key.
 fn mapped_client(map: &ClientMap, key: &str) -> Result<String, ToolError> {
-    map.clients.get(key).cloned().ok_or_else(|| {
-        ToolError::Config(format!("no client is mapped for {key}; provision it first"))
-    })
+    map.clients
+        .get(key)
+        .cloned()
+        .ok_or_else(|| ToolError::Config(UNMAPPED_MESSAGE.to_string()))
 }
 
 /// Writes one JSON value as a line.
@@ -642,12 +724,15 @@ fn print_json(out: &mut dyn Write, value: &Value) -> Result<(), ToolError> {
 }
 
 /// `provision <key> <client-jwt-file>`: reissues the key's client or provisions a new one; on
-/// `Client does not exist.` it drops the mapping and provisions a new client. Writes the client JWT
-/// to the file (owner-only, replaced atomically), never prints it, and prints `{"client_id": ...}`.
+/// `Client does not exist.` it drops the mapping and provisions a new client. A new client goes into
+/// `acl_group`, with a `pending_acl` record until the group is applied, before any client JWT is
+/// written. Writes the client JWT to the file (owner-only, replaced atomically), never prints it,
+/// and prints `{"client_id": ...}`.
 fn provision(
     key: &str,
     client_jwt_file: &Path,
     map_file: &Path,
+    acl_group: &str,
     api: &mut dyn Api,
     out: &mut dyn Write,
 ) -> Result<(), ToolError> {
@@ -655,10 +740,7 @@ fn provision(
     let mut map = load_map(map_file)?;
     let mut mapped = map.clients.get(key).cloned();
     let (client_id, by_client_jwt) = loop {
-        let answer = api.post(
-            "/network/auth-client",
-            &auth_client_request(mapped.as_deref()),
-        )?;
+        let answer = api.post(AUTH_CLIENT_PATH, &auth_client_request(mapped.as_deref()))?;
         match read_auth_client_answer(&answer, mapped.as_deref())? {
             AuthClientAnswer::Client {
                 client_id,
@@ -667,6 +749,7 @@ fn provision(
             AuthClientAnswer::ClientDoesNotExist if mapped.is_some() => {
                 // deactivated after 30 days without connecting, or removed: provision a new client
                 map.clients.remove(key);
+                map.set_acl_pending(key, false);
                 save_map(map_file, &map)?;
                 mapped = None;
             }
@@ -689,6 +772,17 @@ fn provision(
             ));
         }
         map.clients.insert(key.to_string(), client_id.clone());
+        // the mapping and the record that the client owes its group, in one save
+        map.set_acl_pending(key, acl_group == ACL_GROUP_ISOLATED);
+        save_map(map_file, &map)?;
+    }
+    if map.acl_pending(key) {
+        // a new client is `default`: only an isolated default needs the request. A failure returns
+        // with the record kept, before any client JWT is written.
+        if acl_group == ACL_GROUP_ISOLATED {
+            post_acl_group(api, &client_id, ACL_GROUP_ISOLATED)?;
+        }
+        map.set_acl_pending(key, false);
         save_map(map_file, &map)?;
     }
     write_private_atomically(client_jwt_file, format!("{by_client_jwt}\n").as_bytes())
@@ -696,9 +790,59 @@ fn provision(
     print_json(out, &json!({ "client_id": client_id }))
 }
 
+/// Sets the client's ACL group; the answer must name the client and the group.
+fn post_acl_group(api: &mut dyn Api, client_id: &str, group: &str) -> Result<(), ToolError> {
+    let answer = api.post(
+        ACL_PATH,
+        &json!({ "client_id": client_id, "acl_group": group }),
+    )?;
+    let object = answer_object(&answer, ACL_PATH, "acl")?;
+    if let Some(message) = error_message(&object) {
+        return Err(ToolError::Failure(format!(
+            "acl: the URnetwork API refused: {message}"
+        )));
+    }
+    if object.get("client_id").and_then(Value::as_str) != Some(client_id)
+        || object.get("acl_group").and_then(Value::as_str) != Some(group)
+    {
+        return Err(ToolError::Failure(
+            "acl: the URnetwork API answered another client or ACL group".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// `acl <key> default|isolated`: sets the ACL group of the key's client and prints `{"client_id":
+/// ..., "acl_group": ...}`. An explicit group settles a pending default group, so the record is
+/// dropped.
+fn acl(
+    key: &str,
+    group: &str,
+    map_file: &Path,
+    api: &mut dyn Api,
+    out: &mut dyn Write,
+) -> Result<(), ToolError> {
+    let _lock = lock_map(map_file)?;
+    let mut map = load_map(map_file)?;
+    let client_id = mapped_client(&map, key)?;
+    post_acl_group(api, &client_id, group)?;
+    if map.acl_pending(key) {
+        map.set_acl_pending(key, false);
+        save_map(map_file, &map)?;
+    }
+    // the contract's key order, which a serialized map would sort
+    writeln!(
+        out,
+        "{{\"client_id\":{},\"acl_group\":{}}}",
+        json!(client_id),
+        json!(group)
+    )?;
+    Ok(())
+}
+
 /// The cap object of an answer, refused when it carries an error.
-fn cap_object(answer: &ApiAnswer, what: &str) -> Result<Value, ToolError> {
-    let object = answer_object(answer, what)?;
+fn cap_object(answer: &ApiAnswer, route: &str, what: &str) -> Result<Value, ToolError> {
+    let object = answer_object(answer, route, what)?;
     if let Some(message) = error_message(&object) {
         return Err(ToolError::Failure(format!(
             "{what}: the URnetwork API refused: {message}"
@@ -741,10 +885,10 @@ fn cap(
 ) -> Result<(), ToolError> {
     let client_id = mapped_client(&load_map(map_file)?, key)?;
     let answer = api.post(
-        "/network/client-data-cap",
+        CAP_PATH,
         &cap_request(&client_id, monthly, total, reset_total),
     )?;
-    print_json(out, &cap_object(&answer, "cap")?)
+    print_json(out, &cap_object(&answer, CAP_PATH, "cap")?)
 }
 
 /// `usage <key>`: prints the key's cap object, read with the root credential.
@@ -755,8 +899,8 @@ fn usage(
     out: &mut dyn Write,
 ) -> Result<(), ToolError> {
     let client_id = mapped_client(&load_map(map_file)?, key)?;
-    let answer = api.get("/network/client-data-cap", &[("client_id", &client_id)])?;
-    print_json(out, &cap_object(&answer, "usage")?)
+    let answer = api.get(CAP_PATH, &[("client_id", &client_id)])?;
+    print_json(out, &cap_object(&answer, CAP_PATH, "usage")?)
 }
 
 /// `usage-all`: pages through `GET /network/client-data-caps` and prints one cap object per line,
@@ -769,8 +913,8 @@ fn usage_all(api: &mut dyn Api, out: &mut dyn Write) -> Result<(), ToolError> {
         if let Some(cursor) = &cursor {
             query.push(("cursor", cursor.as_str()));
         }
-        let answer = api.get("/network/client-data-caps", &query)?;
-        let page = cap_object(&answer, "usage-all")?;
+        let answer = api.get(CAPS_PATH, &query)?;
+        let page = cap_object(&answer, CAPS_PATH, "usage-all")?;
         let clients = page
             .get("clients")
             .and_then(Value::as_array)
@@ -801,8 +945,8 @@ fn remove(
     let _lock = lock_map(map_file)?;
     let mut map = load_map(map_file)?;
     let client_id = mapped_client(&map, key)?;
-    let answer = api.post("/network/remove-client", &json!({ "client_id": client_id }))?;
-    let object = answer_object(&answer, "remove")?;
+    let answer = api.post(REMOVE_PATH, &json!({ "client_id": client_id }))?;
+    let object = answer_object(&answer, REMOVE_PATH, "remove")?;
     // `Client does not exist.` means the client is already gone: drop the mapping too
     if let Some(message) = error_message(&object).filter(|message| message != CLIENT_DOES_NOT_EXIST)
     {
@@ -811,14 +955,16 @@ fn remove(
         )));
     }
     map.clients.remove(key);
+    map.set_acl_pending(key, false);
     save_map(map_file, &map)?;
     print_json(out, &json!({ "removed": client_id }))
 }
 
-/// Runs a parsed command other than the self-test.
+/// Runs a parsed command other than the self-test; `acl_group` is the ACL group of each new client.
 fn execute(
     command: &Command,
     map_file: &Path,
+    acl_group: &str,
     api: &mut dyn Api,
     out: &mut dyn Write,
 ) -> Result<(), ToolError> {
@@ -831,7 +977,7 @@ fn execute(
         Command::Provision {
             key,
             client_jwt_file,
-        } => provision(key, client_jwt_file, map_file, api, out),
+        } => provision(key, client_jwt_file, map_file, acl_group, api, out),
         Command::Cap {
             key,
             monthly,
@@ -841,6 +987,7 @@ fn execute(
         Command::Usage { key } => usage(key, map_file, api, out),
         Command::UsageAll => usage_all(api, out),
         Command::Remove { key } => remove(key, map_file, api, out),
+        Command::Acl { key, group } => acl(key, group, map_file, api, out),
         Command::SelfTest => Err(ToolError::Config(USAGE.to_string())),
     }
 }
@@ -864,8 +1011,9 @@ fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         let origin = api_origin(
             &env::var("URNETWORK_API_URL").unwrap_or_else(|_| "https://api.bringyour.com".into()),
         )?;
+        let acl_group = default_acl_group(env::var("URNETWORK_DEFAULT_ACL_GROUP").ok().as_deref())?;
         let mut api = HttpApi::new(origin, required_setting("URNETWORK_ROOT_JWT")?)?;
-        execute(&command, &map_file, &mut api, out)
+        execute(&command, &map_file, acl_group, &mut api, out)
     });
     match result {
         Ok(()) => EXIT_OK,
@@ -987,12 +1135,23 @@ mod self_test {
         )
     }
 
-    /// Runs a command against the mock; returns the exit code, stdout and stderr.
+    /// Runs a command against the mock with new clients in `default`, which sends no ACL request;
+    /// returns the exit code, stdout and stderr.
     fn invoke(args: &[&str], map_file: &Path, api: &mut MockApi) -> (i32, String, String) {
+        invoke_with(args, map_file, ACL_GROUP_DEFAULT, api)
+    }
+
+    /// Runs a command against the mock with new clients in `acl_group`.
+    fn invoke_with(
+        args: &[&str],
+        map_file: &Path,
+        acl_group: &str,
+        api: &mut MockApi,
+    ) -> (i32, String, String) {
         let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
         let mut out = Vec::new();
-        let result =
-            parse_command(&args).and_then(|command| execute(&command, map_file, api, &mut out));
+        let result = parse_command(&args)
+            .and_then(|command| execute(&command, map_file, acl_group, api, &mut out));
         let (code, err) = match result {
             Ok(()) => (EXIT_OK, String::new()),
             Err(error) => (error.exit_code(), format!("{}\n", error.message())),
@@ -1027,7 +1186,9 @@ mod self_test {
         fs::create_dir(&dir)?;
         #[cfg(unix)]
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-        let result = checks(&dir);
+        let result = checks(&dir)
+            .and_then(|()| acl_checks(&dir))
+            .and_then(|()| failure_text_checks(&dir));
         let _ = fs::remove_dir_all(&dir);
         result?;
         writeln!(out, "embed backend tool self-test passed")?;
@@ -1418,6 +1579,296 @@ mod self_test {
             ensure(
                 api_origin(origin).is_err(),
                 &format!("origin {origin} was accepted"),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// An ACL group answer.
+    fn acl_answer(client_id: &str, group: &str) -> (u16, Value) {
+        (200, json!({ "client_id": client_id, "acl_group": group }))
+    }
+
+    /// The keys a map file records in `pending_acl`.
+    fn pending(map_file: &Path) -> Result<Vec<String>, ToolError> {
+        Ok(load_map(map_file)?.pending_acl)
+    }
+
+    /// The default ACL group: applied to a new client only, with `pending_acl` set before and
+    /// cleared after, kept and retried after a failure, kept on a server without ACL groups, and
+    /// settled by `acl`; the `acl` command.
+    fn acl_checks(dir: &Path) -> Result<(), ToolError> {
+        let map_file = dir.join("acl.json");
+        let jwt_file = dir.join("ivan.jwt");
+        let jwt_path = jwt_file.to_string_lossy().to_string();
+
+        // the setting: unset or empty means isolated, other values are a configuration error
+        ensure(
+            default_acl_group(None) == Ok(ACL_GROUP_ISOLATED)
+                && default_acl_group(Some("")) == Ok(ACL_GROUP_ISOLATED)
+                && default_acl_group(Some("default")) == Ok(ACL_GROUP_DEFAULT)
+                && default_acl_group(Some("private")).is_err_and(|error| {
+                    error.exit_code() == EXIT_CONFIG
+                        && error.message()
+                            == "URNETWORK_DEFAULT_ACL_GROUP must be default or isolated"
+                }),
+            "the default ACL group setting",
+        )?;
+
+        // isolated: the new client, then one ACL request, then no record
+        let mut api = MockApi::new(&[auth_ok(CLIENT_A), acl_answer(CLIENT_A, ACL_GROUP_ISOLATED)]);
+        let (code, _, stderr) = invoke_with(
+            &["provision", "user:ivan", &jwt_path],
+            &map_file,
+            ACL_GROUP_ISOLATED,
+            &mut api,
+        );
+        ensure(
+            code == EXIT_OK,
+            &format!("isolated provision failed: {stderr}"),
+        )?;
+        ensure(
+            api.calls.len() == 2
+                && api.calls[1].path == ACL_PATH
+                && api.calls[1].body
+                    == Some(json!({ "client_id": CLIENT_A, "acl_group": ACL_GROUP_ISOLATED })),
+            "a new client is not put in isolated",
+        )?;
+        ensure(
+            pending(&map_file)?.is_empty()
+                && !fs::read_to_string(&map_file)?.contains("pending_acl")
+                && fs::read_to_string(&jwt_file)?.trim() == jwt(CLIENT_A),
+            "an applied group leaves its record or no client JWT",
+        )?;
+        let mut api = MockApi::new(&[auth_ok(CLIENT_A)]);
+        let (code, _, _) = invoke_with(
+            &["provision", "user:ivan", &jwt_path],
+            &map_file,
+            ACL_GROUP_ISOLATED,
+            &mut api,
+        );
+        ensure(
+            code == EXIT_OK && api.calls.len() == 1,
+            "a reissue sends an ACL request",
+        )?;
+
+        // a failed request keeps the record and writes no client JWT; the next issue retries
+        let judy_jwt = dir.join("judy.jwt");
+        let judy_path = judy_jwt.to_string_lossy().to_string();
+        let mut api = MockApi::new(&[auth_ok(CLIENT_B), (500, json!({}))]);
+        let (code, _, _) = invoke_with(
+            &["provision", "user:judy", &judy_path],
+            &map_file,
+            ACL_GROUP_ISOLATED,
+            &mut api,
+        );
+        ensure(
+            code == EXIT_FAILURE
+                && !judy_jwt.exists()
+                && pending(&map_file)? == ["user:judy"]
+                && load_map(&map_file)?
+                    .clients
+                    .get("user:judy")
+                    .map(String::as_str)
+                    == Some(CLIENT_B),
+            "a failed ACL request does not keep the record",
+        )?;
+        let mut api = MockApi::new(&[auth_ok(CLIENT_B), acl_answer(CLIENT_B, ACL_GROUP_ISOLATED)]);
+        let (code, _, _) = invoke_with(
+            &["provision", "user:judy", &judy_path],
+            &map_file,
+            ACL_GROUP_ISOLATED,
+            &mut api,
+        );
+        ensure(
+            code == EXIT_OK
+                && api.calls.len() == 2
+                && api.calls[1].path == ACL_PATH
+                && pending(&map_file)?.is_empty()
+                && judy_jwt.exists(),
+            "a pending group is not applied on the next issue",
+        )?;
+
+        // a server without ACL groups: exit 1 with its line and the record kept; a default of
+        // default then provisions without a request
+        let older_map = dir.join("older.json");
+        let kim = "55555555-5555-5555-5555-555555555555";
+        let kim_jwt = dir.join("kim.jwt");
+        let kim_path = kim_jwt.to_string_lossy().to_string();
+        let mut api = MockApi::new(&[auth_ok(kim), (404, json!({}))]);
+        let (code, _, stderr) = invoke_with(
+            &["provision", "user:kim", &kim_path],
+            &older_map,
+            ACL_GROUP_ISOLATED,
+            &mut api,
+        );
+        ensure(
+            code == EXIT_FAILURE
+                && stderr == format!("{ACL_UNSUPPORTED_MESSAGE}\n")
+                && !kim_jwt.exists()
+                && pending(&older_map)? == ["user:kim"],
+            &format!("a server without ACL groups answers {code}: {stderr}"),
+        )?;
+        let mut api = MockApi::new(&[auth_ok(kim)]);
+        let (code, _, _) = invoke(&["provision", "user:kim", &kim_path], &older_map, &mut api);
+        ensure(
+            code == EXIT_OK
+                && api.calls.len() == 1
+                && pending(&older_map)?.is_empty()
+                && kim_jwt.exists(),
+            "a default of default does not settle the record without a request",
+        )?;
+
+        // the acl command: the request, the printed answer, and its refusals
+        let mut api = MockApi::new(&[acl_answer(CLIENT_A, ACL_GROUP_DEFAULT)]);
+        let (code, stdout, _) = invoke(&["acl", "user:ivan", "default"], &map_file, &mut api);
+        ensure(
+            code == EXIT_OK
+                && stdout
+                    == format!("{{\"client_id\":\"{CLIENT_A}\",\"acl_group\":\"default\"}}\n")
+                && api.calls[0].body
+                    == Some(json!({ "client_id": CLIENT_A, "acl_group": "default" })),
+            &format!("acl printed {stdout}"),
+        )?;
+        for args in [
+            vec!["acl"],
+            vec!["acl", "user:ivan"],
+            vec!["acl", "user:ivan", "public"],
+            vec!["acl", "user:ivan", "Default"],
+            vec!["acl", "user:ivan", "default", "extra"],
+            vec!["acl", "alice", "default"],
+        ] {
+            let mut api = MockApi::new(&[]);
+            let (code, _, _) = invoke(&args, &map_file, &mut api);
+            ensure(
+                code == EXIT_CONFIG && api.calls.is_empty(),
+                &format!("arguments {args:?} were accepted"),
+            )?;
+        }
+        for (answer, what) in [
+            (
+                acl_answer(CLIENT_A, ACL_GROUP_DEFAULT),
+                "an answer for another group",
+            ),
+            (api_error(CLIENT_DOES_NOT_EXIST), "a refusal"),
+        ] {
+            let mut api = MockApi::new(&[answer]);
+            let (code, _, _) = invoke(&["acl", "user:ivan", "isolated"], &map_file, &mut api);
+            ensure(code == EXIT_FAILURE, &format!("{what} was accepted"))?;
+        }
+        let mut api = MockApi::new(&[(404, json!({}))]);
+        let (code, _, stderr) = invoke(&["acl", "user:ivan", "isolated"], &map_file, &mut api);
+        ensure(
+            code == EXIT_FAILURE && stderr == format!("{ACL_UNSUPPORTED_MESSAGE}\n"),
+            &format!("acl on a server without ACL groups: {stderr}"),
+        )?;
+
+        // an explicit group settles a pending record, so a later issue keeps it
+        let mia = "66666666-6666-6666-6666-666666666666";
+        let mia_path = dir.join("mia.jwt").to_string_lossy().to_string();
+        let mut api = MockApi::new(&[auth_ok(mia), (500, json!({}))]);
+        invoke_with(
+            &["provision", "user:mia", &mia_path],
+            &map_file,
+            ACL_GROUP_ISOLATED,
+            &mut api,
+        );
+        ensure(
+            pending(&map_file)? == ["user:mia"],
+            "the failed group is not recorded",
+        )?;
+        let mut api = MockApi::new(&[acl_answer(mia, ACL_GROUP_DEFAULT)]);
+        let (code, _, _) = invoke(&["acl", "user:mia", "default"], &map_file, &mut api);
+        ensure(
+            code == EXIT_OK && pending(&map_file)?.is_empty(),
+            "acl does not settle a pending record",
+        )?;
+        let mut api = MockApi::new(&[auth_ok(mia)]);
+        let (code, _, _) = invoke_with(
+            &["provision", "user:mia", &mia_path],
+            &map_file,
+            ACL_GROUP_ISOLATED,
+            &mut api,
+        );
+        ensure(
+            code == EXIT_OK && api.calls.len() == 1,
+            "a settled group is overridden on the next issue",
+        )?;
+
+        // remove drops a pending record with its mapping
+        let noor = "77777777-7777-7777-7777-777777777777";
+        let noor_path = dir.join("noor.jwt").to_string_lossy().to_string();
+        let mut api = MockApi::new(&[auth_ok(noor), (500, json!({}))]);
+        invoke_with(
+            &["provision", "user:noor", &noor_path],
+            &map_file,
+            ACL_GROUP_ISOLATED,
+            &mut api,
+        );
+        let mut api = MockApi::new(&[(200, json!({}))]);
+        let (code, _, _) = invoke(&["remove", "user:noor"], &map_file, &mut api);
+        ensure(
+            code == EXIT_OK && pending(&map_file)?.is_empty(),
+            "remove keeps a pending record",
+        )?;
+
+        // a pending_acl that is not a list of distinct mapped keys is refused untouched
+        let pending_map = dir.join("pending.json");
+        for map in [
+            json!({ "version": 1, "clients": {}, "pending_acl": ["user:x"] }),
+            json!({ "version": 1, "clients": { "user:x": CLIENT_A }, "pending_acl": ["user:x", "user:x"] }),
+            json!({ "version": 1, "clients": { "user:x": CLIENT_A }, "pending_acl": "user:x" }),
+            json!({ "version": 1, "clients": { "user:x": CLIENT_A }, "pending_acl": [1] }),
+        ] {
+            let text = map.to_string();
+            write_private_atomically(&pending_map, text.as_bytes())?;
+            let mut api = MockApi::new(&[]);
+            let (code, _, _) = invoke(&["provision", "user:x", &jwt_path], &pending_map, &mut api);
+            ensure(
+                code == EXIT_CONFIG
+                    && fs::read_to_string(&pending_map)? == text
+                    && api.calls.is_empty(),
+                &format!("the map {text} was accepted"),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The unmapped-key and 404 lines.
+    fn failure_text_checks(dir: &Path) -> Result<(), ToolError> {
+        let map_file = dir.join("texts.json");
+        for args in [
+            vec!["cap", "user:nobody", "--monthly", "1"],
+            vec!["usage", "user:nobody"],
+            vec!["remove", "user:nobody"],
+            vec!["acl", "user:nobody", "default"],
+        ] {
+            let mut api = MockApi::new(&[]);
+            let (code, _, stderr) = invoke(&args, &map_file, &mut api);
+            ensure(
+                code == EXIT_CONFIG
+                    && stderr == format!("{UNMAPPED_MESSAGE}\n")
+                    && api.calls.is_empty(),
+                &format!("{args:?} for an unmapped key: {stderr}"),
+            )?;
+        }
+        let olga_path = dir.join("olga.jwt").to_string_lossy().to_string();
+        let mut api = MockApi::new(&[auth_ok(CLIENT_A)]);
+        invoke(&["provision", "user:olga", &olga_path], &map_file, &mut api);
+        for (args, route) in [
+            (vec!["cap", "user:olga", "--monthly", "1"], CAP_PATH),
+            (vec!["usage", "user:olga"], CAP_PATH),
+            (vec!["usage-all"], CAPS_PATH),
+        ] {
+            let mut api = MockApi::new(&[(404, json!({}))]);
+            let (code, _, stderr) = invoke(&args, &map_file, &mut api);
+            ensure(
+                code == EXIT_FAILURE
+                    && stderr
+                        == format!(
+                            "{route} answered 404: the server predates the data-cap routes\n"
+                        ),
+                &format!("{args:?} on a server without the cap routes: {stderr}"),
             )?;
         }
         Ok(())

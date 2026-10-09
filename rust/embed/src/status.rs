@@ -187,22 +187,34 @@ pub fn client_limit_text(retry_time: i64) -> String {
 }
 
 /// Decimal units with one decimal, because data plans and the Embed plan's monthly data budget are
-/// sold in them: `0 B`, `999 B`, `1.0 kB`, `1.2 GB`. Values round to the nearest tenth with ties to
-/// even, as Go's `%.1f` does: 1250 bytes (1.25 kB) is `1.2 kB` and 1750 bytes is `1.8 kB`. Rust's
-/// `{:.1}` rounds the exact binary value that way. A value that rounds to 1000.0 moves to the next
-/// unit.
+/// sold in them: `0 B`, `999 B`, `1.0 kB`, `1.2 GB`. The tenths round half to even on the exact
+/// integer, never on a binary fraction, so 1050 bytes is `1.0 kB` and 1150 bytes `1.2 kB`; a value
+/// that rounds to 1000.0 moves to the next unit, so 999999 bytes is `1.0 MB`.
 pub fn format_byte_count(byte_count: u64) -> String {
     if byte_count < 1000 {
         return format!("{byte_count} B");
     }
     let units = ["kB", "MB", "GB", "TB", "PB", "EB"];
-    let mut value = byte_count as f64 / 1000.0;
+    // the bytes in a tenth of the unit
+    let mut tenth: u64 = 100;
     let mut unit_index = 0;
-    while unit_index < units.len() - 1 && 1000.0 <= (value * 10.0).round_ties_even() / 10.0 {
-        value /= 1000.0;
+    loop {
+        let mut tenths = byte_count / tenth;
+        let remainder = byte_count % tenth;
+        if tenth < 2 * remainder || (2 * remainder == tenth && tenths % 2 == 1) {
+            tenths += 1;
+        }
+        if tenths < 10000 || unit_index == units.len() - 1 {
+            return format!("{}.{} {}", tenths / 10, tenths % 10, units[unit_index]);
+        }
+        tenth *= 1000;
         unit_index += 1;
     }
-    format!("{value:.1} {}", units[unit_index])
+}
+
+/// The line the console app prints once the device runs (EMBED_CONTRACT.md, "Status").
+pub fn start_line(client_id: &str, instance_id: &str) -> String {
+    format!("embed client {client_id}, installation {instance_id}")
 }
 
 /// `resets YYYY-MM-DD HH:MM UTC` for a `monthly_period_end` in RFC 3339, converted to UTC with the

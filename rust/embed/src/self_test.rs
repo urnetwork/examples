@@ -32,7 +32,7 @@ use crate::{
     status::{
         CLIENT_LIMIT_STATUS_EXCEEDED, CLIENT_LIMIT_STATUS_NONE, DataField, EmbedStatus,
         STATUS_REPEAT_INTERVAL, StatusInputs, StatusLines, client_limit_text, data_field_text,
-        format_byte_count, parse_rfc3339, reset_time_text, status_text,
+        format_byte_count, parse_rfc3339, reset_time_text, start_line, status_text,
     },
     token::{TokenError, TokenServer, fetch_client_jwt, parse_token_answer},
 };
@@ -67,6 +67,7 @@ pub const CHECKS: &[(&str, Check)] = &[
     ("status line cadence", check_status_line_cadence),
     ("state files", check_state_files),
     ("configuration", check_configuration),
+    ("start line", check_start_line),
 ];
 
 /// Runs every check and returns the first failure.
@@ -109,23 +110,40 @@ fn inputs(cap_reading: CapReading, providers_added: i64) -> StatusInputs {
     }
 }
 
-/// Byte counts use decimal units with one decimal, rounded to the nearest tenth with ties to even,
-/// moving to the next unit when the rounded value reaches 1000.0.
+/// The start line that the console app prints once the device runs.
+pub fn check_start_line() -> CheckResult {
+    let client_id = "11111111-1111-1111-1111-111111111111";
+    let instance_id = "33333333-3333-3333-3333-333333333333";
+    let line = start_line(client_id, instance_id);
+    if line != format!("embed client {client_id}, installation {instance_id}") {
+        return Err(format!("the start line is {line:?}"));
+    }
+    Ok(())
+}
+
+/// Byte counts use decimal units with one decimal, rounded to the nearest tenth with ties to even
+/// on the exact integer, moving to the next unit when the rounded value reaches 1000.0.
 pub fn check_format_byte_count() -> CheckResult {
     let cases: &[(u64, &str)] = &[
         (0, "0 B"),
         (999, "999 B"),
         (1000, "1.0 kB"),
         (999949, "999.9 kB"),
-        // exact halves round to the even tenth: 1.25 kB and 1.75 kB
+        // exact halves round to the even tenth on the integer; rounding the binary value of 1.05,
+        // just above 1.05, would give 1.1
+        (1050, "1.0 kB"),
+        (1150, "1.2 kB"),
         (1250, "1.2 kB"),
         (1750, "1.8 kB"),
-        // rounds to 1000.0 kB: the next unit
+        // 999.95 kB ties to the even 1000.0 kB and moves to the next unit, as does 999.999 kB
+        (999950, "1.0 MB"),
         (999999, "1.0 MB"),
         (1234567890, "1.2 GB"),
         (5000000000, "5.0 GB"),
         (10000000000, "10.0 GB"),
         (3000000000000, "3.0 TB"),
+        (9223372036854775807, "9.2 EB"),
+        (u64::MAX, "18.4 EB"),
     ];
     for &(byte_count, text) in cases {
         let formatted = format_byte_count(byte_count);

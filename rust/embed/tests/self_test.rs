@@ -91,7 +91,12 @@ fn configuration() {
 }
 
 #[test]
+fn start_line() {
+    check(self_test::check_start_line());
+}
+
+#[test]
 fn every_check_runs_in_the_self_test() {
-    assert_eq!(self_test::CHECKS.len(), 16);
+    assert_eq!(self_test::CHECKS.len(), 17);
     check(self_test::run_self_test());
 }

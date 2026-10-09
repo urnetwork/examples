@@ -21,7 +21,7 @@ use urnetwork_embed::{
     self_test,
     session::{self, DeviceInfo, EmbedObserver, EmbedSession, RunEnd, RunEvent},
     state::{LOGS_DIR_NAME, STATE_DIR_ENV},
-    status::{EmbedStatus, StatusLines},
+    status::{EmbedStatus, StatusLines, start_line},
     version,
 };
 
@@ -181,11 +181,7 @@ fn run_embed() -> i32 {
             return EXIT_FAILURE;
         }
     };
-    println!(
-        "embed client {}, installation {}",
-        session.client_id(),
-        session.instance_id()
-    );
+    println!("{}", start_line(session.client_id(), session.instance_id()));
     println!(
         "the device carries this app's own traffic: route it with the Sockets and Messages examples"
     );
