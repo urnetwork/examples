@@ -7,6 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -84,8 +85,66 @@ class DataCapTest {
         )
         for (text in invalid) {
             assertNull(text, parseDataCap(text))
+            assertFalse(text, isEmbedNotEnabled(runCatching { kotlinx.serialization.json.Json.parseToJsonElement(text) }.getOrNull()))
         }
     }
+
+    /** The Embed-not-enabled refusal is no cap object, and is recognized. */
+    @Test
+    fun embedNotEnabledRefusal() {
+        val refusal = """{"error": {"message": "Embed isn't enabled for this network."}}"""
+        assertNull(parseDataCap(refusal))
+        assertTrue(isEmbedNotEnabled(kotlinx.serialization.json.Json.parseToJsonElement(refusal)))
+        assertFalse(isEmbedNotEnabled(kotlinx.serialization.json.Json.parseToJsonElement("""{"error": "Embed isn't enabled for this network."}""")))
+        assertFalse(isEmbedNotEnabled(null))
+    }
+
+    /** The Embed-not-enabled refusal clears the last reading; another failure keeps it. */
+    @Test
+    fun embedNotEnabledClearsTheLastReading() {
+        val readings = DataCapReadings()
+        val cap = testCap(monthlyByteLimit = 5000000000, monthlyUsedByteCount = 5000000000, capped = true, cappedReason = cappedReasonMonthly)
+        readings.record(DataCapReadResult.Read(cap))
+        readings.record(DataCapReadResult.Failed)
+        assertEquals(DataCapReading.Read(cap), readings.current)
+        readings.record(DataCapReadResult.EmbedNotEnabled)
+        assertEquals(DataCapReading.Unavailable, readings.current)
+        assertEquals("unavailable", dataFieldText(readings.current, monthly = true))
+        assertEquals("unavailable", dataFieldText(readings.current, monthly = false))
+        assertEquals("connected", embedStatus(EmbedStatusInputs(started = true, providersAdded = 3, capReading = readings.current)))
+    }
+
+    /** The cap read against a loopback stand-in: the client JWT as the bearer, and each outcome. */
+    @Test
+    fun capReadOutcomes() {
+        StandInServer { StandInAnswer(200, """{"client_id": "c", "monthly_byte_limit": 7}""") }.use { server ->
+            assertEquals(DataCapReadResult.Read(testCapOf(7)), readDataCapResult(server.origin, "client.jwt.token"))
+            assertEquals("/network/client-data-cap", server.requests[0].path)
+            assertEquals("Bearer client.jwt.token", server.requests[0].headers["authorization"])
+        }
+        for (answer in listOf(StandInAnswer(404, """{"error": {"message": "not found"}}"""), StandInAnswer(200, """{"error": {"message": "no permission"}}"""))) {
+            StandInServer { answer }.use { server ->
+                assertEquals(DataCapReadResult.Failed, readDataCapResult(server.origin, "client.jwt.token"))
+                assertThrows(DataCapReadException::class.java) { readDataCap(server.origin, "client.jwt.token") }
+            }
+        }
+        StandInServer { StandInAnswer(200, """{"error": {"message": "Embed isn't enabled for this network."}}""") }.use { server ->
+            assertEquals(DataCapReadResult.EmbedNotEnabled, readDataCapResult(server.origin, "client.jwt.token"))
+            assertThrows(EmbedNotEnabledException::class.java) { readDataCap(server.origin, "client.jwt.token") }
+        }
+    }
+
+    /** The cap object that {"client_id": "c", "monthly_byte_limit": monthly} parses to. */
+    private fun testCapOf(monthly: Long): DataCap = DataCap(
+        clientId = "c",
+        monthlyByteLimit = monthly,
+        monthlyUsedByteCount = 0,
+        monthlyPeriodEnd = null,
+        totalByteLimit = null,
+        totalUsedByteCount = 0,
+        capped = false,
+        cappedReason = "",
+    )
 
     /** The first failure reads as unavailable; a later failure keeps the last value. */
     @Test

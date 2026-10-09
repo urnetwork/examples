@@ -24,6 +24,10 @@ const val clientDataCapPath = "/network/client-data-cap"
 const val cappedReasonMonthly = "monthly"
 const val cappedReasonTotal = "total"
 
+// The server refuses the cap read with this message while the team has not enabled Embed for the
+// network (EMBED_CONTRACT.md, "Embed enablement"). The refusal clears the last reading.
+const val embedNotEnabledMessage = "Embed isn't enabled for this network."
+
 private const val connectTimeoutMillis = 15 * 1000
 private const val readTimeoutMillis = 30 * 1000
 
@@ -52,17 +56,29 @@ sealed interface DataCapReading {
     /** Before the first cap read finishes. */
     data object Checking : DataCapReading
 
-    /** The first cap read failed. */
+    /** The first cap read failed, or the Embed-not-enabled refusal cleared the reading. */
     data object Unavailable : DataCapReading
 
     /** A cap object, kept through later failed reads. */
     data class Read(val cap: DataCap) : DataCapReading
 }
 
+/** The outcome of one cap read. */
+sealed interface DataCapReadResult {
+    /** A cap object. */
+    data class Read(val cap: DataCap) : DataCapReadResult
+
+    /** The Embed-not-enabled refusal, which clears the last reading. */
+    data object EmbedNotEnabled : DataCapReadResult
+
+    /** Any other failure, which keeps the last reading. */
+    data object Failed : DataCapReadResult
+}
+
 /**
  * The latest cap reading with the contract's failure rule: the first failure reads as unavailable,
- * and a later failure keeps the last value. Safe for concurrent use: the worker writes it and the
- * activity reads it.
+ * a later failure keeps the last value, and the Embed-not-enabled refusal clears it. Safe for
+ * concurrent use: the worker writes it and the activity reads it.
  */
 class DataCapReadings {
     @Volatile
@@ -85,10 +101,40 @@ class DataCapReadings {
             current = DataCapReading.Unavailable
         }
     }
+
+    /**
+     * Records the Embed-not-enabled refusal: it clears the last reading, so both data fields read
+     * unavailable and the status rules see no cap reading.
+     */
+    fun notEnabled() {
+        current = DataCapReading.Unavailable
+    }
+
+    /** Records one cap read's outcome. */
+    fun record(result: DataCapReadResult) {
+        when (result) {
+            is DataCapReadResult.Read -> succeeded(result.cap)
+            DataCapReadResult.EmbedNotEnabled -> notEnabled()
+            DataCapReadResult.Failed -> failed()
+        }
+    }
 }
 
 /** A failed cap read; a server without the cap routes answers 404, which is one. */
 class DataCapReadException(message: String) : Exception(message)
+
+/** The cap read answered the Embed-not-enabled refusal. */
+class EmbedNotEnabledException : Exception(embedNotEnabledMessage)
+
+/**
+ * Whether JSON is the Embed-not-enabled refusal,
+ * {"error": {"message": "Embed isn't enabled for this network."}}.
+ */
+fun isEmbedNotEnabled(json: JsonElement?): Boolean {
+    val error = (json as? JsonObject)?.get("error") as? JsonObject ?: return false
+    val message = error["message"] as? JsonPrimitive ?: return false
+    return message.isString && message.content == embedNotEnabledMessage
+}
 
 /**
  * A cap object from its JSON, or null when the JSON is not one: an error answer, a limit that is
@@ -171,7 +217,8 @@ fun readBounded(stream: InputStream, limit: Int): ByteArray {
 /**
  * Reads this installation's caps with its client JWT: GET /network/client-data-cap, which answers
  * with the client's own cap object. Throws DataCapReadException for any failure, including a 404
- * from a server without the cap routes. Never log the token.
+ * from a server without the cap routes, and EmbedNotEnabledException for the Embed-not-enabled
+ * refusal. Never log the token.
  */
 fun readDataCap(apiUrl: String, clientJwt: String): DataCap {
     val connection = try {
@@ -192,10 +239,28 @@ fun readDataCap(apiUrl: String, clientJwt: String): DataCap {
             throw DataCapReadException("cap read answered HTTP $status")
         }
         val text = connection.inputStream.use { readBounded(it, answerByteLimit) }.decodeToString()
-        return parseDataCap(text) ?: throw DataCapReadException("cap read answered something that is not a cap object")
+        val json = try {
+            Json.parseToJsonElement(text)
+        } catch (e: Exception) {
+            null
+        }
+        if (isEmbedNotEnabled(json)) {
+            throw EmbedNotEnabledException()
+        }
+        return parseDataCap(json) ?: throw DataCapReadException("cap read answered something that is not a cap object")
     } catch (e: IOException) {
         throw DataCapReadException("cap read: ${e.message}")
     } finally {
         connection.disconnect()
     }
 }
+
+/** Reads this installation's caps as a [DataCapReadResult]. */
+fun readDataCapResult(apiUrl: String, clientJwt: String): DataCapReadResult =
+    try {
+        DataCapReadResult.Read(readDataCap(apiUrl, clientJwt))
+    } catch (e: EmbedNotEnabledException) {
+        DataCapReadResult.EmbedNotEnabled
+    } catch (e: DataCapReadException) {
+        DataCapReadResult.Failed
+    }

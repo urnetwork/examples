@@ -115,6 +115,35 @@ class EmbedStatusTest {
                 EmbedStatusInputs(started = true, providersAdded = 2, capReading = DataCapReading.Unavailable),
                 "status: connected | data this month: unavailable | data total: unavailable",
             ),
+            // the first reading answers the Embed-not-enabled refusal
+            Case(
+                EmbedStatusInputs(
+                    started = true,
+                    providersAdded = 2,
+                    capReading = DataCapReadings().apply { record(DataCapReadResult.EmbedNotEnabled) }.current,
+                ),
+                "status: connected | data this month: unavailable | data total: unavailable",
+            ),
+            // a capped monthly reading, then the refusal
+            Case(
+                EmbedStatusInputs(
+                    started = true,
+                    providersAdded = 2,
+                    capReading = DataCapReadings().apply {
+                        succeeded(
+                            testCap(
+                                monthlyByteLimit = 5000000000,
+                                monthlyUsedByteCount = 5000000000,
+                                monthlyPeriodEnd = "2026-11-01T00:00:00Z",
+                                capped = true,
+                                cappedReason = cappedReasonMonthly,
+                            ),
+                        )
+                        record(DataCapReadResult.EmbedNotEnabled)
+                    }.current,
+                ),
+                "status: connected | data this month: unavailable | data total: unavailable",
+            ),
             Case(
                 EmbedStatusInputs(
                     started = true,

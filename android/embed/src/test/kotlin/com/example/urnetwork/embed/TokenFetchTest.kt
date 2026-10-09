@@ -37,16 +37,16 @@ private const val instanceId = "22222222-2222-2222-2222-222222222222"
 private const val demoSession = "demo-session-0123456789abcdef0123456789abcdef"
 
 /** One request the stand-in received. */
-private class StandInRequest(val method: String, val path: String, val headers: Map<String, String>, val body: String)
+internal class StandInRequest(val method: String, val path: String, val headers: Map<String, String>, val body: String)
 
 /** One answer the stand-in sends. */
-private class StandInAnswer(val status: Int, val body: String)
+internal class StandInAnswer(val status: Int, val body: String)
 
 /**
  * A stand-in token server: one HTTP/1.1 request per connection on the loopback interface, each
  * answered by answer and recorded in requests.
  */
-private class StandInServer(private val answer: (StandInRequest) -> StandInAnswer) : AutoCloseable {
+internal class StandInServer(private val answer: (StandInRequest) -> StandInAnswer) : AutoCloseable {
     private val serverSocket = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
 
     /** The origin to configure as the token server URL. */

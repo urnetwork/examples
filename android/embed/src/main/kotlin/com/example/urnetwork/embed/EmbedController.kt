@@ -285,20 +285,13 @@ class EmbedController(context: Context) {
         if (id != runId) {
             return
         }
-        val cap = try {
-            readDataCap(defaultApiUrl, clientJwt)
-        } catch (e: DataCapReadException) {
-            null
-        }
+        val result = readDataCapResult(defaultApiUrl, clientJwt)
         if (id != runId) {
             // the run ended while the read was in flight
             return
         }
-        if (cap != null) {
-            capReadings.succeeded(cap)
-        } else {
-            capReadings.failed()
-        }
+        // a later failure keeps the last reading; the Embed-not-enabled refusal clears it
+        capReadings.record(result)
     }
 
     /** Reads the caps again soon after a contract status change; any thread (an sdk listener). */
