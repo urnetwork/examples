@@ -415,3 +415,26 @@ func TestEmbedCredentialListeners(t *testing.T) {
 		t.Fatal("the logout did not end the run")
 	}
 }
+
+// The state directory errors name the mode's own setting.
+func TestCheckStateDirForNamesTheSetting(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, stateDir := range []string{"", "relative/state", file} {
+		for _, variable := range []string{"URNETWORK_EMBED_STATE_DIR", "URNETWORK_PROVIDER_STATE_DIR"} {
+			err := checkStateDirFor(stateDir, variable)
+			if err == nil || !strings.Contains(err.Error(), variable) {
+				t.Fatalf("the error for %q does not name %s: %v", stateDir, variable, err)
+			}
+		}
+	}
+	private := t.TempDir()
+	if err := os.Chmod(private, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkStateDirFor(private, "URNETWORK_EMBED_STATE_DIR"); err != nil {
+		t.Fatalf("a private directory is refused: %v", err)
+	}
+}
