@@ -245,7 +245,7 @@ mod tests {
     use std::path::PathBuf;
 
     use urnetwork_embed::{
-        caps::CapReading,
+        caps::{CapReadError, CapReading},
         self_test::{self_test_jwt, test_cap},
         stand_in::{StandInAnswer, StandInServer},
         state::{CLIENT_JWT_FILE_NAME, load_client_jwt},
@@ -368,6 +368,16 @@ mod tests {
         state.started();
         assert_eq!(state.status_text(), "connecting");
         state.identified(TEST_CLIENT_ID, "22222222-2222-2222-2222-222222222222");
+        // a capped monthly reading, then the Embed-not-enabled refusal, which clears it
+        let mut refused = CapReading::Read(test_cap(
+            Some(5000000000),
+            5000000000,
+            None,
+            0,
+            "monthly",
+            "2026-11-01T00:00:00Z",
+        ));
+        refused.apply(Err(CapReadError::EmbedNotEnabled));
         let cases = [
             (
                 StatusInputs {
@@ -415,6 +425,14 @@ mod tests {
                     "unavailable",
                     "unavailable",
                 ],
+            ),
+            (
+                StatusInputs {
+                    cap_reading: refused,
+                    providers_added: 3,
+                    ..StatusInputs::started()
+                },
+                ["connected", "unavailable", "unavailable"],
             ),
         ];
         for (inputs, [status, monthly, total]) in cases {
