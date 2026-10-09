@@ -35,6 +35,7 @@ import {
   parseCapObject,
   parseEmbedStatus,
   resetText,
+  startLine,
   statusLine,
   statusText,
 } from "./status.ts";
@@ -148,11 +149,16 @@ function consoleLine({clientLimitStatus = "", clientLimitRetryTime = 0, cap = nu
 // The byte vectors: decimal units, one decimal, ties to even, the next unit at
 // 1000.0.
 export function checkDataAmounts(): void {
-  const vectors: [number, string][] = [
+  const vectors: [number | bigint, string][] = [
     [0, "0 B"], [999, "999 B"], [1000, "1.0 kB"], [999949, "999.9 kB"],
-    [1250, "1.2 kB"], [1750, "1.8 kB"],
-    [999999, "1.0 MB"],
+    // exact halves round to even on the integer; rounding the binary value of
+    // 1.05, just above 1.05, would give 1.1
+    [1050, "1.0 kB"], [1150, "1.2 kB"], [1250, "1.2 kB"], [1750, "1.8 kB"],
+    // 999.95 kB ties to the even 1000.0 kB and moves to the next unit, as does 999.999 kB
+    [999950, "1.0 MB"], [999999, "1.0 MB"],
     [1234567890, "1.2 GB"], [5000000000, "5.0 GB"], [10000000000, "10.0 GB"], [3000000000000, "3.0 TB"],
+    // the largest int64, exact as a bigint, and as the nearest number
+    [9223372036854775807n, "9.2 EB"], [Number.MAX_SAFE_INTEGER * 1024, "9.2 EB"],
   ];
   for (const [byteCount, text] of vectors) {
     check(formatDataAmount(byteCount) === text, `${byteCount} bytes shows ${formatDataAmount(byteCount)}, want ${text}`);
@@ -381,6 +387,9 @@ export async function checkTokenFetch(): Promise<void> {
       [{status: 409, body: '{"error":{"code":"client_limit","message":"client limit; see https://ur.io/services"}}'}, exitConfig, "409 client_limit"],
       [{status: 502, body: '{"error":{"code":"upstream","message":"api failed"}}'}, exitFailure, "502"],
       [{status: 503, body: '{"error":{"code":"busy","message":"retry"}}'}, exitFailure, "503"],
+      [{status: 404, body: "404 page not found"}, exitFailure, "404"],
+      [{status: 405, body: '{"error":{"code":"method_not_allowed","message":"use POST"}}'}, exitFailure, "405"],
+      [{status: 500, body: '{"error":{"code":"internal","message":"internal error"}}'}, exitFailure, "500"],
     ];
     for (const [answer, exitCode, name] of answers) {
       reply = answer;
@@ -500,10 +509,15 @@ export async function checkConfiguration(): Promise<void> {
   // the commands; main.ts exits with 78 (exitConfig) for a usage error, which
   // embed.test.ts checks on the real entry point
   check(parseCommand([]) === "run" && parseCommand(["run"]) === "run" && parseCommand(["--self-test"]) === "self-test" &&
-    parseCommand(["--version"]) === "version", "a command was not recognized");
-  for (const args of [["--unknown"], ["run", "extra"], ["--self-test", "--version"]]) {
+    parseCommand(["--version"]) === "version" && parseCommand(["--licenses"]) === "licenses", "a command was not recognized");
+  for (const args of [["--unknown"], ["run", "extra"], ["--self-test", "--version"], ["--licenses", "extra"]]) {
     check(parseCommand(args) === null, `${args.join(" ")} was accepted`);
   }
+}
+
+// The start line.
+export function checkStartLine(): void {
+  check(startLine(clientA, installationA) === `embed client ${clientA}, installation ${installationA}`, "the start line is not the contract's");
 }
 
 // The companion's environment and exit codes.
@@ -542,6 +556,7 @@ export const selfTestChecks: (() => void | Promise<void>)[] = [
   checkStateFiles,
   checkConfiguration,
   checkCompanion,
+  checkStartLine,
 ];
 
 // Runs every check and rejects with the first failure.

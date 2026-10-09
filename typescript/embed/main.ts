@@ -7,8 +7,10 @@
 // native companion (javascript/integration/companion, embed mode) owns the
 // device as this program's child process and serves its status (session.ts).
 //
-// Usage: node main.ts [run] | --self-test | --version. All installation state
-// is in the private directory named by URNETWORK_EMBED_STATE_DIR (state.ts).
+// Usage: node main.ts [run] | --self-test | --licenses | --version. --licenses
+// prints the SDK's licenses and data attributions, as JSON from the companion,
+// to publish with the app. All installation state is in the private directory
+// named by URNETWORK_EMBED_STATE_DIR (state.ts).
 //
 // Exit codes, for supervisors: 0 stopped on request, 78 configuration or
 // credential problem (restarting does not help), 1 any other failure.
@@ -16,10 +18,11 @@
 import {realpathSync} from "node:fs";
 import {fileURLToPath} from "node:url";
 import {parseCommand, usage} from "./command.ts";
-import {type Environment, checkCompanionPath, companionPath, companionVersion} from "./companion.ts";
+import {type Environment, checkCompanionPath, companionLicenses, companionPath, companionVersion} from "./companion.ts";
 import {runSelfTest} from "./selftest.ts";
 import {EmbedSession, type EmbedSettings, type Installation, type LineWriter, exitConfig, exitFailure, exitStopped, loadEmbedSettings, obtainInstallation} from "./session.ts";
 import {ConfigurationError} from "./state.ts";
+import {startLine} from "./status.ts";
 import {type FetchFunction, TokenError} from "./token.ts";
 
 // The options of run, for tests.
@@ -60,13 +63,13 @@ export async function run(args: readonly string[], {environment = process.env, l
     log("embed self-test passed");
     return exitStopped;
   }
-  if (command === "version") {
+  if (command === "version" || command === "licenses") {
     const path = companionPath(environment);
     try {
       await checkCompanionPath(path);
-      log(await companionVersion(path));
-    } catch (versionError) {
-      error(errorMessage(versionError));
+      log(await (command === "version" ? companionVersion(path) : companionLicenses(path)));
+    } catch (companionError) {
+      error(errorMessage(companionError));
       return exitFailure;
     }
     return exitStopped;
@@ -105,7 +108,7 @@ export async function run(args: readonly string[], {environment = process.env, l
     fetchFunction,
   });
   try {
-    log(`embed client ${installation.clientId}, installation ${installation.instanceId}`);
+    log(startLine(installation.clientId, installation.instanceId));
     await session.start(environment);
     return await session.run(controller.signal);
   } catch (runError) {

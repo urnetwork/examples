@@ -89,36 +89,36 @@ export function normalizeId(text: unknown): string {
   return typeof text === "string" && uuidPattern.test(text) ? text.toLowerCase() : "";
 }
 
-// The value rounded to tenths, as a count of tenths, with ties to even as Go's
-// %.1f does: the reference rounds the exact value of the float64, and so does
-// toFixed, except that toFixed rounds an exact tie up. An exact tie at the
-// tenths is a float64 whose quarter count is odd (x.25 or x.75), so only that
-// case needs the tie rule.
-function roundTenthsHalfEven(value: number): number {
-  const quarters = value * 4;
-  if (Number.isInteger(quarters) && Math.abs(quarters % 2) === 1) {
-    const lower = Math.floor(value * 10);
-    return lower % 2 === 0 ? lower : lower + 1;
-  }
-  const [whole, tenth] = value.toFixed(1).split(".");
-  return Number(whole) * 10 + Number(tenth);
-}
-
 // Decimal units with one decimal, because data plans are sold in them: "0 B",
-// "999 B", "1.0 kB", "1.2 GB". A value that rounds to 1000.0 moves to the next
-// unit, so 999999 bytes is "1.0 MB".
-export function formatDataAmount(byteCount: number): string {
+// "999 B", "1.0 kB", "1.2 GB". The tenths round half to even on the exact
+// integer (bigint), never on a binary fraction, so 1050 bytes is "1.0 kB" and
+// 1150 bytes "1.2 kB"; a value that rounds to 1000.0 moves to the next unit,
+// so 999999 bytes is "1.0 MB".
+export function formatDataAmount(byteCount: number | bigint): string {
   if (byteCount < 1000) {
     return `${byteCount} B`;
   }
   const units = ["kB", "MB", "GB", "TB", "PB", "EB"];
-  let unitIndex = 0;
-  let tenths = roundTenthsHalfEven(byteCount / 1000);
-  while (unitIndex < units.length - 1 && 10000 <= tenths) {
-    unitIndex += 1;
-    tenths = roundTenthsHalfEven(byteCount / 1000 ** (unitIndex + 1));
+  const bytes = BigInt(byteCount);
+  // the bytes in a tenth of the unit
+  let tenth = 100n;
+  for (let unitIndex = 0; ; unitIndex += 1) {
+    let tenths = bytes / tenth;
+    const remainder = bytes % tenth;
+    if (tenth < 2n * remainder || (2n * remainder === tenth && tenths % 2n === 1n)) {
+      tenths += 1n;
+    }
+    if (tenths < 10000n || unitIndex === units.length - 1) {
+      return `${tenths / 10n}.${tenths % 10n} ${units[unitIndex]}`;
+    }
+    tenth *= 1000n;
   }
-  return `${Math.floor(tenths / 10)}.${tenths % 10} ${units[unitIndex]}`;
+}
+
+// The line the console app prints once the device runs (EMBED_CONTRACT.md,
+// "Status").
+export function startLine(clientId: string, instanceId: string): string {
+  return `embed client ${clientId}, installation ${instanceId}`;
 }
 
 // The time an RFC 3339 timestamp names, in unix milliseconds rounded up to the
