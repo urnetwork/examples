@@ -315,6 +315,14 @@ static bool check_status_lines(char *failure, size_t capacity) {
       reading(-1, 0, 10000000000, 10000000000, true, "total", "");
   ur_embed_caps paused = reading(0, 0, -1, 0, true, "monthly", "");
   ur_embed_caps open = reading(5000000000, 0, -1, 0, false, "", "");
+  /* the first reading answers the Embed-not-enabled refusal; and a capped
+   * monthly reading, then the refusal */
+  ur_embed_caps refused;
+  ur_embed_caps_init(&refused);
+  ur_embed_caps_clear(&refused);
+  ur_embed_caps cleared = reading(5000000000, 5000000000, -1, 0, true,
+                                  "monthly", "2026-11-01T00:00:00Z");
+  ur_embed_caps_clear(&cleared);
   const struct {
     const char *client_limit_status;
     int64_t retry_time;
@@ -328,6 +336,12 @@ static bool check_status_lines(char *failure, size_t capacity) {
        "status: connected | data this month: 1.2 GB of 5.0 GB | data total: no "
        "cap"},
       {"", 0, &unavailable, 1,
+       "status: connected | data this month: unavailable | data total: "
+       "unavailable"},
+      {"", 0, &refused, 1,
+       "status: connected | data this month: unavailable | data total: "
+       "unavailable"},
+      {"", 0, &cleared, 1,
        "status: connected | data this month: unavailable | data total: "
        "unavailable"},
       {"", 0, &monthly, 1,
@@ -412,7 +426,8 @@ static bool check_status_rules(char *failure, size_t capacity) {
 }
 
 /* The data fields: checking, unavailable, a later failure keeping the last
- * value, no cap for a null limit even with a used count, and used of limit. */
+ * value, the Embed-not-enabled refusal clearing it, no cap for a null limit
+ * even with a used count, and used of limit. */
 static bool check_data_fields(char *failure, size_t capacity) {
   ur_embed_caps caps;
   ur_embed_caps_init(&caps);
@@ -445,6 +460,14 @@ static bool check_data_fields(char *failure, size_t capacity) {
   ur_embed_data_field(&caps, false, text, sizeof(text));
   if (strcmp(text, "1.2 kB of 2.0 kB"))
     return fail(failure, capacity, "a later failure: \"%s\"", text);
+  ur_embed_caps_clear(&caps);
+  char monthly_text[80];
+  ur_embed_data_field(&caps, true, monthly_text, sizeof(monthly_text));
+  ur_embed_data_field(&caps, false, text, sizeof(text));
+  if (strcmp(monthly_text, "unavailable") || strcmp(text, "unavailable"))
+    return fail(failure, capacity,
+                "the Embed-not-enabled refusal: \"%s\", \"%s\"",
+                monthly_text, text);
   return true;
 }
 
@@ -509,9 +532,16 @@ static bool check_cap_object(char *failure, size_t capacity) {
                            "null",
                            "not json"};
   for (size_t i = 0; i < sizeof(refused) / sizeof(*refused); i++) {
-    if (ur_embed_parse_cap(refused[i], strlen(refused[i]), &cap))
+    if (ur_embed_parse_cap(refused[i], strlen(refused[i]), &cap) ||
+        ur_embed_cap_not_enabled(refused[i], strlen(refused[i])))
       return fail(failure, capacity, "%s read as a cap object", refused[i]);
   }
+  /* the Embed-not-enabled refusal is no cap object, and is recognized */
+  const char *not_enabled =
+      "{\"error\":{\"message\":\"Embed isn't enabled for this network.\"}}";
+  if (ur_embed_parse_cap(not_enabled, strlen(not_enabled), &cap) ||
+      !ur_embed_cap_not_enabled(not_enabled, strlen(not_enabled)))
+    return fail(failure, capacity, "the Embed-not-enabled refusal misread");
   return true;
 }
 
@@ -736,7 +766,8 @@ done:
   return ok;
 }
 
-/* The cap read: the client JWT as the bearer, and failed readings. */
+/* The cap read: the client JWT as the bearer, failed readings, and the
+ * Embed-not-enabled refusal. */
 static bool check_cap_read(char *failure, size_t capacity) {
   char error[UR_EMBED_ERROR_CAPACITY];
   ur_embed_cap cap;
@@ -744,8 +775,8 @@ static bool check_cap_read(char *failure, size_t capacity) {
       200, "{\"client_id\":\"" CLIENT_1 "\",\"monthly_byte_limit\":0,"
            "\"monthly_used_byte_count\":0,\"capped\":true,"
            "\"capped_reason\":\"monthly\"}");
-  if (!ur_embed_read_caps(stand_in_http, &server, API_URL, CLIENT_1_JWT, &cap,
-                          error, sizeof(error)) ||
+  if (ur_embed_read_caps(stand_in_http, &server, API_URL, CLIENT_1_JWT, &cap,
+                         error, sizeof(error)) != UR_EMBED_CAP_READ_OK ||
       !cap.capped || strcmp(cap.capped_reason, "monthly"))
     return fail(failure, capacity, "a cap answer was not read: %s", error);
   if (strcmp(server.method, "GET") ||
@@ -764,9 +795,17 @@ static bool check_cap_read(char *failure, size_t capacity) {
     failing.answers[0] = failed[i];
     failing.answer_count = 1;
     if (ur_embed_read_caps(stand_in_http, &failing, API_URL, CLIENT_1_JWT,
-                           &cap, error, sizeof(error)))
+                           &cap, error, sizeof(error)) != UR_EMBED_CAP_READ_FAILED)
       return fail(failure, capacity, "failed cap answer %d was read", (int)i);
   }
+  stand_in not_enabled = one_answer(
+      200, "{\"error\":{\"message\":\"Embed isn't enabled for this network.\"}}");
+  if (ur_embed_read_caps(stand_in_http, &not_enabled, API_URL, CLIENT_1_JWT,
+                         &cap, error, sizeof(error)) !=
+          UR_EMBED_CAP_READ_NOT_ENABLED ||
+      strcmp(error, UR_EMBED_NOT_ENABLED_MESSAGE))
+    return fail(failure, capacity, "the Embed-not-enabled refusal read as \"%s\"",
+                error);
   return true;
 }
 

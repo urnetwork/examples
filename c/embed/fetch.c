@@ -218,16 +218,22 @@ ur_embed_fetch_result ur_embed_fetch_client_jwt(
 }
 
 /* Reads this client's caps with its own client JWT:
- * GET /network/client-data-cap at the api origin. False with the reason for no
- * answer, another status (a server without the cap routes answers 404) or an
- * answer that is not a cap object. */
-bool ur_embed_read_caps(ur_embed_http_fn http, void *http_context,
-                        const char *api_url, const char *client_jwt,
-                        ur_embed_cap *cap, char *error, size_t capacity) {
+ * GET /network/client-data-cap at the api origin. Failed with the reason for
+ * no answer, another status (a server without the cap routes answers 404) or
+ * an answer that is not a cap object; not enabled for the Embed-not-enabled
+ * refusal. */
+ur_embed_cap_read_result ur_embed_read_caps(ur_embed_http_fn http,
+                                            void *http_context,
+                                            const char *api_url,
+                                            const char *client_jwt,
+                                            ur_embed_cap *cap, char *error,
+                                            size_t capacity) {
   char url[UR_EMBED_URL_CAPACITY];
   if (!ur_embed_origin_url(api_url, UR_EMBED_CLIENT_DATA_CAP_PATH, url,
-                           sizeof(url)))
-    return fail(error, capacity, "the API URL is not an HTTPS origin");
+                           sizeof(url))) {
+    fail(error, capacity, "the API URL is not an HTTPS origin");
+    return UR_EMBED_CAP_READ_FAILED;
+  }
   ur_embed_http_request request = {
       .method = "GET",
       .url = url,
@@ -237,18 +243,25 @@ bool ur_embed_read_caps(ur_embed_http_fn http, void *http_context,
   ur_embed_http_response response = {0};
   char http_error[UR_EMBED_ERROR_CAPACITY];
   if (!http(http_context, &request, &response, http_error,
-            sizeof(http_error)))
-    return fail(error, capacity, "%s", http_error);
-  bool read = 200 <= response.status && response.status < 300 &&
-              ur_embed_parse_cap(response.body, response.body_length, cap);
-  if (!read) {
-    if (200 <= response.status && response.status < 300)
-      fail(error, capacity, "the answer is not a cap object");
-    else
-      fail(error, capacity, "HTTP %ld", response.status);
+            sizeof(http_error))) {
+    fail(error, capacity, "%s", http_error);
+    return UR_EMBED_CAP_READ_FAILED;
+  }
+  bool answered = 200 <= response.status && response.status < 300;
+  ur_embed_cap_read_result result = UR_EMBED_CAP_READ_FAILED;
+  if (answered && ur_embed_parse_cap(response.body, response.body_length, cap)) {
+    result = UR_EMBED_CAP_READ_OK;
+  } else if (answered && ur_embed_cap_not_enabled(response.body,
+                                                  response.body_length)) {
+    fail(error, capacity, "%s", UR_EMBED_NOT_ENABLED_MESSAGE);
+    result = UR_EMBED_CAP_READ_NOT_ENABLED;
+  } else if (answered) {
+    fail(error, capacity, "the answer is not a cap object");
+  } else {
+    fail(error, capacity, "HTTP %ld", response.status);
   }
   ur_embed_http_response_free(&response);
-  return read;
+  return result;
 }
 
 /* Whether the demo session can go in an Authorization header: printable ascii

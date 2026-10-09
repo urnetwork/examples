@@ -53,7 +53,7 @@ static struct {
   bool contract_status_changed;
   /* a finished cap read that the run loop has not applied yet */
   bool cap_read_done;
-  bool cap_read_succeeded;
+  ur_embed_cap_read_result cap_read_result;
   ur_embed_cap cap_reading;
   char cap_read_error[UR_EMBED_ERROR_CAPACITY];
 } callbacks = {
@@ -67,7 +67,7 @@ typedef struct {
   char *refreshed_client_jwt;
   bool contract_status_changed;
   bool cap_read_done;
-  bool cap_read_succeeded;
+  ur_embed_cap_read_result cap_read_result;
   ur_embed_cap cap_reading;
   char cap_read_error[UR_EMBED_ERROR_CAPACITY];
 } callback_work;
@@ -163,16 +163,16 @@ typedef struct {
 static void run_cap_read(cap_read_job *job) {
   ur_embed_cap cap;
   char error[UR_EMBED_ERROR_CAPACITY];
-  bool succeeded = ur_embed_read_caps(ur_embed_curl_http, NULL, job->api_url,
-                                      job->client_jwt, &cap, error,
-                                      sizeof(error));
+  ur_embed_cap_read_result result =
+      ur_embed_read_caps(ur_embed_curl_http, NULL, job->api_url,
+                         job->client_jwt, &cap, error, sizeof(error));
   memset(job->client_jwt, 0, strlen(job->client_jwt));
   free(job->client_jwt);
   free(job);
   ur_mutex_lock(&callbacks.state_lock);
   callbacks.cap_read_done = true;
-  callbacks.cap_read_succeeded = succeeded;
-  if (succeeded)
+  callbacks.cap_read_result = result;
+  if (result == UR_EMBED_CAP_READ_OK)
     callbacks.cap_reading = cap;
   else
     snprintf(callbacks.cap_read_error, sizeof(callbacks.cap_read_error), "%s",
@@ -316,7 +316,7 @@ static void take_callback_work(callback_work *work) {
   work->refreshed_client_jwt = callbacks.refreshed_client_jwt;
   work->contract_status_changed = callbacks.contract_status_changed;
   work->cap_read_done = callbacks.cap_read_done;
-  work->cap_read_succeeded = callbacks.cap_read_succeeded;
+  work->cap_read_result = callbacks.cap_read_result;
   work->cap_reading = callbacks.cap_reading;
   snprintf(work->cap_read_error, sizeof(work->cap_read_error), "%s",
            callbacks.cap_read_error);
@@ -385,12 +385,17 @@ int ur_embed_session_run(ur_embed_session *session) {
     int64_t now_millis = monotonic_millis();
     if (work.cap_read_done) {
       cap_read_running = false;
-      ur_embed_caps_apply(&session->caps,
-                          work.cap_read_succeeded ? &work.cap_reading : NULL);
-      if (!work.cap_read_succeeded && !cap_read_failing)
+      bool read = work.cap_read_result == UR_EMBED_CAP_READ_OK;
+      /* the Embed-not-enabled refusal clears the last reading; another
+       * failure keeps it */
+      if (work.cap_read_result == UR_EMBED_CAP_READ_NOT_ENABLED)
+        ur_embed_caps_clear(&session->caps);
+      else
+        ur_embed_caps_apply(&session->caps, read ? &work.cap_reading : NULL);
+      if (!read && !cap_read_failing)
         fprintf(stderr, "could not read the data caps: %s\n",
                 work.cap_read_error);
-      cap_read_failing = !work.cap_read_succeeded;
+      cap_read_failing = !read;
     }
     if (work.contract_status_changed)
       contract_cap_read_pending = true;

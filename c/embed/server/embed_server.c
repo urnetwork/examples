@@ -7,6 +7,7 @@
  *   embed-server usage-all
  *   embed-server remove <key>
  *   embed-server acl <key> default|isolated
+ *   embed-server status
  *   embed-server --self-test
  *
  * It extends the C integration allocator (../../integration/server): the same
@@ -47,14 +48,29 @@
 #define USAGE                                                                  \
   "usage: embed-server provision <key> <client-jwt-file> | cap <key> "         \
   "[--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage "   \
-  "<key> | usage-all | remove <key> | acl <key> default|isolated | "        \
-  "--self-test"
+  "<key> | usage-all | remove <key> | acl <key> default|isolated | status " \
+  "| --self-test"
 #define UNMAPPED_TEXT "no client is mapped for that key; run provision first"
 #define ACL_UNSUPPORTED_TEXT                                                   \
   "/network/client-acl-group answered 404: the server predates ACL groups"
 #define CLIENT_LIMIT_TEXT                                                      \
   "client limit reached: your network is at its client limit; see "           \
   "https://ur.io/services"
+/* The server refuses the data-cap and ACL-group routes with this message
+ * while the team has not enabled Embed for the network (EMBED_CONTRACT.md,
+ * "Embed enablement"); caps and groups set earlier stay enforced. */
+#define EMBED_NOT_ENABLED_MESSAGE "Embed isn't enabled for this network."
+/* cap, usage, usage-all and acl print this for the refusal and exit 78 */
+#define EMBED_NOT_ENABLED_TEXT                                                 \
+  "embed not enabled: Embed isn't enabled for this network; see "             \
+  "https://ur.io/services"
+/* provision prints this on stderr when the client's default ACL group stays
+ * pending because Embed isn't enabled, and exits 0 */
+#define EMBED_PENDING_TEXT                                                     \
+  "embed not enabled: the client's defaults stay pending until Embed is "     \
+  "enabled; see https://ur.io/services"
+#define EMBED_UNSUPPORTED_TEXT                                                 \
+  "/network/embed answered 404: the server predates Embed enablement"
 
 typedef struct json_object Json;
 
@@ -503,6 +519,12 @@ static bool client_limit_refusal(Json *answer) {
           true_field(error, "upgrade_required"));
 }
 
+/* Whether an answer is the Embed-not-enabled refusal. */
+static bool embed_not_enabled(answer_kind kind, Json *answer) {
+  return kind == ANSWER_REFUSED &&
+         !strcmp(refusal_message(answer), EMBED_NOT_ENABLED_MESSAGE);
+}
+
 /* Whether an answer is a cap object: a json object without an error. */
 static bool cap_object(Json *answer) {
   return answer && json_object_is_type(answer, json_type_object) &&
@@ -518,9 +540,11 @@ static bool isolated_by_default(const Tool *tool) {
 
 /* Posts client's ACL group and checks that the answer names the client and the
  * group; prints {"client_id": "...", "acl_group": "..."} when print is set.
- * Returns EXIT_OK, or the exit code after reporting the failure. */
+ * Returns EXIT_OK, or the exit code after reporting the failure. With
+ * not_enabled, the Embed-not-enabled refusal sets it and returns EXIT_OK
+ * without a report; without it, the refusal exits 78 with the fixed line. */
 static int post_acl_group(const Tool *tool, const char *client,
-                          const char *group, bool print) {
+                          const char *group, bool print, bool *not_enabled) {
   Json *body = json_object_new_object(), *answer = NULL;
   json_object_object_add(body, "client_id", json_object_new_string(client));
   json_object_object_add(body, "acl_group", json_object_new_string(group));
@@ -535,6 +559,11 @@ static int post_acl_group(const Tool *tool, const char *client,
     code = report(tool, EXIT_CONFIG, "the API refused the root credential");
   else if (kind == ANSWER_FAILED && status == 404)
     code = report(tool, EXIT_FAILURE_CODE, ACL_UNSUPPORTED_TEXT);
+  else if (embed_not_enabled(kind, answer) && not_enabled) {
+    *not_enabled = true;
+    code = EXIT_OK;
+  } else if (embed_not_enabled(kind, answer))
+    code = report(tool, EXIT_CONFIG, EMBED_NOT_ENABLED_TEXT);
   else if (kind == ANSWER_REFUSED)
     code = report(tool, EXIT_FAILURE_CODE, "the API refused: %s",
                   refusal_message(answer));
@@ -563,7 +592,9 @@ static Json *auth_client_request(const char *client) {
 
 /* provision <key> <client-jwt-file>: reissues the key's client, or provisions
  * a new one; on "Client does not exist." it drops the mapping and provisions a
- * new client. The client JWT goes only to the file. */
+ * new client. The client JWT goes only to the file. While Embed isn't enabled
+ * the default ACL group stays pending, and a provision after the team enables
+ * Embed applies it. */
 static int provision(const Tool *tool, const char *key, const char *jwt_file) {
   if (!key_valid(key) || !jwt_file || !*jwt_file)
     return report(tool, EXIT_CONFIG, "provision: invalid key or file");
@@ -650,16 +681,20 @@ static int provision(const Tool *tool, const char *key, const char *jwt_file) {
       goto done;
     }
   }
+  bool not_enabled = false;
   if (acl_pending(map, key)) {
     /* a new client is "default": only an isolated default needs the request.
      * A failure keeps the record, and no client JWT is written. */
     if (isolated_by_default(tool) &&
-        (code = post_acl_group(tool, id, "isolated", false)) != EXIT_OK)
+        (code = post_acl_group(tool, id, "isolated", false, &not_enabled)) != EXIT_OK)
       goto done;
-    set_acl_pending(map, key, false);
-    if (!save_map(tool->map_path, map)) {
-      code = report(tool, EXIT_FAILURE_CODE, "could not save the client map");
-      goto done;
+    /* while Embed isn't enabled the record stays and the client works */
+    if (!not_enabled) {
+      set_acl_pending(map, key, false);
+      if (!save_map(tool->map_path, map)) {
+        code = report(tool, EXIT_FAILURE_CODE, "could not save the client map");
+        goto done;
+      }
     }
   }
   char *line = malloc(strlen(jwt) + 2);
@@ -673,6 +708,8 @@ static int provision(const Tool *tool, const char *key, const char *jwt_file) {
     goto done;
   }
   fprintf(tool->out, "{\"client_id\":\"%s\"}\n", id);
+  if (not_enabled)
+    fprintf(tool->err, "%s\n", EMBED_PENDING_TEXT);
   code = EXIT_OK;
 done:
   json_object_put(answer);
@@ -746,6 +783,8 @@ static int print_cap(const Tool *tool, const char *route, answer_kind kind,
   if (kind == ANSWER_FAILED && status == 404)
     return report(tool, EXIT_FAILURE_CODE,
                   "%s answered 404: the server predates the data-cap routes", route);
+  if (embed_not_enabled(kind, answer))
+    return report(tool, EXIT_CONFIG, EMBED_NOT_ENABLED_TEXT);
   if (kind == ANSWER_REFUSED)
     return report(tool, EXIT_FAILURE_CODE, "the API refused: %s",
                   refusal_message(answer));
@@ -840,6 +879,8 @@ static int usage_all(const Tool *tool) {
     } else if (kind == ANSWER_FAILED && status == 404) {
       code = report(tool, EXIT_FAILURE_CODE, "/network/client-data-caps answered "
                                              "404: the server predates the data-cap routes");
+    } else if (embed_not_enabled(kind, answer)) {
+      code = report(tool, EXIT_CONFIG, EMBED_NOT_ENABLED_TEXT);
     } else if (kind != ANSWER_OK ||
                !json_object_object_get_ex(answer, "clients", &clients) ||
                !json_object_is_type(clients, json_type_array)) {
@@ -938,7 +979,7 @@ static int acl(const Tool *tool, const char *key, const char *group) {
     code = report(tool, EXIT_CONFIG, "the client map is not a valid private map");
   else if (!client)
     code = report(tool, EXIT_CONFIG, UNMAPPED_TEXT);
-  else if ((code = post_acl_group(tool, client, group, true)) == EXIT_OK &&
+  else if ((code = post_acl_group(tool, client, group, true, NULL)) == EXIT_OK &&
            acl_pending(map, key)) {
     set_acl_pending(map, key, false);
     if (!save_map(tool->map_path, map))
@@ -946,6 +987,44 @@ static int acl(const Tool *tool, const char *key, const char *group) {
   }
   json_object_put(map);
   release_lock(lock);
+  return code;
+}
+
+/* A non-negative integer member, or -1. */
+static int64_t count_field(Json *obj, const char *name) {
+  Json *v = NULL;
+  if (!json_object_object_get_ex(obj, name, &v) ||
+      !json_object_is_type(v, json_type_int))
+    return -1;
+  int64_t count = json_object_get_int64(v);
+  return count < 0 ? -1 : count;
+}
+
+/* status: prints the network's Embed state from GET /network/embed as one
+ * line, "embed enabled: yes | client limit: 5000 | active clients: 1234". A
+ * refusal, such as for a client JWT, is a configuration problem. */
+static int embed_status(const Tool *tool) {
+  Json *answer = NULL, *enabled = NULL;
+  long status;
+  answer_kind kind = call_api(tool, "GET", "/network/embed", NULL, &answer, &status);
+  int64_t limit = answer ? count_field(answer, "client_limit") : -1,
+          active = answer ? count_field(answer, "active_client_count") : -1;
+  int code;
+  if (kind == ANSWER_UNAUTHORIZED)
+    code = report(tool, EXIT_CONFIG, "the API refused the root credential");
+  else if (kind == ANSWER_FAILED && status == 404)
+    code = report(tool, EXIT_FAILURE_CODE, EMBED_UNSUPPORTED_TEXT);
+  else if (kind == ANSWER_REFUSED)
+    code = report(tool, EXIT_CONFIG, "the API refused: %s", refusal_message(answer));
+  else if (kind != ANSWER_OK || !json_object_object_get_ex(answer, "enabled", &enabled) ||
+           !json_object_is_type(enabled, json_type_boolean) || limit < 0 || active < 0)
+    code = report(tool, EXIT_FAILURE_CODE, "no Embed state in the answer (HTTP %ld)", status);
+  else {
+    fprintf(tool->out, "embed enabled: %s | client limit: %" PRId64 " | active clients: %" PRId64 "\n",
+            json_object_get_boolean(enabled) ? "yes" : "no", limit, active);
+    code = EXIT_OK;
+  }
+  json_object_put(answer);
   return code;
 }
 
@@ -963,6 +1042,8 @@ static int run(const Tool *tool, int argc, char **argv) {
     return remove_client(tool, argv[1]);
   if (argc == 3 && !strcmp(argv[0], "acl"))
     return acl(tool, argv[1], argv[2]);
+  if (argc == 1 && !strcmp(argv[0], "status"))
+    return embed_status(tool);
   return report(tool, EXIT_CONFIG, USAGE);
 }
 
@@ -1521,6 +1602,102 @@ static void self_test(void) {
     free(err);
     mock_free(&old_caps);
   }
+  /* Embed not enabled: cap, usage, usage-all and acl exit 78 with the fixed
+   * line */
+  const char *not_enabled = "{\"error\":{\"message\":\"Embed isn't enabled for this network.\"}}";
+  char *acl_isolated[] = {"acl", (char *)key3, "isolated"};
+  char **embed_lines[] = {cap_one, usage_three, all_args, acl_isolated};
+  int embed_counts[] = {4, 2, 1, 3};
+  for (int i = 0; i < 4; i++) {
+    struct Mock refused_embed = {{not_enabled}, {200}, 1, {{0}}, {{0}}, {0}, 0};
+    CHECK(run_with(&refused_embed, map_path, &out, &err, embed_counts[i], embed_lines[i]) == EXIT_CONFIG);
+    CHECK(!strcmp(out, "") && !strcmp(err, EMBED_NOT_ENABLED_TEXT "\n"));
+    free(out);
+    free(err);
+    mock_free(&refused_embed);
+  }
+  /* provision still provisions: the client JWT written, the key kept in
+   * pending_acl and the pending line on stderr; a provision after Embed is
+   * enabled applies the group and drops the record */
+  test_acl_group = "isolated";
+  unlink(jwt4_path);
+  struct Mock pending = {{answer4, not_enabled}, {200, 200}, 2, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&pending, map_path, &out, &err, 3, provision4) == EXIT_OK);
+  CHECK(!strcmp(out, "{\"client_id\":\"44444444-4444-4444-4444-444444444444\"}\n") &&
+        !strcmp(err, EMBED_PENDING_TEXT "\n"));
+  CHECK(pending.calls == 2 && !strcmp(pending.paths[1], "/network/client-acl-group"));
+  free(out);
+  free(err);
+  mock_free(&pending);
+  jwt_file = fopen(jwt4_path, "r");
+  CHECK(jwt_file && fgets(jwt_line, sizeof(jwt_line), jwt_file));
+  fclose(jwt_file);
+  CHECK(!strncmp(jwt_line, jwt4, strlen(jwt4)));
+  map = load_map(map_path);
+  CHECK(map && !strcmp(mapped_client(map, key4), id4) && acl_pending(map, key4));
+  json_object_put(map);
+  struct Mock enabled = {{answer4, isolated4}, {200, 200}, 2, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&enabled, map_path, &out, &err, 3, provision4) == EXIT_OK && !strcmp(err, ""));
+  CHECK(!strcmp(body_string(enabled.bodies[0], "client_id"), id4) &&
+        !strcmp(json_text(enabled.bodies[1]),
+                "{\"client_id\":\"44444444-4444-4444-4444-444444444444\",\"acl_group\":\"isolated\"}"));
+  free(out);
+  free(err);
+  mock_free(&enabled);
+  map = load_map(map_path);
+  CHECK(map && !acl_pending(map, key4));
+  json_object_put(map);
+  test_acl_group = "default";
+
+  /* status: GET /network/embed printed as one line for an enabled and a not
+   * enabled network; a refusal or a refused root credential is 78; a server
+   * without the route and an invalid answer are 1 */
+  char *status_args[] = {"status"};
+  const char *states[] = {"{\"enabled\":true,\"client_limit\":5000,\"active_client_count\":1234}",
+                          "{\"enabled\":false,\"client_limit\":100,\"active_client_count\":0}"};
+  const char *state_lines[] = {"embed enabled: yes | client limit: 5000 | active clients: 1234\n",
+                               "embed enabled: no | client limit: 100 | active clients: 0\n"};
+  for (int i = 0; i < 2; i++) {
+    struct Mock state = {{states[i]}, {200}, 1, {{0}}, {{0}}, {0}, 0};
+    CHECK(run_with(&state, map_path, &out, &err, 1, status_args) == EXIT_OK);
+    CHECK(!strcmp(out, state_lines[i]) && !strcmp(err, ""));
+    CHECK(state.calls == 1 && !strcmp(state.methods[0], "GET") &&
+          !strcmp(state.paths[0], "/network/embed") && !state.bodies[0]);
+    free(out);
+    free(err);
+    mock_free(&state);
+  }
+  struct Mock state_refused = {{"{\"error\":{\"message\":\"Invalid credential.\"}}"}, {200}, 1, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&state_refused, map_path, &out, &err, 1, status_args) == EXIT_CONFIG);
+  CHECK(!strcmp(out, "") && strstr(err, "Invalid credential.") && strchr(err, '\n') == err + strlen(err) - 1);
+  free(out);
+  free(err);
+  mock_free(&state_refused);
+  struct Mock state_unauthorized = {{""}, {401}, 1, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&state_unauthorized, map_path, &out, &err, 1, status_args) == EXIT_CONFIG);
+  free(out);
+  free(err);
+  mock_free(&state_unauthorized);
+  struct Mock state_old = {{"404 page not found"}, {404}, 1, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&state_old, map_path, &out, &err, 1, status_args) == EXIT_FAILURE_CODE);
+  CHECK(!strcmp(err, EMBED_UNSUPPORTED_TEXT "\n"));
+  free(out);
+  free(err);
+  mock_free(&state_old);
+  const char *invalid_states[] = {
+      "{\"enabled\":true}",
+      "{\"enabled\":\"yes\",\"client_limit\":1,\"active_client_count\":1}",
+      "{\"enabled\":true,\"client_limit\":-1,\"active_client_count\":0}",
+      "{\"enabled\":true,\"client_limit\":1.5,\"active_client_count\":0}"};
+  for (int i = 0; i < 4; i++) {
+    struct Mock state_invalid = {{invalid_states[i]}, {200}, 1, {{0}}, {{0}}, {0}, 0};
+    CHECK(run_with(&state_invalid, map_path, &out, &err, 1, status_args) == EXIT_FAILURE_CODE);
+    CHECK(!strcmp(out, ""));
+    free(out);
+    free(err);
+    mock_free(&state_invalid);
+  }
+
   /* a pending_acl entry that is not a mapped key, or not an array, is refused */
   const char *bad_pending[] = {
       "{\"version\":1,\"clients\":{},\"pending_acl\":[\"user:nobody\"]}",
@@ -1544,9 +1721,9 @@ static void self_test(void) {
   /* keys and command lines */
   CHECK(key_valid("user:alice") && key_valid(key) && !key_valid("user:../a") &&
         !key_valid(id) && !key_valid("user:") && !key_valid("user:-a"));
-  char *bad_lines[][3] = {{"provision", "user:a"}, {"usage"}, {"usage-all", "x"}, {"--client-id", "x"}, {"remove", (char *)id}};
-  int bad_line_counts[] = {2, 1, 2, 2, 2};
-  for (int i = 0; i < 5; i++) {
+  char *bad_lines[][3] = {{"provision", "user:a"}, {"usage"}, {"usage-all", "x"}, {"--client-id", "x"}, {"remove", (char *)id}, {"status", "x"}};
+  int bad_line_counts[] = {2, 1, 2, 2, 2, 2};
+  for (int i = 0; i < 6; i++) {
     struct Mock unused = {{0}, {0}, 0, {{0}}, {{0}}, {0}, 0};
     CHECK(run_with(&unused, map_path, &out, &err, bad_line_counts[i], bad_lines[i]) == EXIT_CONFIG);
     CHECK(unused.calls == 0);

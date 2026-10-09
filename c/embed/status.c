@@ -270,6 +270,16 @@ bool ur_embed_parse_cap(const char *json, size_t length, ur_embed_cap *cap) {
   return ur_embed_parse_cap_value(ur_json_parse(json, length), cap);
 }
 
+/* Whether an answer is the Embed-not-enabled refusal,
+ * {"error": {"message": "Embed isn't enabled for this network."}}. */
+bool ur_embed_cap_not_enabled(const char *json, size_t length) {
+  ur_json_value error = ur_json_member(ur_json_parse(json, length), "error");
+  char *message = ur_json_string(ur_json_member(error, "message"));
+  bool not_enabled = message && !strcmp(message, UR_EMBED_NOT_ENABLED_MESSAGE);
+  free(message);
+  return not_enabled;
+}
+
 /* The data fields before any reading: checking. */
 void ur_embed_caps_init(ur_embed_caps *caps) {
   memset(caps, 0, sizeof(*caps));
@@ -286,6 +296,13 @@ void ur_embed_caps_apply(ur_embed_caps *caps, const ur_embed_cap *reading) {
   } else if (caps->state == UR_EMBED_CAPS_CHECKING) {
     caps->state = UR_EMBED_CAPS_UNAVAILABLE;
   }
+}
+
+/* The Embed-not-enabled refusal clears the last reading: both data fields
+ * read unavailable, and the status rules see no cap reading. */
+void ur_embed_caps_clear(ur_embed_caps *caps) {
+  memset(&caps->cap, 0, sizeof(caps->cap));
+  caps->state = UR_EMBED_CAPS_UNAVAILABLE;
 }
 
 /* One data field: checking, unavailable, no cap for a null limit (never a used

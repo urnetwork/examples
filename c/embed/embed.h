@@ -181,6 +181,11 @@ char *ur_json_string(ur_json_value value);
 #define UR_EMBED_DATA_UNAVAILABLE "unavailable"
 #define UR_EMBED_DATA_NO_CAP "no cap"
 
+/* The server refuses the cap read with this message while the team has not
+ * enabled Embed for the network (EMBED_CONTRACT.md, "Embed enablement"). The
+ * refusal clears the last reading, so both data fields read unavailable. */
+#define UR_EMBED_NOT_ENABLED_MESSAGE "Embed isn't enabled for this network."
+
 /* The capped_reason values of the cap object. */
 #define UR_EMBED_CAPPED_REASON_MONTHLY "monthly"
 #define UR_EMBED_CAPPED_REASON_TOTAL "total"
@@ -201,8 +206,9 @@ typedef struct {
   char capped_reason[24];
 } ur_embed_cap;
 
-/* What the data fields show: no reading yet, the first reading failed, or the
- * latest reading. A failure after a reading keeps that reading. */
+/* What the data fields show: no reading yet, the first reading failed (or the
+ * Embed-not-enabled refusal cleared the reading), or the latest reading. A
+ * failure after a reading keeps that reading. */
 typedef enum {
   UR_EMBED_CAPS_CHECKING,
   UR_EMBED_CAPS_UNAVAILABLE,
@@ -244,8 +250,10 @@ void ur_embed_client_limit_text(int64_t retry_time, char *text,
                                 size_t capacity);
 bool ur_embed_parse_cap(const char *json, size_t length, ur_embed_cap *cap);
 bool ur_embed_parse_cap_value(ur_json_value value, ur_embed_cap *cap);
+bool ur_embed_cap_not_enabled(const char *json, size_t length);
 void ur_embed_caps_init(ur_embed_caps *caps);
 void ur_embed_caps_apply(ur_embed_caps *caps, const ur_embed_cap *reading);
+void ur_embed_caps_clear(ur_embed_caps *caps);
 void ur_embed_data_field(const ur_embed_caps *caps, bool monthly, char *text,
                          size_t capacity);
 void ur_embed_status_text(const ur_embed_status_input *input, char *text,
@@ -366,9 +374,20 @@ ur_embed_fetch_result ur_embed_fetch_client_jwt(
     const char *demo_session, const char *state_dir, const char *instance_id,
     ur_embed_token *token, char *error, size_t capacity);
 void ur_embed_token_free(ur_embed_token *token);
-bool ur_embed_read_caps(ur_embed_http_fn http, void *http_context,
-                        const char *api_url, const char *client_jwt,
-                        ur_embed_cap *cap, char *error, size_t capacity);
+/* The outcome of a cap read. */
+typedef enum {
+  UR_EMBED_CAP_READ_OK,
+  UR_EMBED_CAP_READ_FAILED,
+  /* the Embed-not-enabled refusal, which clears the last reading */
+  UR_EMBED_CAP_READ_NOT_ENABLED,
+} ur_embed_cap_read_result;
+
+ur_embed_cap_read_result ur_embed_read_caps(ur_embed_http_fn http,
+                                            void *http_context,
+                                            const char *api_url,
+                                            const char *client_jwt,
+                                            ur_embed_cap *cap, char *error,
+                                            size_t capacity);
 
 /* ----- configuration (fetch.c) ----- */
 
