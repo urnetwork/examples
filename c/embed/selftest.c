@@ -187,7 +187,8 @@ static int count_dir_entries(const char *dir) {
 
 /* ----- checks ----- */
 
-/* Data amounts use decimal units with one decimal, ties to even. */
+/* Data amounts use decimal units with one decimal, ties to even on the exact
+ * value: 1050 bytes is exactly 1.05 kB and shows "1.0 kB". */
 static bool check_format_byte_count(char *failure, size_t capacity) {
   const struct {
     int64_t byte_count;
@@ -197,8 +198,11 @@ static bool check_format_byte_count(char *failure, size_t capacity) {
       {999, "999 B"},
       {1000, "1.0 kB"},
       {999949, "999.9 kB"},
+      {1050, "1.0 kB"},
+      {1150, "1.2 kB"},
       {1250, "1.2 kB"},
       {1750, "1.8 kB"},
+      {999950, "1.0 MB"},
       {999999, "1.0 MB"},
       {1234567890, "1.2 GB"},
       {5000000000, "5.0 GB"},
@@ -949,6 +953,28 @@ static bool check_usage(char *failure, size_t capacity) {
   return true;
 }
 
+/* The start line names the client and the installation, and --licenses names
+ * the license kind of the platform it was built for. */
+static bool check_start_line(char *failure, size_t capacity) {
+  char line[UR_EMBED_LINE_CAPACITY];
+  ur_embed_start_line("11111111-1111-1111-1111-111111111111",
+                      "22222222-2222-2222-2222-222222222222", line, sizeof(line));
+  if (strcmp(line, "embed client 11111111-1111-1111-1111-111111111111, "
+                   "installation 22222222-2222-2222-2222-222222222222"))
+    return fail(failure, capacity, "start line \"%s\"", line);
+#if defined(_WIN32)
+  const char *expected = "windows";
+#elif defined(__APPLE__)
+  const char *expected = "apple";
+#else
+  const char *expected = "linux";
+#endif
+  if (strcmp(ur_embed_license_app(), expected))
+    return fail(failure, capacity, "license app kind \"%s\", want \"%s\"",
+                ur_embed_license_app(), expected);
+  return true;
+}
+
 /* Runs every check and keeps the first failure. */
 bool ur_embed_self_test(char *failure, size_t capacity) {
   bool (*const checks[])(char *, size_t) = {
@@ -956,7 +982,7 @@ bool ur_embed_self_test(char *failure, size_t capacity) {
       check_status_lines,      check_status_rules, check_data_fields,
       check_cap_object,        check_client_jwt_claims, check_origin_url,
       check_token_fetch,       check_cap_read,     check_state_files,
-      check_config,            check_usage,
+      check_config,            check_usage,         check_start_line,
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); i++) {
     if (!checks[i](failure, capacity))

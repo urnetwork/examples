@@ -231,6 +231,12 @@ typedef struct {
 } ur_embed_status_input;
 
 void ur_embed_print_line(const char *line);
+/* "embed client <client_id>, installation <instance_id>", printed at start. */
+void ur_embed_start_line(const char *client_id, const char *instance_id,
+                         char *line, size_t capacity);
+/* The GetLicenses app kind that --licenses prints: "apple" on Apple platforms,
+ * "windows" on Windows, "linux" elsewhere. */
+const char *ur_embed_license_app(void);
 void ur_embed_format_byte_count(int64_t byte_count, char *text,
                                 size_t capacity);
 bool ur_embed_reset_text(const char *period_end, char *text, size_t capacity);

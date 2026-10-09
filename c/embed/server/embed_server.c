@@ -6,12 +6,15 @@
  *   embed-server usage <key>
  *   embed-server usage-all
  *   embed-server remove <key>
+ *   embed-server acl <key> default|isolated
  *   embed-server --self-test
  *
  * It extends the C integration allocator (../../integration/server): the same
  * settings (URNETWORK_ROOT_JWT, an API key or a network JWT; URNETWORK_CLIENT_MAP,
  * an absolute path in an existing private, service-owned directory; optional
- * URNETWORK_API_URL), map format, key pattern, lock and response checks. Your
+ * URNETWORK_API_URL), map format, key pattern, lock and response checks, and
+ * reads URNETWORK_DEFAULT_ACL_GROUP: the ACL group of each new client,
+ * isolated (the default) or default. Your
  * service authenticates its user first and supplies the key internally, as
  * user:<service-user-id>:<installation-id>, never a raw request field or a
  * URnetwork client ID. Exit codes: 0 success, 78 configuration or credential
@@ -44,7 +47,11 @@
 #define USAGE                                                                  \
   "usage: embed-server provision <key> <client-jwt-file> | cap <key> "         \
   "[--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage "   \
-  "<key> | usage-all | remove <key> | --self-test"
+  "<key> | usage-all | remove <key> | acl <key> default|isolated | "        \
+  "--self-test"
+#define UNMAPPED_TEXT "no client is mapped for that key; run provision first"
+#define ACL_UNSUPPORTED_TEXT                                                   \
+  "/network/client-acl-group answered 404: the server predates ACL groups"
 #define CLIENT_LIMIT_TEXT                                                      \
   "client limit reached: your network is at its client limit; see "           \
   "https://ur.io/services"
@@ -64,6 +71,9 @@ typedef struct {
   void *context;
   FILE *out;
   FILE *err;
+  /* the ACL group of each new client: "isolated" (also when NULL) or
+   * "default" */
+  const char *acl_group;
 } Tool;
 
 /* Writes one stderr line and returns the exit code. */
@@ -291,7 +301,8 @@ static Json *load_map(const char *path) {
   valid = true;
   json_object_object_foreach(map, field, field_value) {
     (void)field_value;
-    if (strcmp(field, "version") && strcmp(field, "clients"))
+    if (strcmp(field, "version") && strcmp(field, "clients") &&
+        strcmp(field, "pending_acl"))
       valid = false;
   }
   json_object_object_foreach(clients, key, value) {
@@ -307,6 +318,24 @@ static Json *load_map(const char *path) {
     }
     json_object_object_add(seen, id, json_object_new_boolean(1));
   }
+  /* pending_acl: distinct mapped keys that still owe their default ACL group */
+  Json *pending = NULL, *pending_seen = json_object_new_object();
+  if (valid && json_object_object_get_ex(map, "pending_acl", &pending)) {
+    if (!json_object_is_type(pending, json_type_array))
+      valid = false;
+    for (size_t i = 0; valid && i < json_object_array_length(pending); i++) {
+      Json *entry = json_object_array_get_idx(pending, i), *mapped = NULL;
+      const char *pending_key = json_object_is_type(entry, json_type_string)
+                                    ? json_object_get_string(entry)
+                                    : NULL;
+      if (!pending_key || !json_object_object_get_ex(clients, pending_key, &mapped) ||
+          json_object_object_get_ex(pending_seen, pending_key, &mapped))
+        valid = false;
+      else
+        json_object_object_add(pending_seen, pending_key, json_object_new_boolean(1));
+    }
+  }
+  json_object_put(pending_seen);
 done:
   json_object_put(seen);
   if (!valid) {
@@ -352,9 +381,39 @@ static bool write_private(const char *path, const char *text) {
   return ok;
 }
 
-/* Saves the map atomically with private permissions. */
+/* Saves the map atomically with private permissions. pending_acl is written
+ * only while it is not empty, so the map stays the allocators' map. */
 static bool save_map(const char *path, Json *map) {
+  Json *pending = NULL;
+  if (json_object_object_get_ex(map, "pending_acl", &pending) &&
+      json_object_array_length(pending) == 0)
+    json_object_object_del(map, "pending_acl");
   return write_private(path, json_text(map));
+}
+
+/* Whether key still owes its default ACL group. */
+static bool acl_pending(Json *map, const char *key) {
+  Json *pending = NULL;
+  if (!json_object_object_get_ex(map, "pending_acl", &pending))
+    return false;
+  for (size_t i = 0; i < json_object_array_length(pending); i++)
+    if (!strcmp(json_object_get_string(json_object_array_get_idx(pending, i)), key))
+      return true;
+  return false;
+}
+
+/* Records or clears that key owes its default ACL group. */
+static void set_acl_pending(Json *map, const char *key, bool owes) {
+  Json *pending = NULL, *kept = json_object_new_array();
+  if (json_object_object_get_ex(map, "pending_acl", &pending))
+    for (size_t i = 0; i < json_object_array_length(pending); i++) {
+      const char *other = json_object_get_string(json_object_array_get_idx(pending, i));
+      if (strcmp(other, key))
+        json_object_array_add(kept, json_object_new_string(other));
+    }
+  if (owes)
+    json_object_array_add(kept, json_object_new_string(key));
+  json_object_object_add(map, "pending_acl", kept);
 }
 
 /* The exclusive <map>.lock directory, held through the remote call and the
@@ -452,6 +511,46 @@ static bool cap_object(Json *answer) {
 
 /* ----- commands ----- */
 
+/* Whether new clients go into the isolated ACL group (the default). */
+static bool isolated_by_default(const Tool *tool) {
+  return !tool->acl_group || !strcmp(tool->acl_group, "isolated");
+}
+
+/* Posts client's ACL group and checks that the answer names the client and the
+ * group; prints {"client_id": "...", "acl_group": "..."} when print is set.
+ * Returns EXIT_OK, or the exit code after reporting the failure. */
+static int post_acl_group(const Tool *tool, const char *client,
+                          const char *group, bool print) {
+  Json *body = json_object_new_object(), *answer = NULL;
+  json_object_object_add(body, "client_id", json_object_new_string(client));
+  json_object_object_add(body, "acl_group", json_object_new_string(group));
+  long status;
+  answer_kind kind = call_api(tool, "POST", "/network/client-acl-group", body,
+                              &answer, &status);
+  json_object_put(body);
+  const char *answered_client = answer ? string_field(answer, "client_id") : NULL,
+             *answered_group = answer ? string_field(answer, "acl_group") : NULL;
+  int code;
+  if (kind == ANSWER_UNAUTHORIZED)
+    code = report(tool, EXIT_CONFIG, "the API refused the root credential");
+  else if (kind == ANSWER_FAILED && status == 404)
+    code = report(tool, EXIT_FAILURE_CODE, ACL_UNSUPPORTED_TEXT);
+  else if (kind == ANSWER_REFUSED)
+    code = report(tool, EXIT_FAILURE_CODE, "the API refused: %s",
+                  refusal_message(answer));
+  else if (kind != ANSWER_OK || !answered_client || strcmp(answered_client, client) ||
+           !answered_group || strcmp(answered_group, group))
+    code = report(tool, EXIT_FAILURE_CODE,
+                  "setting the ACL group failed: no valid answer (HTTP %ld)", status);
+  else {
+    if (print)
+      fprintf(tool->out, "{\"client_id\":\"%s\",\"acl_group\":\"%s\"}\n", client, group);
+    code = EXIT_OK;
+  }
+  json_object_put(answer);
+  return code;
+}
+
 /* The auth-client request: a new client, or a reissue with its client id. */
 static Json *auth_client_request(const char *client) {
   Json *body = json_object_new_object();
@@ -507,6 +606,7 @@ static int provision(const Tool *tool, const char *key, const char *jwt_file) {
         Json *clients = NULL;
         json_object_object_get_ex(map, "clients", &clients);
         json_object_object_del(clients, key);
+        set_acl_pending(map, key, false);
         if (!save_map(tool->map_path, map)) {
           code = report(tool, EXIT_FAILURE_CODE, "could not save the client map");
           goto done;
@@ -542,6 +642,21 @@ static int provision(const Tool *tool, const char *key, const char *jwt_file) {
       }
     }
     json_object_object_add(clients, key, json_object_new_string(id));
+    /* the mapping and the record that the client owes its group, in one save */
+    if (isolated_by_default(tool))
+      set_acl_pending(map, key, true);
+    if (!save_map(tool->map_path, map)) {
+      code = report(tool, EXIT_FAILURE_CODE, "could not save the client map");
+      goto done;
+    }
+  }
+  if (acl_pending(map, key)) {
+    /* a new client is "default": only an isolated default needs the request.
+     * A failure keeps the record, and no client JWT is written. */
+    if (isolated_by_default(tool) &&
+        (code = post_acl_group(tool, id, "isolated", false)) != EXIT_OK)
+      goto done;
+    set_acl_pending(map, key, false);
     if (!save_map(tool->map_path, map)) {
       code = report(tool, EXIT_FAILURE_CODE, "could not save the client map");
       goto done;
@@ -624,17 +739,18 @@ invalid:
 }
 
 /* Prints a cap object answer, or reports the failure. */
-static int print_cap(const Tool *tool, answer_kind kind, Json *answer,
-                     long status) {
+static int print_cap(const Tool *tool, const char *route, answer_kind kind,
+                     Json *answer, long status) {
   if (kind == ANSWER_UNAUTHORIZED)
     return report(tool, EXIT_CONFIG, "the API refused the root credential");
+  if (kind == ANSWER_FAILED && status == 404)
+    return report(tool, EXIT_FAILURE_CODE,
+                  "%s answered 404: the server predates the data-cap routes", route);
   if (kind == ANSWER_REFUSED)
     return report(tool, EXIT_FAILURE_CODE, "the API refused: %s",
                   refusal_message(answer));
   if (kind == ANSWER_FAILED || !cap_object(answer))
-    return report(tool, EXIT_FAILURE_CODE,
-                  "no cap object in the answer (HTTP %ld; a server without the "
-                  "cap routes answers 404)",
+    return report(tool, EXIT_FAILURE_CODE, "no cap object in the answer (HTTP %ld)",
                   status);
   fprintf(tool->out, "%s\n", json_text(answer));
   return EXIT_OK;
@@ -650,7 +766,7 @@ static int cap(const Tool *tool, const char *key, int argc, char **argv) {
   const char *client = mapped_client(map, key);
   if (!client) {
     json_object_put(map);
-    return report(tool, EXIT_CONFIG, "no client is mapped for %s", key);
+    return report(tool, EXIT_CONFIG, UNMAPPED_TEXT);
   }
   Json *body = cap_request(client, argc, argv);
   json_object_put(map);
@@ -662,7 +778,7 @@ static int cap(const Tool *tool, const char *key, int argc, char **argv) {
   answer_kind kind =
       call_api(tool, "POST", "/network/client-data-cap", body, &answer, &status);
   json_object_put(body);
-  int code = print_cap(tool, kind, answer, status);
+  int code = print_cap(tool, "/network/client-data-cap", kind, answer, status);
   json_object_put(answer);
   return code;
 }
@@ -677,7 +793,7 @@ static int usage(const Tool *tool, const char *key) {
   const char *client = mapped_client(map, key);
   if (!client) {
     json_object_put(map);
-    return report(tool, EXIT_CONFIG, "no client is mapped for %s", key);
+    return report(tool, EXIT_CONFIG, UNMAPPED_TEXT);
   }
   char path[96];
   snprintf(path, sizeof(path), "/network/client-data-cap?client_id=%s", client);
@@ -685,7 +801,7 @@ static int usage(const Tool *tool, const char *key) {
   Json *answer = NULL;
   long status;
   answer_kind kind = call_api(tool, "GET", path, NULL, &answer, &status);
-  int code = print_cap(tool, kind, answer, status);
+  int code = print_cap(tool, "/network/client-data-cap", kind, answer, status);
   json_object_put(answer);
   return code;
 }
@@ -721,6 +837,9 @@ static int usage_all(const Tool *tool) {
     Json *clients = NULL;
     if (kind == ANSWER_UNAUTHORIZED) {
       code = report(tool, EXIT_CONFIG, "the API refused the root credential");
+    } else if (kind == ANSWER_FAILED && status == 404) {
+      code = report(tool, EXIT_FAILURE_CODE, "/network/client-data-caps answered "
+                                             "404: the server predates the data-cap routes");
     } else if (kind != ANSWER_OK ||
                !json_object_object_get_ex(answer, "clients", &clients) ||
                !json_object_is_type(clients, json_type_array)) {
@@ -763,7 +882,7 @@ static int remove_client(const Tool *tool, const char *key) {
     goto done;
   }
   if (!client) {
-    code = report(tool, EXIT_CONFIG, "no client is mapped for %s", key);
+    code = report(tool, EXIT_CONFIG, UNMAPPED_TEXT);
     goto done;
   }
   snprintf(id, sizeof(id), "%s", client);
@@ -787,6 +906,7 @@ static int remove_client(const Tool *tool, const char *key) {
   Json *clients = NULL;
   json_object_object_get_ex(map, "clients", &clients);
   json_object_object_del(clients, key);
+  set_acl_pending(map, key, false);
   if (!save_map(tool->map_path, map)) {
     code = report(tool, EXIT_FAILURE_CODE, "could not save the client map");
     goto done;
@@ -796,6 +916,34 @@ static int remove_client(const Tool *tool, const char *key) {
 done:
   json_object_put(body);
   json_object_put(answer);
+  json_object_put(map);
+  release_lock(lock);
+  return code;
+}
+
+/* acl <key> default|isolated: sets the ACL group of the key's client and prints
+ * {"client_id": "...", "acl_group": "..."}. An explicit group settles a
+ * pending default group, so the record is dropped. */
+static int acl(const Tool *tool, const char *key, const char *group) {
+  if (!key_valid(key) || (strcmp(group, "default") && strcmp(group, "isolated")))
+    return report(tool, EXIT_CONFIG, USAGE);
+  char *lock = take_lock(tool->map_path);
+  if (!lock)
+    return report(tool, EXIT_FAILURE_CODE,
+                  "the client map is locked by another run; retry");
+  int code;
+  Json *map = load_map(tool->map_path);
+  const char *client = map ? mapped_client(map, key) : NULL;
+  if (!map)
+    code = report(tool, EXIT_CONFIG, "the client map is not a valid private map");
+  else if (!client)
+    code = report(tool, EXIT_CONFIG, UNMAPPED_TEXT);
+  else if ((code = post_acl_group(tool, client, group, true)) == EXIT_OK &&
+           acl_pending(map, key)) {
+    set_acl_pending(map, key, false);
+    if (!save_map(tool->map_path, map))
+      code = report(tool, EXIT_FAILURE_CODE, "could not save the client map");
+  }
   json_object_put(map);
   release_lock(lock);
   return code;
@@ -813,6 +961,8 @@ static int run(const Tool *tool, int argc, char **argv) {
     return usage_all(tool);
   if (argc == 2 && !strcmp(argv[0], "remove"))
     return remove_client(tool, argv[1]);
+  if (argc == 3 && !strcmp(argv[0], "acl"))
+    return acl(tool, argv[1], argv[2]);
   return report(tool, EXIT_CONFIG, USAGE);
 }
 
@@ -944,12 +1094,16 @@ static char *stream_text(FILE *stream) {
   return text;
 }
 
+/* The default ACL group of the self-test's runs: "default" sends no ACL
+ * request, so the checks that predate ACL groups keep their answer order. */
+static const char *test_acl_group = "default";
+
 /* Runs a command line against the mock with fresh output streams. */
 static int run_with(struct Mock *m, const char *map_path, char **out,
                     char **err, int argc, char **argv) {
   FILE *out_stream = tmpfile(), *err_stream = tmpfile();
   CHECK(out_stream && err_stream);
-  Tool tool = {map_path, mock, m, out_stream, err_stream};
+  Tool tool = {map_path, mock, m, out_stream, err_stream, test_acl_group};
   int code = run(&tool, argc, argv);
   *out = stream_text(out_stream);
   *err = stream_text(err_stream);
@@ -1206,6 +1360,187 @@ static void self_test(void) {
   mock_free(&refused);
   unlink(map_path);
 
+  /* fixed texts: a key with no mapped client */
+  char *unmapped_cap[] = {"cap", "user:nobody", "--monthly", "1"};
+  char *unmapped_usage[] = {"usage", "user:nobody"};
+  char *unmapped_remove[] = {"remove", "user:nobody"};
+  char *unmapped_acl[] = {"acl", "user:nobody", "isolated"};
+  char **unmapped_lines[] = {unmapped_cap, unmapped_usage, unmapped_remove, unmapped_acl};
+  int unmapped_counts[] = {4, 2, 2, 3};
+  for (int i = 0; i < 4; i++) {
+    struct Mock unused = {{0}, {0}, 0, {{0}}, {{0}}, {0}, 0};
+    CHECK(run_with(&unused, map_path, &out, &err, unmapped_counts[i], unmapped_lines[i]) == EXIT_CONFIG);
+    CHECK(!strcmp(err, UNMAPPED_TEXT "\n") && unused.calls == 0);
+    free(out);
+    free(err);
+  }
+
+  /* ACL groups: a new client goes into the isolated group before its client
+   * JWT is written, with the pending_acl record saved first and then dropped */
+  test_acl_group = "isolated";
+  const char *id3 = "33333333-3333-3333-3333-333333333333";
+  const char *jwt3 = "e30.eyJjbGllbnRfaWQiOiIzMzMzMzMzMy0zMzMzLTMzMzMtMzMzMy0zMzMzMzMzMzMzMzMifQ.test";
+  const char *id4 = "44444444-4444-4444-4444-444444444444";
+  const char *jwt4 = "e30.eyJjbGllbnRfaWQiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtNDQ0NC00NDQ0NDQ0NDQ0NDQifQ.test";
+  char answer3[512], answer4[512], isolated3[160], isolated4[160], default3[160];
+  snprintf(answer3, sizeof(answer3), "{\"client_id\":\"%s\",\"by_client_jwt\":\"%s\"}", id3, jwt3);
+  snprintf(answer4, sizeof(answer4), "{\"client_id\":\"%s\",\"by_client_jwt\":\"%s\"}", id4, jwt4);
+  snprintf(isolated3, sizeof(isolated3), "{\"client_id\":\"%s\",\"acl_group\":\"isolated\"}", id3);
+  snprintf(isolated4, sizeof(isolated4), "{\"client_id\":\"%s\",\"acl_group\":\"isolated\"}", id4);
+  snprintf(default3, sizeof(default3), "{\"client_id\":\"%s\",\"acl_group\":\"default\"}", id3);
+  const char *key3 = "user:carol:33333333-3333-3333-3333-333333333333";
+  const char *key4 = "user:carol:44444444-4444-4444-4444-444444444444";
+  const char *key5 = "user:carol:55555555-5555-5555-5555-555555555555";
+  char jwt3_path[160], jwt4_path[160], jwt5_path[160];
+  snprintf(jwt3_path, sizeof(jwt3_path), "%s/c3.jwt", directory);
+  snprintf(jwt4_path, sizeof(jwt4_path), "%s/c4.jwt", directory);
+  snprintf(jwt5_path, sizeof(jwt5_path), "%s/c5.jwt", directory);
+  char *provision3[] = {"provision", (char *)key3, jwt3_path};
+  char *provision4[] = {"provision", (char *)key4, jwt4_path};
+  char *provision5[] = {"provision", (char *)key5, jwt5_path};
+  struct Mock isolate = {{answer3, isolated3}, {200, 200}, 2, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&isolate, map_path, &out, &err, 3, provision3) == EXIT_OK);
+  CHECK(isolate.calls == 2 && !strcmp(isolate.methods[1], "POST") &&
+        !strcmp(isolate.paths[1], "/network/client-acl-group"));
+  CHECK(!strcmp(json_text(isolate.bodies[1]),
+                "{\"client_id\":\"33333333-3333-3333-3333-333333333333\",\"acl_group\":\"isolated\"}"));
+  free(out);
+  free(err);
+  mock_free(&isolate);
+  map = load_map(map_path);
+  CHECK(map && !acl_pending(map, key3) && !json_object_object_get_ex(map, "pending_acl", NULL));
+  json_object_put(map);
+  struct Mock reissue3 = {{answer3}, {200}, 1, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&reissue3, map_path, &out, &err, 3, provision3) == EXIT_OK && reissue3.calls == 1);
+  free(out);
+  free(err);
+  mock_free(&reissue3);
+  /* the ACL request fails: no client JWT, the record kept; the next provision
+   * reissues and applies it */
+  struct Mock failing = {{answer4, "{}"}, {200, 500}, 2, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&failing, map_path, &out, &err, 3, provision4) == EXIT_FAILURE_CODE);
+  CHECK(access(jwt4_path, F_OK) != 0);
+  free(out);
+  free(err);
+  mock_free(&failing);
+  map = load_map(map_path);
+  CHECK(map && !strcmp(mapped_client(map, key4), id4) && acl_pending(map, key4));
+  json_object_put(map);
+  struct Mock retried = {{answer4, isolated4}, {200, 200}, 2, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&retried, map_path, &out, &err, 3, provision4) == EXIT_OK);
+  CHECK(!strcmp(body_string(retried.bodies[0], "client_id"), id4) &&
+        !strcmp(retried.paths[1], "/network/client-acl-group"));
+  CHECK(access(jwt4_path, F_OK) == 0);
+  free(out);
+  free(err);
+  mock_free(&retried);
+  map = load_map(map_path);
+  CHECK(map && !acl_pending(map, key4));
+  json_object_put(map);
+  /* a server without ACL groups: exit 1 with the fixed text, the record kept
+   * and no client JWT; a default of "default" then provisions with no ACL
+   * request and drops the record */
+  struct Mock old_server = {{answer2, "404 page not found"}, {200, 404}, 2, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&old_server, map_path, &out, &err, 3, provision5) == EXIT_FAILURE_CODE);
+  CHECK(!strcmp(err, ACL_UNSUPPORTED_TEXT "\n") && access(jwt5_path, F_OK) != 0);
+  free(out);
+  free(err);
+  mock_free(&old_server);
+  map = load_map(map_path);
+  CHECK(map && acl_pending(map, key5));
+  json_object_put(map);
+  test_acl_group = "default";
+  struct Mock as_default = {{answer2}, {200}, 1, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&as_default, map_path, &out, &err, 3, provision5) == EXIT_OK && as_default.calls == 1);
+  CHECK(access(jwt5_path, F_OK) == 0);
+  free(out);
+  free(err);
+  mock_free(&as_default);
+  map = load_map(map_path);
+  CHECK(map && !acl_pending(map, key5));
+  json_object_put(map);
+
+  /* acl: the request and its printed answer; an invalid group reaches no API;
+   * an answer for another group and a server without ACL groups fail */
+  char *acl_default[] = {"acl", (char *)key3, "default"};
+  struct Mock set_default = {{default3}, {200}, 1, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&set_default, map_path, &out, &err, 3, acl_default) == EXIT_OK);
+  CHECK(!strcmp(out, "{\"client_id\":\"33333333-3333-3333-3333-333333333333\",\"acl_group\":\"default\"}\n"));
+  CHECK(!strcmp(set_default.paths[0], "/network/client-acl-group") &&
+        !strcmp(json_text(set_default.bodies[0]),
+                "{\"client_id\":\"33333333-3333-3333-3333-333333333333\",\"acl_group\":\"default\"}"));
+  free(out);
+  free(err);
+  mock_free(&set_default);
+  char *acl_invalid[] = {"acl", (char *)key3, "private"};
+  struct Mock unused_acl = {{0}, {0}, 0, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&unused_acl, map_path, &out, &err, 3, acl_invalid) == EXIT_CONFIG && unused_acl.calls == 0);
+  free(out);
+  free(err);
+  struct Mock wrong_group = {{isolated3}, {200}, 1, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&wrong_group, map_path, &out, &err, 3, acl_default) == EXIT_FAILURE_CODE);
+  free(out);
+  free(err);
+  mock_free(&wrong_group);
+  struct Mock old_acl = {{"404 page not found"}, {404}, 1, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&old_acl, map_path, &out, &err, 3, acl_default) == EXIT_FAILURE_CODE);
+  CHECK(!strcmp(err, ACL_UNSUPPORTED_TEXT "\n"));
+  free(out);
+  free(err);
+  mock_free(&old_acl);
+  /* an explicit group settles a pending default group, and a map with a valid
+   * pending_acl is accepted */
+  f = fopen(map_path, "w");
+  CHECK(f);
+  fprintf(f, "{\"version\":1,\"clients\":{\"%s\":\"%s\"},\"pending_acl\":[\"%s\"]}", key3, id3, key3);
+  fclose(f);
+  chmod(map_path, 0600);
+  struct Mock settle = {{default3}, {200}, 1, {{0}}, {{0}}, {0}, 0};
+  CHECK(run_with(&settle, map_path, &out, &err, 3, acl_default) == EXIT_OK);
+  free(out);
+  free(err);
+  mock_free(&settle);
+  map = load_map(map_path);
+  CHECK(map && !acl_pending(map, key3) && !strcmp(mapped_client(map, key3), id3));
+  json_object_put(map);
+
+  /* a server without the cap routes: exit 1 with the fixed text */
+  char *cap_one[] = {"cap", (char *)key3, "--monthly", "1"};
+  char *usage_three[] = {"usage", (char *)key3};
+  char **old_cap_lines[] = {cap_one, usage_three, all_args};
+  int old_cap_counts[] = {4, 2, 1};
+  const char *old_cap_texts[] = {
+      "/network/client-data-cap answered 404: the server predates the data-cap routes\n",
+      "/network/client-data-cap answered 404: the server predates the data-cap routes\n",
+      "/network/client-data-caps answered 404: the server predates the data-cap routes\n"};
+  for (int i = 0; i < 3; i++) {
+    struct Mock old_caps = {{"404 page not found"}, {404}, 1, {{0}}, {{0}}, {0}, 0};
+    CHECK(run_with(&old_caps, map_path, &out, &err, old_cap_counts[i], old_cap_lines[i]) == EXIT_FAILURE_CODE);
+    CHECK(!strcmp(err, old_cap_texts[i]));
+    free(out);
+    free(err);
+    mock_free(&old_caps);
+  }
+  /* a pending_acl entry that is not a mapped key, or not an array, is refused */
+  const char *bad_pending[] = {
+      "{\"version\":1,\"clients\":{},\"pending_acl\":[\"user:nobody\"]}",
+      "{\"version\":1,\"clients\":{},\"pending_acl\":{}}"};
+  for (int i = 0; i < 2; i++) {
+    f = fopen(map_path, "w");
+    CHECK(f);
+    fputs(bad_pending[i], f);
+    fclose(f);
+    chmod(map_path, 0600);
+    struct Mock unused_map = {{answer}, {200}, 1, {{0}}, {{0}}, {0}, 0};
+    CHECK(run_with(&unused_map, map_path, &out, &err, 3, provision_args) == EXIT_CONFIG && unused_map.calls == 0);
+    free(out);
+    free(err);
+  }
+  unlink(map_path);
+  unlink(jwt3_path);
+  unlink(jwt4_path);
+  unlink(jwt5_path);
+
   /* keys and command lines */
   CHECK(key_valid("user:alice") && key_valid(key) && !key_valid("user:../a") &&
         !key_valid(id) && !key_valid("user:") && !key_valid("user:-a"));
@@ -1246,7 +1581,8 @@ int main(int argc, char **argv) {
     curl_global_cleanup();
     return EXIT_OK;
   }
-  Tool tool = {NULL, api_call, NULL, stdout, stderr};
+  Tool tool = {NULL, api_call, NULL, stdout, stderr, NULL};
+  const char *acl_group = setting("URNETWORK_DEFAULT_ACL_GROUP");
   const char *root = setting("URNETWORK_ROOT_JWT"),
              *map_path = setting("URNETWORK_CLIENT_MAP"),
              *base = setting("URNETWORK_API_URL");
@@ -1254,6 +1590,8 @@ int main(int argc, char **argv) {
   int code;
   if (argc < 2) {
     code = report(&tool, EXIT_CONFIG, USAGE);
+  } else if (acl_group && strcmp(acl_group, "isolated") && strcmp(acl_group, "default")) {
+    code = report(&tool, EXIT_CONFIG, "URNETWORK_DEFAULT_ACL_GROUP must be default or isolated");
   } else if (!root || strpbrk(root, " \t\r\n")) {
     code = report(&tool, EXIT_CONFIG, "set URNETWORK_ROOT_JWT to the root credential");
   } else if (!map_path || map_path[0] != '/') {
@@ -1266,6 +1604,7 @@ int main(int argc, char **argv) {
     struct Backend backend = {api_origin, root};
     tool.map_path = map_path;
     tool.context = &backend;
+    tool.acl_group = acl_group ? acl_group : "isolated";
     code = run(&tool, argc - 1, argv + 1);
   }
   free(api_origin);

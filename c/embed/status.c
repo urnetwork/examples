@@ -18,6 +18,22 @@ void ur_embed_print_line(const char *line) {
  * value that rounds to 1000.0 moves to the next unit. The arithmetic is exact
  * integer arithmetic, so the text does not depend on the C library's float
  * formatting; a tie rounds to even, as Go's %.1f does. */
+void ur_embed_start_line(const char *client_id, const char *instance_id,
+                         char *line, size_t capacity) {
+  snprintf(line, capacity, "embed client %s, installation %s", client_id,
+           instance_id);
+}
+
+const char *ur_embed_license_app(void) {
+#if defined(_WIN32)
+  return "windows";
+#elif defined(__APPLE__)
+  return "apple";
+#else
+  return "linux";
+#endif
+}
+
 void ur_embed_format_byte_count(int64_t byte_count, char *text,
                                 size_t capacity) {
   static const char *const units[] = {"kB", "MB", "GB", "TB", "PB", "EB"};

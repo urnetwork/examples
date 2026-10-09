@@ -18,14 +18,6 @@
 #include <signal.h>
 #include <stdio.h>
 
-/* The kind of app whose licenses --licenses prints. */
-#if defined(_WIN32)
-#define LICENSE_APP URNET_LICENSE_APP_WINDOWS
-#elif defined(__APPLE__)
-#define LICENSE_APP URNET_LICENSE_APP_APPLE
-#else
-#define LICENSE_APP URNET_LICENSE_APP_LINUX
-#endif
 
 #ifdef _WIN32
 /* Ctrl-C and Ctrl-Break stop the app. The handler runs on its own thread;
@@ -126,8 +118,7 @@ static int run_embed(void) {
     return UR_EMBED_EXIT_FAILURE;
   }
   char line[UR_EMBED_LINE_CAPACITY];
-  snprintf(line, sizeof(line), "embed client %s, installation %s",
-           config.client_id, config.instance_id);
+  ur_embed_start_line(config.client_id, config.instance_id, line, sizeof(line));
   ur_embed_print_line(line);
   exit_code = ur_embed_session_run(&session);
   ur_embed_session_close(&session);
@@ -138,7 +129,7 @@ static int run_embed(void) {
 /* Prints the sdk's licenses and data attributions for this kind of app, as
  * json. Publish them with the app. */
 static int print_licenses(void) {
-  char *licenses = urnet_get_licenses(LICENSE_APP);
+  char *licenses = urnet_get_licenses(ur_embed_license_app());
   if (!licenses) {
     fprintf(stderr, "the sdk returned no licenses\n");
     return UR_EMBED_EXIT_FAILURE;
