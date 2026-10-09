@@ -209,6 +209,12 @@ inline void checkStatusLines() {
     Caps checking;
     Caps unavailable;
     unavailable.apply(std::nullopt);
+    // the first reading answers the Embed-not-enabled refusal; and a capped
+    // monthly reading, then the refusal
+    Caps refused;
+    refused.clear();
+    Caps cleared = reading(5000000000, 5000000000, std::nullopt, 0, true, "monthly", "2026-11-01T00:00:00Z");
+    cleared.clear();
     struct Case {
         std::string clientLimitStatus;
         int64_t retryTime;
@@ -221,6 +227,8 @@ inline void checkStatusLines() {
         {"", 0, reading(5000000000, 1234567890, std::nullopt, 0, false, "", ""), 1,
             "status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap"},
         {"", 0, unavailable, 1, "status: connected | data this month: unavailable | data total: unavailable"},
+        {"", 0, refused, 1, "status: connected | data this month: unavailable | data total: unavailable"},
+        {"", 0, cleared, 1, "status: connected | data this month: unavailable | data total: unavailable"},
         {"", 0, reading(5000000000, 5000000000, std::nullopt, 0, true, "monthly", "2026-11-01T00:00:00Z"), 1,
             "status: data cap reached, resets 2026-11-01 00:00 UTC | data this month: 5.0 GB of 5.0 GB | data "
             "total: no cap"},
@@ -284,7 +292,8 @@ inline void checkStatusRules() {
 }
 
 // The data fields: checking, unavailable, a later failure keeping the last
-// value, no cap for a null limit even with a used count, and used of limit.
+// value, the Embed-not-enabled refusal clearing it, no cap for a null limit
+// even with a used count, and used of limit.
 inline void checkDataFields() {
     Caps caps;
     expect(dataField(caps, true) == "checking", "before a reading");
@@ -298,6 +307,9 @@ inline void checkDataFields() {
     expect(dataField(caps, false) == "1.2 kB of 2.0 kB", "used of limit");
     caps.apply(std::nullopt);
     expect(dataField(caps, false) == "1.2 kB of 2.0 kB", "a later failure");
+    caps.clear();
+    expect(dataField(caps, true) == "unavailable" && dataField(caps, false) == "unavailable",
+        "the Embed-not-enabled refusal did not clear the last reading");
 }
 
 // The cap object: null or absent limits, capped and its reason, an unknown
@@ -330,8 +342,11 @@ inline void checkCapObject() {
     for (const char* refused : {R"({"error":{"message":"no"}})", R"({"monthly_byte_limit":"5"})",
              R"({"monthly_used_byte_count":1.5})", R"({"capped":"yes"})", R"({"capped_reason":7})",
              R"({"total_byte_limit":9223372036854775808})", "[]", "null", "not json"}) {
-        expect(!parseCapText(refused), std::string(refused) + " read as a cap object");
+        expect(!parseCapText(refused) && !capNotEnabled(refused), std::string(refused) + " read as a cap object");
     }
+    // the Embed-not-enabled refusal is no cap object, and is recognized
+    const char* notEnabled = R"({"error":{"message":"Embed isn't enabled for this network."}})";
+    expect(!parseCapText(notEnabled) && capNotEnabled(notEnabled), "the Embed-not-enabled refusal misread");
 }
 
 // Only a JWT with a valid client_id claim is a client credential.
@@ -458,7 +473,8 @@ inline void checkTokenFetch() {
         "a null data_cap gave a first reading");
 }
 
-// The cap read: the client JWT as the bearer, and failed readings.
+// The cap read: the client JWT as the bearer, failed readings, and the
+// Embed-not-enabled refusal.
 inline void checkCapRead() {
     std::string error;
     StandIn server;
@@ -480,9 +496,16 @@ inline void checkCapRead() {
     for (std::size_t i = 0; i < failed.size(); i += 1) {
         StandIn failing;
         failing.answers.push_back(failed[i]);
-        expect(!readCaps(failing.http(), testApiUrl, clientJwt1, error),
+        bool notEnabled = false;
+        expect(!readCaps(failing.http(), testApiUrl, clientJwt1, error, &notEnabled) && !notEnabled,
             "failed cap answer " + std::to_string(i) + " was read");
     }
+    StandIn refusing;
+    refusing.answers.push_back(HttpResponse{200, R"({"error":{"message":"Embed isn't enabled for this network."}})"});
+    bool notEnabled = false;
+    expect(!readCaps(refusing.http(), testApiUrl, clientJwt1, error, &notEnabled) && notEnabled &&
+            error == embedNotEnabledMessage,
+        "the Embed-not-enabled refusal read as \"" + error + "\"");
 }
 
 // State files are private, atomic and created once; a symlink is refused.

@@ -7,6 +7,7 @@
 //   embed-server usage-all
 //   embed-server remove <key>
 //   embed-server acl <key> default|isolated
+//   embed-server status
 //   embed-server --self-test
 //
 // It extends the C++ integration allocator (../../integration/server): the
@@ -50,11 +51,23 @@ const char* const deviceSpec = "urnetwork-examples/cpp-embed-server";
 const char* const usageText =
     "usage: embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] "
     "[--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | "
-    "acl <key> default|isolated | --self-test";
+    "acl <key> default|isolated | status | --self-test";
 const char* const unmappedText = "no client is mapped for that key; run provision first";
 const char* const aclUnsupportedText = "/network/client-acl-group answered 404: the server predates ACL groups";
 const char* const clientLimitText =
     "client limit reached: your network is at its client limit; see https://ur.io/services";
+// The server refuses the data-cap and ACL-group routes with this message while
+// the team has not enabled Embed for the network (EMBED_CONTRACT.md, "Embed
+// enablement"); caps and groups set earlier stay enforced.
+const char* const embedNotEnabledMessage = "Embed isn't enabled for this network.";
+// cap, usage, usage-all and acl print this for the refusal and exit 78
+const char* const embedNotEnabledText =
+    "embed not enabled: Embed isn't enabled for this network; see https://ur.io/services";
+// provision prints this on stderr when the client's default ACL group stays
+// pending because Embed isn't enabled, and exits 0
+const char* const embedPendingText =
+    "embed not enabled: the client's defaults stay pending until Embed is enabled; see https://ur.io/services";
+const char* const embedUnsupportedText = "/network/embed answered 404: the server predates Embed enablement";
 const std::regex keys("user:[A-Za-z0-9][A-Za-z0-9_.:@-]{0,122}");
 const std::regex ids("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}");
 
@@ -288,6 +301,11 @@ std::string refusalMessage(const Json& answer) {
     return {};
 }
 
+// Whether an answer is the Embed-not-enabled refusal.
+bool embedNotEnabled(Kind kind, const Json& answer) {
+    return kind == Kind::refused && refusalMessage(answer) == embedNotEnabledMessage;
+}
+
 // Whether a refusal is either client limit flag.
 bool clientLimitRefusal(const Json& answer) {
     const Json& error = answer["error"];
@@ -306,7 +324,10 @@ std::string requireClient(const Json& map, const std::string& key) {
 
 // Posts client's ACL group and checks that the answer names the client and the
 // group; prints {"client_id": "...", "acl_group": "..."} when print is set.
-void postAclGroup(const Tool& tool, const std::string& client, const std::string& group, bool print) {
+// With notEnabled, the Embed-not-enabled refusal sets it and returns; without
+// it, the refusal exits 78 with the fixed line.
+void postAclGroup(const Tool& tool, const std::string& client, const std::string& group, bool print,
+    bool* notEnabled = nullptr) {
     Json answer;
     long status = 0;
     Kind kind = callApi(tool, "POST", "/network/client-acl-group", Json{{"client_id", client}, {"acl_group", group}},
@@ -315,6 +336,12 @@ void postAclGroup(const Tool& tool, const std::string& client, const std::string
         throw Failure(exitConfig, "the API refused the root credential");
     if (kind == Kind::failed && status == 404)
         throw Failure(exitFailure, aclUnsupportedText);
+    if (embedNotEnabled(kind, answer) && notEnabled) {
+        *notEnabled = true;
+        return;
+    }
+    if (embedNotEnabled(kind, answer))
+        throw Failure(exitConfig, embedNotEnabledText);
     if (kind == Kind::refused)
         throw Failure(exitFailure, "the API refused: " + refusalMessage(answer));
     if (kind != Kind::ok || answer.value("client_id", std::string{}) != client ||
@@ -332,8 +359,10 @@ void requireKey(const std::string& key, const std::string& command) {
 
 // provision <key> <client-jwt-file>: reissues the key's client, or provisions
 // a new one; on "Client does not exist." it drops the mapping and provisions a
-// new client. The client JWT goes only to the file.
-int provision(const Tool& tool, const std::string& key, const std::string& jwtFile) {
+// new client. The client JWT goes only to the file. While Embed isn't enabled
+// the default ACL group stays pending, with a line on err, and a provision
+// after the team enables Embed applies it.
+int provision(const Tool& tool, std::ostream& err, const std::string& key, const std::string& jwtFile) {
     requireKey(key, "provision");
     if (jwtFile.empty())
         throw Failure(exitConfig, "provision: invalid file");
@@ -381,13 +410,17 @@ int provision(const Tool& tool, const std::string& key, const std::string& jwtFi
             setAclPending(map, key, true);
         saveMap(tool.mapPath, map);
     }
+    bool notEnabled = false;
     if (aclPending(map, key)) {
         // a new client is "default": only an isolated default needs the request.
         // A failure throws with the record kept, before any client JWT is written.
         if (tool.aclGroup == "isolated")
-            postAclGroup(tool, id, "isolated", false);
-        setAclPending(map, key, false);
-        saveMap(tool.mapPath, map);
+            postAclGroup(tool, id, "isolated", false, &notEnabled);
+        // while Embed isn't enabled the record stays and the client works
+        if (!notEnabled) {
+            setAclPending(map, key, false);
+            saveMap(tool.mapPath, map);
+        }
     }
     std::string line = jwt + "\n";
     try {
@@ -398,6 +431,8 @@ int provision(const Tool& tool, const std::string& key, const std::string& jwtFi
     }
     std::fill(line.begin(), line.end(), '\0');
     tool.out << Json{{"client_id", id}}.dump() << '\n';
+    if (notEnabled)
+        err << embedPendingText << '\n';
     return exitOk;
 }
 
@@ -451,6 +486,8 @@ int printCap(const Tool& tool, const std::string& route, Kind kind, const Json& 
         throw Failure(exitConfig, "the API refused the root credential");
     if (kind == Kind::failed && status == 404)
         throw Failure(exitFailure, route + " answered 404: the server predates the data-cap routes");
+    if (embedNotEnabled(kind, answer))
+        throw Failure(exitConfig, embedNotEnabledText);
     if (kind == Kind::refused)
         throw Failure(exitFailure, "the API refused: " + refusalMessage(answer));
     if (kind == Kind::failed || !answer.contains("client_id"))
@@ -513,6 +550,8 @@ int usageAll(const Tool& tool) {
             throw Failure(exitConfig, "the API refused the root credential");
         if (kind == Kind::failed && status == 404)
             throw Failure(exitFailure, "/network/client-data-caps answered 404: the server predates the data-cap routes");
+        if (embedNotEnabled(kind, answer))
+            throw Failure(exitConfig, embedNotEnabledText);
         if (kind != Kind::ok || !answer.contains("clients") || !answer["clients"].is_array())
             throw Failure(exitFailure, "no page of cap objects in the answer (HTTP " + std::to_string(status) + ")");
         for (const auto& client : answer["clients"])
@@ -565,12 +604,43 @@ int acl(const Tool& tool, const std::string& key, const std::string& group) {
     return exitOk;
 }
 
+// A non-negative integer member, or empty.
+std::optional<int64_t> countMember(const Json& answer, const char* name) {
+    if (!answer.contains(name) || !answer[name].is_number_integer())
+        return std::nullopt;
+    int64_t count = answer[name].get<int64_t>();
+    if (count < 0)
+        return std::nullopt;
+    return count;
+}
+
+// status: prints the network's Embed state from GET /network/embed as one
+// line, "embed enabled: yes | client limit: 5000 | active clients: 1234". A
+// refusal, such as for a client JWT, is a configuration problem.
+int embedStatus(const Tool& tool) {
+    Json answer;
+    long status = 0;
+    Kind kind = callApi(tool, "GET", "/network/embed", std::nullopt, answer, status);
+    if (kind == Kind::unauthorized)
+        throw Failure(exitConfig, "the API refused the root credential");
+    if (kind == Kind::failed && status == 404)
+        throw Failure(exitFailure, embedUnsupportedText);
+    if (kind == Kind::refused)
+        throw Failure(exitConfig, "the API refused: " + refusalMessage(answer));
+    auto clientLimit = countMember(answer, "client_limit"), active = countMember(answer, "active_client_count");
+    if (kind != Kind::ok || !answer.contains("enabled") || !answer["enabled"].is_boolean() || !clientLimit || !active)
+        throw Failure(exitFailure, "no Embed state in the answer (HTTP " + std::to_string(status) + ")");
+    tool.out << "embed enabled: " << (answer["enabled"].get<bool>() ? "yes" : "no") << " | client limit: "
+             << *clientLimit << " | active clients: " << *active << '\n';
+    return exitOk;
+}
+
 // Runs one command line (the arguments after the program name), writing a
 // failure's one line to err.
 int run(const Tool& tool, std::ostream& err, const std::vector<std::string>& args) {
     try {
         if (args.size() == 3 && args[0] == "provision")
-            return provision(tool, args[1], args[2]);
+            return provision(tool, err, args[1], args[2]);
         if (args.size() >= 2 && args[0] == "cap")
             return cap(tool, args[1], std::vector<std::string>(args.begin() + 2, args.end()));
         if (args.size() == 2 && args[0] == "usage")
@@ -581,6 +651,8 @@ int run(const Tool& tool, std::ostream& err, const std::vector<std::string>& arg
             return removeClient(tool, args[1]);
         if (args.size() == 3 && args[0] == "acl")
             return acl(tool, args[1], args[2]);
+        if (args.size() == 1 && args[0] == "status")
+            return embedStatus(tool);
         throw Failure(exitConfig, usageText);
     } catch (const Failure& failure) {
         err << failure.what() << '\n';
@@ -889,6 +961,65 @@ void selfTest() {
             CHECK(runWith(old, mapPath, out, err, args) == exitFailure &&
                   err == route + " answered 404: the server predates the data-cap routes\n");
         }
+        // Embed not enabled: cap, usage, usage-all and acl exit 78 with the
+        // fixed line
+        std::string notEnabled = R"({"error":{"message":"Embed isn't enabled for this network."}})";
+        for (const auto& args : std::vector<std::vector<std::string>>{
+                 {"cap", key3, "--monthly", "1"}, {"usage", key3}, {"usage-all"}, {"acl", key3, "isolated"}}) {
+            Mock refusedEmbed{{{200, notEnabled}}};
+            CHECK(runWith(refusedEmbed, mapPath, out, err, args) == exitConfig && out.empty() &&
+                  err == std::string(embedNotEnabledText) + "\n");
+        }
+        // provision still provisions: the client JWT written, the key kept in
+        // pending_acl and the pending line on stderr; a provision after Embed
+        // is enabled applies the group and drops the record
+        testAclGroup = "isolated";
+        fs::remove(jwt4Path);
+        Mock pending{{{200, answer4}, {200, notEnabled}}};
+        CHECK(runWith(pending, mapPath, out, err, {"provision", key4, jwt4Path.string()}) == exitOk);
+        CHECK(out == "{\"client_id\":\"" + id4 + "\"}\n" && err == std::string(embedPendingText) + "\n");
+        CHECK(pending.paths.size() == 2 && pending.paths[1] == "/network/client-acl-group");
+        {
+            std::ifstream file(jwt4Path);
+            std::string written;
+            std::getline(file, written);
+            CHECK(written == jwt4);
+        }
+        CHECK(mappedClient(loadMap(mapPath), key4) == id4 && aclPending(loadMap(mapPath), key4));
+        Mock enabled{{{200, answer4}, {200, aclAnswer(id4, "isolated")}}};
+        CHECK(runWith(enabled, mapPath, out, err, {"provision", key4, jwt4Path.string()}) == exitOk && err.empty());
+        CHECK((*enabled.bodies[0])["client_id"] == id4 && (*enabled.bodies[1])["client_id"] == id4 &&
+              (*enabled.bodies[1])["acl_group"] == "isolated");
+        CHECK(!aclPending(loadMap(mapPath), key4));
+        testAclGroup = "default";
+        // status: GET /network/embed printed as one line for an enabled and a
+        // not enabled network; a refusal or a refused root credential is 78; a
+        // server without the route and an invalid answer are 1
+        for (const auto& [state, line] : std::vector<std::pair<std::string, std::string>>{
+                 {R"({"enabled":true,"client_limit":5000,"active_client_count":1234})",
+                     "embed enabled: yes | client limit: 5000 | active clients: 1234\n"},
+                 {R"({"enabled":false,"client_limit":100,"active_client_count":0})",
+                     "embed enabled: no | client limit: 100 | active clients: 0\n"}}) {
+            Mock embedState{{{200, state}}};
+            CHECK(runWith(embedState, mapPath, out, err, {"status"}) == exitOk && out == line && err.empty());
+            CHECK(embedState.methods.size() == 1 && embedState.methods[0] == "GET" &&
+                  embedState.paths[0] == "/network/embed" && !embedState.bodies[0]);
+        }
+        Mock stateRefused{{{200, R"({"error":{"message":"Invalid credential."}})"}}};
+        CHECK(runWith(stateRefused, mapPath, out, err, {"status"}) == exitConfig && out.empty() &&
+              err.find("Invalid credential.") != std::string::npos && err.find('\n') == err.size() - 1);
+        Mock stateUnauthorized{{{401, ""}}};
+        CHECK(runWith(stateUnauthorized, mapPath, out, err, {"status"}) == exitConfig);
+        Mock stateOld{{{404, "404 page not found"}}};
+        CHECK(runWith(stateOld, mapPath, out, err, {"status"}) == exitFailure &&
+              err == std::string(embedUnsupportedText) + "\n");
+        for (const auto& invalid : {std::string(R"({"enabled":true})"),
+                 std::string(R"({"enabled":"yes","client_limit":1,"active_client_count":1})"),
+                 std::string(R"({"enabled":true,"client_limit":-1,"active_client_count":0})"),
+                 std::string(R"({"enabled":true,"client_limit":1.5,"active_client_count":0})")}) {
+            Mock stateInvalid{{{200, invalid}}};
+            CHECK(runWith(stateInvalid, mapPath, out, err, {"status"}) == exitFailure && out.empty());
+        }
         // a pending_acl entry that is not a mapped key, or not an array, is refused
         for (const auto& raw : {std::string(R"({"version":1,"clients":{},"pending_acl":["user:nobody"]})"),
                  std::string(R"({"version":1,"clients":{},"pending_acl":{}})")}) {
@@ -907,7 +1038,7 @@ void selfTest() {
               !std::regex_match("user:../a", keys) && !std::regex_match(id, keys) &&
               !std::regex_match("user:", keys) && !std::regex_match("user:-a", keys));
         for (const auto& args : std::vector<std::vector<std::string>>{{"provision", "user:a"}, {"usage"},
-                 {"usage-all", "x"}, {"--client-id", "x"}, {"remove", id}}) {
+                 {"usage-all", "x"}, {"--client-id", "x"}, {"remove", id}, {"status", "x"}}) {
             Mock unused;
             CHECK(runWith(unused, mapPath, out, err, args) == exitConfig && unused.methods.empty());
         }

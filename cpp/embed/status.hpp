@@ -29,6 +29,11 @@ inline constexpr const char* statusConnecting = "connecting";
 // The data fields' texts before and without a reading.
 inline constexpr const char* dataChecking = "checking";
 inline constexpr const char* dataUnavailable = "unavailable";
+
+// The server refuses the cap read with this message while the team has not
+// enabled Embed for the network (EMBED_CONTRACT.md, "Embed enablement"). The
+// refusal clears the last reading, so both data fields read unavailable.
+inline constexpr const char* embedNotEnabledMessage = "Embed isn't enabled for this network.";
 inline constexpr const char* dataNoCap = "no cap";
 
 // The capped_reason values of the cap object.
@@ -332,8 +337,16 @@ inline std::optional<Cap> parseCapText(std::string_view text) {
     return parseCap(value);
 }
 
-// What the data fields show: no reading yet, the first reading failed, or the
-// latest reading.
+// Whether an answer is the Embed-not-enabled refusal,
+// {"error": {"message": "Embed isn't enabled for this network."}}.
+inline bool capNotEnabled(std::string_view text) {
+    auto value = nlohmann::json::parse(text.begin(), text.end(), nullptr, false);
+    return value.is_object() && value.contains("error") && value["error"].is_object() &&
+        value["error"].contains("message") && value["error"]["message"] == embedNotEnabledMessage;
+}
+
+// What the data fields show: no reading yet, the first reading failed (or the
+// Embed-not-enabled refusal cleared the reading), or the latest reading.
 enum class CapsState { checking, unavailable, read };
 
 // The cap readings. A reading replaces the last one; a failure before any
@@ -351,6 +364,13 @@ struct Caps {
         } else if (state == CapsState::checking) {
             state = CapsState::unavailable;
         }
+    }
+
+    // The Embed-not-enabled refusal clears the last reading: both data fields
+    // read unavailable, and the status rules see no cap reading.
+    void clear() {
+        state = CapsState::unavailable;
+        cap = Cap{};
     }
 };
 

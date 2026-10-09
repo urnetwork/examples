@@ -240,9 +240,10 @@ inline FetchOutcome fetchClientJwt(const HttpFunction& http, const std::string& 
 // Reads this client's caps with its own client JWT:
 // GET /network/client-data-cap at the api origin. Empty with the reason for no
 // answer, another status (a server without the cap routes answers 404) or an
-// answer that is not a cap object.
-inline std::optional<Cap> readCaps(
-    const HttpFunction& http, const std::string& apiUrl, const std::string& clientJwt, std::string& error) {
+// answer that is not a cap object; the Embed-not-enabled refusal also sets
+// notEnabled.
+inline std::optional<Cap> readCaps(const HttpFunction& http, const std::string& apiUrl, const std::string& clientJwt,
+    std::string& error, bool* notEnabled = nullptr) {
     auto url = originUrl(apiUrl, clientDataCapPath);
     if (!url) {
         error = "the API URL is not an HTTPS origin";
@@ -259,7 +260,12 @@ inline std::optional<Cap> readCaps(
         return std::nullopt;
     }
     auto cap = parseCapText(response->body);
-    if (!cap) {
+    if (!cap && capNotEnabled(response->body)) {
+        error = embedNotEnabledMessage;
+        if (notEnabled) {
+            *notEnabled = true;
+        }
+    } else if (!cap) {
         error = "the answer is not a cap object";
     }
     return cap;

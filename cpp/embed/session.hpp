@@ -61,10 +61,12 @@ struct SessionEvents {
     // a contract status changed: read the caps again soon
     bool contractStatusChanged = false;
     // a finished cap read that the run loop has not applied yet: the reading,
-    // empty for a failure, with the failure's reason
+    // empty for a failure, with the failure's reason, and whether the failure
+    // is the Embed-not-enabled refusal
     bool capReadDone = false;
     std::optional<Cap> capReading;
     std::string capReadError;
+    bool capReadNotEnabled = false;
 
     // Whether work is waiting; the caller holds stateLock.
     bool pendingWithLock() const {
@@ -80,6 +82,7 @@ struct EventWork {
     bool capReadDone = false;
     std::optional<Cap> capReading;
     std::string capReadError;
+    bool capReadNotEnabled = false;
 };
 
 // Keeps closed subscriptions, and the listeners they own, until the process
@@ -194,7 +197,13 @@ public:
             auto now = std::chrono::steady_clock::now();
             if (work.capReadDone) {
                 capReadRunning = false;
-                caps.apply(work.capReading);
+                // the Embed-not-enabled refusal clears the last reading; another
+                // failure keeps it
+                if (work.capReadNotEnabled) {
+                    caps.clear();
+                } else {
+                    caps.apply(work.capReading);
+                }
                 if (!work.capReading && !capReadFailing) {
                     std::cerr << "could not read the data caps: " << work.capReadError << std::endl;
                 }
@@ -252,11 +261,13 @@ private:
         try {
             std::thread([sessionEvents = events, apiUrl = config.apiUrl, clientJwt = config.clientJwt]() {
                 std::string error;
-                auto reading = readCaps(curlHttp, apiUrl, clientJwt, error);
+                bool notEnabled = false;
+                auto reading = readCaps(curlHttp, apiUrl, clientJwt, error, &notEnabled);
                 std::lock_guard<std::mutex> lock(sessionEvents->stateLock);
                 sessionEvents->capReadDone = true;
                 sessionEvents->capReading = reading;
                 sessionEvents->capReadError = error;
+                sessionEvents->capReadNotEnabled = notEnabled;
                 sessionEvents->changed.notify_one();
             }).detach();
             return true;
@@ -292,6 +303,7 @@ private:
         std::swap(work.capReadDone, events->capReadDone);
         std::swap(work.capReading, events->capReading);
         std::swap(work.capReadError, events->capReadError);
+        std::swap(work.capReadNotEnabled, events->capReadNotEnabled);
         return work;
     }
 
