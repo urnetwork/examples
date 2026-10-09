@@ -7,6 +7,7 @@
 //   embed-server usage-all
 //   embed-server remove <key>
 //   embed-server acl <key> default|isolated
+//   embed-server status
 //   embed-server --self-test
 //
 // It extends the Swift integration allocator (../../integration/server): the
@@ -41,7 +42,7 @@ let exitConfig: Int32 = 78
 let clientDescription = "embed client"
 let deviceSpec = "urnetwork-examples/swift-embed-server"
 let usageText =
-  "usage: embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test"
+  "usage: embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | status | --self-test"
 let clientLimitText =
   "client limit reached: your network is at its client limit; see https://ur.io/services"
 let clientGoneMessage = "Client does not exist."
@@ -49,6 +50,17 @@ let unmappedText = "no client is mapped for that key; run provision first"
 let aclUnsupportedText = "/network/client-acl-group answered 404: the server predates ACL groups"
 let mapInvalid = "the client map is not a valid private map"
 let rootRefused = "the API refused the root credential"
+/// The server refuses the data-cap and ACL-group routes with this message
+/// while the team has not enabled Embed for the network (EMBED_CONTRACT.md,
+/// "Embed enablement"); caps and groups set earlier stay enforced.
+let embedNotEnabledMessage = "Embed isn't enabled for this network."
+/// cap, usage, usage-all and acl print this for the refusal and exit 78.
+let embedNotEnabledText = "embed not enabled: Embed isn't enabled for this network; see https://ur.io/services"
+/// provision prints this on stderr when the client's default ACL group stays
+/// pending because Embed isn't enabled, and exits 0.
+let embedPendingText =
+  "embed not enabled: the client's defaults stay pending until Embed is enabled; see https://ur.io/services"
+let embedUnsupportedText = "/network/embed answered 404: the server predates Embed enablement"
 
 /// A failure with its exit code and its one stderr line.
 struct Failure: Error, CustomStringConvertible {
@@ -348,6 +360,11 @@ struct Answer {
     return (try? JSONDecoder().decode(Refusal.self, from: body))?.error?.message ?? ""
   }
 
+  /// Whether the answer is the Embed-not-enabled refusal.
+  var embedNotEnabled: Bool {
+    return kind == .refused && refusalMessage == embedNotEnabledMessage
+  }
+
   /// Whether the refusal is either client limit flag.
   var clientLimitRefusal: Bool {
     let error = (try? JSONDecoder().decode(Refusal.self, from: body))?.error
@@ -396,19 +413,29 @@ func requireClient(_ map: ClientMap, _ key: String) throws -> String {
 
 /// Posts client's ACL group and checks that the answer names the client and the
 /// group; prints {"client_id": "...", "acl_group": "..."} when print is set.
-func postAclGroup(_ tool: Tool, _ client: String, _ group: String, print: Bool) throws {
+/// Returns false for the Embed-not-enabled refusal when allowNotEnabled is
+/// set; without it, the refusal exits 78 with the fixed line.
+@discardableResult
+func postAclGroup(_ tool: Tool, _ client: String, _ group: String, print: Bool, allowNotEnabled: Bool = false)
+  throws -> Bool
+{
   let answer = callApi(tool, "POST", "/network/client-acl-group", ["client_id": client, "acl_group": group])
   switch answer.kind {
   case .unauthorized:
     throw Failure(exitConfig, rootRefused)
   case .failed where answer.status == 404:
     throw Failure(exitFailure, aclUnsupportedText)
+  case .refused where answer.embedNotEnabled && allowNotEnabled:
+    return false
+  case .refused where answer.embedNotEnabled:
+    throw Failure(exitConfig, embedNotEnabledText)
   case .refused:
     throw Failure(exitFailure, "the API refused: \(answer.refusalMessage)")
   case .ok where answer.object["client_id"] as? String == client && answer.object["acl_group"] as? String == group:
     if print {
       tool.output("{\"client_id\":\"\(client)\",\"acl_group\":\"\(group)\"}")
     }
+    return true
   default:
     throw Failure(exitFailure, "setting the ACL group failed: no valid answer (HTTP \(answer.status))")
   }
@@ -416,8 +443,10 @@ func postAclGroup(_ tool: Tool, _ client: String, _ group: String, print: Bool) 
 
 /// provision <key> <client-jwt-file>: reissues the key's client, or provisions
 /// a new one; on "Client does not exist." it drops the mapping and provisions a
-/// new client. The client JWT goes only to the file.
-func provision(_ tool: Tool, _ key: String, _ jwtFile: String) throws {
+/// new client. The client JWT goes only to the file. While Embed isn't enabled
+/// the default ACL group stays pending, with a line to warn, and a provision
+/// after the team enables Embed applies it.
+func provision(_ tool: Tool, _ key: String, _ jwtFile: String, warn: (String) -> Void) throws {
   try requireKey(key, "provision")
   if jwtFile.isEmpty {
     throw Failure(exitConfig, "provision: invalid file")
@@ -471,14 +500,18 @@ func provision(_ tool: Tool, _ key: String, _ jwtFile: String) throws {
       }
       try saveMap(tool.mapPath, map)
     }
+    var embedEnabled = true
     if map.pendingAcl.contains(key) {
       // a new client is "default": only an isolated default needs the request.
       // A failure throws with the record kept, before any client JWT is written.
       if tool.aclGroup == "isolated" {
-        try postAclGroup(tool, id, "isolated", print: false)
+        embedEnabled = try postAclGroup(tool, id, "isolated", print: false, allowNotEnabled: true)
       }
-      map.setAclPending(key, false)
-      try saveMap(tool.mapPath, map)
+      // while Embed isn't enabled the record stays and the client works
+      if embedEnabled {
+        map.setAclPending(key, false)
+        try saveMap(tool.mapPath, map)
+      }
     }
     do {
       try writePrivate(jwtFile, Data((jwt + "\n").utf8))
@@ -486,6 +519,9 @@ func provision(_ tool: Tool, _ key: String, _ jwtFile: String) throws {
       throw Failure(exitFailure, "could not write the client JWT file")
     }
     tool.output(jsonLine(["client_id": id]))
+    if !embedEnabled {
+      warn(embedPendingText)
+    }
   }
 }
 
@@ -545,6 +581,8 @@ func printCap(_ tool: Tool, _ route: String, _ answer: Answer) throws {
     throw Failure(exitConfig, rootRefused)
   case .failed where answer.status == 404:
     throw Failure(exitFailure, "\(route) answered 404: the server predates the data-cap routes")
+  case .refused where answer.embedNotEnabled:
+    throw Failure(exitConfig, embedNotEnabledText)
   case .refused:
     throw Failure(exitFailure, "the API refused: \(answer.refusalMessage)")
   case .ok where answer.object["client_id"] != nil:
@@ -593,6 +631,9 @@ func usageAll(_ tool: Tool) throws {
     }
     if answer.kind == .failed && answer.status == 404 {
       throw Failure(exitFailure, "/network/client-data-caps answered 404: the server predates the data-cap routes")
+    }
+    if answer.embedNotEnabled {
+      throw Failure(exitConfig, embedNotEnabledText)
     }
     guard answer.kind == .ok, let clients = answer.object["clients"] as? [Any],
       clients.allSatisfy({ $0 is [String: Any] })
@@ -651,13 +692,52 @@ func acl(_ tool: Tool, _ key: String, _ group: String) throws {
   }
 }
 
+/// The network's Embed state, as GET /network/embed answers it. Decoding is
+/// strict: a missing member or one of another type is invalid.
+struct EmbedState: Decodable {
+  var enabled: Bool
+  var clientLimit: Int64
+  var activeClientCount: Int64
+
+  enum CodingKeys: String, CodingKey {
+    case enabled
+    case clientLimit = "client_limit"
+    case activeClientCount = "active_client_count"
+  }
+}
+
+/// status: prints the network's Embed state from GET /network/embed as one
+/// line, "embed enabled: yes | client limit: 5000 | active clients: 1234". A
+/// refusal, such as for a client JWT, is a configuration problem.
+func embedStatus(_ tool: Tool) throws {
+  let answer = callApi(tool, "GET", "/network/embed", nil)
+  switch answer.kind {
+  case .unauthorized:
+    throw Failure(exitConfig, rootRefused)
+  case .failed where answer.status == 404:
+    throw Failure(exitFailure, embedUnsupportedText)
+  case .refused:
+    throw Failure(exitConfig, "the API refused: \(answer.refusalMessage)")
+  default:
+    break
+  }
+  guard answer.kind == .ok, let state = try? JSONDecoder().decode(EmbedState.self, from: answer.body),
+    state.clientLimit >= 0, state.activeClientCount >= 0
+  else {
+    throw Failure(exitFailure, "no Embed state in the answer (HTTP \(answer.status))")
+  }
+  tool.output(
+    "embed enabled: \(state.enabled ? "yes" : "no") | client limit: \(state.clientLimit) | active clients: \(state.activeClientCount)"
+  )
+}
+
 /// Runs one command line (the arguments after the program name), giving a
 /// failure's one line to error.
 func run(_ tool: Tool, _ args: [String], error: (String) -> Void) -> Int32 {
   do {
     switch (args.first, args.count) {
     case ("provision", 3):
-      try provision(tool, args[1], args[2])
+      try provision(tool, args[1], args[2], warn: error)
     case ("cap", 2...):
       try cap(tool, args[1], Array(args.dropFirst(2)))
     case ("usage", 2):
@@ -668,6 +748,8 @@ func run(_ tool: Tool, _ args: [String], error: (String) -> Void) -> Int32 {
       try removeClient(tool, args[1])
     case ("acl", 3):
       try acl(tool, args[1], args[2])
+    case ("status", 1):
+      try embedStatus(tool)
     default:
       throw Failure(exitConfig, usageText)
     }
@@ -1010,6 +1092,55 @@ func selfTest() throws {
     let old = runWith(Mock([(404, "404 page not found")]), mapPath, args)
     try check(old.code == exitFailure && old.err == "\(route) answered 404: the server predates the data-cap routes\n")
   }
+  // Embed not enabled: cap, usage, usage-all and acl exit 78 with the fixed
+  // line
+  let notEnabled = #"{"error":{"message":"Embed isn't enabled for this network."}}"#
+  for args in [["cap", key3, "--monthly", "1"], ["usage", key3], ["usage-all"], ["acl", key3, "isolated"]] {
+    let refusedEmbed = runWith(Mock([(200, notEnabled)]), mapPath, args)
+    try check(refusedEmbed.code == exitConfig && refusedEmbed.out.isEmpty && refusedEmbed.err == embedNotEnabledText + "\n")
+  }
+  // provision still provisions: the client JWT written, the key kept in
+  // pending_acl and the pending line on stderr; a provision after Embed is
+  // enabled applies the group and drops the record
+  testAclGroup = "isolated"
+  try FileManager.default.removeItem(atPath: jwt4Path)
+  let pendingMock = Mock([(200, answer4), (200, notEnabled)])
+  let pendingRun = runWith(pendingMock, mapPath, ["provision", key4, jwt4Path])
+  try check(pendingRun.code == exitOk && pendingRun.out == jsonLine(["client_id": id4]) + "\n" && pendingRun.err == embedPendingText + "\n")
+  try check(pendingMock.paths.count == 2 && pendingMock.paths[1] == "/network/client-acl-group")
+  try check(String(decoding: FileManager.default.contents(atPath: jwt4Path) ?? Data(), as: UTF8.self) == jwt4 + "\n")
+  try check(mapped(key4) == id4 && pending(key4))
+  let enabledMock = Mock([(200, answer4), (200, aclAnswer(id4, "isolated"))])
+  let enabledRun = runWith(enabledMock, mapPath, ["provision", key4, jwt4Path])
+  try check(enabledRun.code == exitOk && enabledRun.err.isEmpty)
+  try check(enabledMock.bodies[0]?["client_id"] as? String == id4 && enabledMock.bodies[1]?["client_id"] as? String == id4 && enabledMock.bodies[1]?["acl_group"] as? String == "isolated")
+  try check(!pending(key4))
+  testAclGroup = "default"
+  // status: GET /network/embed printed as one line for an enabled and a not
+  // enabled network; a refusal or a refused root credential is 78; a server
+  // without the route and an invalid answer are 1
+  for (state, line) in [
+    (#"{"enabled":true,"client_limit":5000,"active_client_count":1234}"#, "embed enabled: yes | client limit: 5000 | active clients: 1234\n"),
+    (#"{"enabled":false,"client_limit":100,"active_client_count":0}"#, "embed enabled: no | client limit: 100 | active clients: 0\n"),
+  ] {
+    let stateMock = Mock([(200, state)])
+    let stateRun = runWith(stateMock, mapPath, ["status"])
+    try check(stateRun.code == exitOk && stateRun.out == line && stateRun.err.isEmpty)
+    try check(stateMock.methods == ["GET"] && stateMock.paths == ["/network/embed"] && stateMock.rawBodies == [nil])
+  }
+  let stateRefused = runWith(Mock([(200, #"{"error":{"message":"Invalid credential."}}"#)]), mapPath, ["status"])
+  try check(stateRefused.code == exitConfig && stateRefused.out.isEmpty && stateRefused.err.contains("Invalid credential.") && stateRefused.err.filter({ $0 == "\n" }).count == 1)
+  try check(runWith(Mock([(401, "")]), mapPath, ["status"]).code == exitConfig)
+  let stateOld = runWith(Mock([(404, "404 page not found")]), mapPath, ["status"])
+  try check(stateOld.code == exitFailure && stateOld.err == embedUnsupportedText + "\n")
+  for invalid in [
+    #"{"enabled":true}"#, #"{"enabled":"yes","client_limit":1,"active_client_count":1}"#,
+    #"{"enabled":true,"client_limit":-1,"active_client_count":0}"#, #"{"enabled":true,"client_limit":1.5,"active_client_count":0}"#,
+    #"{"enabled":1,"client_limit":1,"active_client_count":1}"#,
+  ] {
+    let stateInvalid = runWith(Mock([(200, invalid)]), mapPath, ["status"])
+    try check(stateInvalid.code == exitFailure && stateInvalid.out.isEmpty)
+  }
   // a pending_acl entry that is not a mapped key, or not an array, is refused
   for raw in [#"{"version":1,"clients":{},"pending_acl":["user:nobody"]}"#, #"{"version":1,"clients":{},"pending_acl":{}}"#] {
     try check(FileManager.default.createFile(atPath: mapPath, contents: Data(raw.utf8), attributes: [.posixPermissions: 0o600]))
@@ -1021,7 +1152,7 @@ func selfTest() throws {
   // keys and command lines
   try check(keyValid("user:alice") && keyValid(key) && !keyValid("user:../a") && !keyValid(id))
   try check(!keyValid("user:") && !keyValid("user:-a"))
-  for args in [["provision", "user:a"], ["usage"], ["usage-all", "x"], ["--client-id", "x"], ["remove", id], []] {
+  for args in [["provision", "user:a"], ["usage"], ["usage-all", "x"], ["--client-id", "x"], ["remove", id], ["status", "x"], []] {
     let unused = Mock()
     try check(runWith(unused, mapPath, args).code == exitConfig && unused.methods.isEmpty)
   }

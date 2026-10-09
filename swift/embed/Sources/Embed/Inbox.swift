@@ -12,6 +12,9 @@ import Foundation
 struct CapRead {
   var cap: Cap?
   var error: String
+  /// the failure is the Embed-not-enabled refusal, which clears the last
+  /// reading
+  var notEnabled = false
 }
 
 /// The pending work of one wake of the run loop.

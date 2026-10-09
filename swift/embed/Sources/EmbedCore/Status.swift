@@ -18,6 +18,11 @@ public let statusConnecting = "connecting"
 /// The data fields' texts before and without a reading.
 public let dataChecking = "checking"
 public let dataUnavailable = "unavailable"
+
+/// The server refuses the cap read with this message while the team has not
+/// enabled Embed for the network (EMBED_CONTRACT.md, "Embed enablement"). The
+/// refusal clears the last reading, so both data fields read unavailable.
+public let embedNotEnabledMessage = "Embed isn't enabled for this network."
 public let dataNoCap = "no cap"
 
 /// The capped_reason values of the cap object.
@@ -298,8 +303,20 @@ public func parseCap(_ data: Data) -> Cap? {
   return object.cap
 }
 
-/// What the data fields show: no reading yet, the first reading failed, or the
-/// latest reading.
+/// Whether an answer is the Embed-not-enabled refusal,
+/// {"error": {"message": "Embed isn't enabled for this network."}}.
+public func capNotEnabled(_ data: Data) -> Bool {
+  struct Refusal: Decodable {
+    struct Body: Decodable {
+      var message: String?
+    }
+    var error: Body?
+  }
+  return (try? JSONDecoder().decode(Refusal.self, from: data))?.error?.message == embedNotEnabledMessage
+}
+
+/// What the data fields show: no reading yet, the first reading failed (or the
+/// Embed-not-enabled refusal cleared the reading), or the latest reading.
 public enum CapsState: Equatable {
   case checking
   case unavailable
@@ -321,6 +338,12 @@ public struct Caps: Equatable {
     } else if state == .checking {
       state = .unavailable
     }
+  }
+
+  /// The Embed-not-enabled refusal clears the last reading: both data fields
+  /// read unavailable, and the status rules see no cap reading.
+  public mutating func clear() {
+    state = .unavailable
   }
 
   /// The latest reading, if any.

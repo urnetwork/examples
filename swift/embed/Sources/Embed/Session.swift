@@ -165,6 +165,8 @@ final class EmbedSession {
       do {
         let cap = try readCaps(http: urlSessionHttp, apiUrl: apiUrl, clientJwt: clientJwt)
         inbox.capReadFinished(CapRead(cap: cap, error: ""))
+      } catch let error as EmbedNotEnabledError {
+        inbox.capReadFinished(CapRead(cap: nil, error: "\(error)", notEnabled: true))
       } catch {
         inbox.capReadFinished(CapRead(cap: nil, error: "\(error)"))
       }
@@ -198,7 +200,13 @@ final class EmbedSession {
       let now = ProcessInfo.processInfo.systemUptime
       if let capRead = items.capRead {
         capReadRunning = false
-        caps.apply(capRead.cap)
+        // the Embed-not-enabled refusal clears the last reading; another
+        // failure keeps it
+        if capRead.notEnabled {
+          caps.clear()
+        } else {
+          caps.apply(capRead.cap)
+        }
         if capRead.cap == nil && !capReadFailing {
           writeError("could not read the data caps: \(capRead.error)")
         }

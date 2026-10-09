@@ -32,7 +32,8 @@ final class EmbedCoreTests: XCTestCase {
     try checkStatusRules()
   }
 
-  /// The data fields: checking, unavailable, no cap, and used of limit.
+  /// The data fields: checking, unavailable, the Embed-not-enabled refusal
+  /// clearing the last reading, no cap, and used of limit.
   func testDataFields() throws {
     try checkDataFields()
   }
@@ -62,7 +63,7 @@ final class EmbedCoreTests: XCTestCase {
     try checkTokenFetch()
   }
 
-  /// The cap read with the client JWT.
+  /// The cap read with the client JWT, and the Embed-not-enabled refusal.
   func testCapRead() throws {
     try checkCapRead()
   }

@@ -244,10 +244,17 @@ public struct CapReadError: Error, CustomStringConvertible {
   public let description: String
 }
 
+/// The cap read answered the Embed-not-enabled refusal, which clears the last
+/// reading.
+public struct EmbedNotEnabledError: Error, CustomStringConvertible {
+  public var description: String { embedNotEnabledMessage }
+}
+
 /// Reads this client's caps with its own client JWT:
 /// GET /network/client-data-cap at the api origin. Throws CapReadError for no
 /// answer, another status (a server without the cap routes answers 404) or an
-/// answer that is not a cap object.
+/// answer that is not a cap object, and EmbedNotEnabledError for the
+/// Embed-not-enabled refusal.
 public func readCaps(http: HttpFunction, apiUrl: String, clientJwt: String) throws -> Cap {
   guard let url = originUrl(apiUrl, path: clientDataCapPath) else {
     throw CapReadError(description: "the API URL is not an HTTPS origin")
@@ -262,6 +269,9 @@ public func readCaps(http: HttpFunction, apiUrl: String, clientJwt: String) thro
     throw CapReadError(description: "HTTP \(response.status)")
   }
   guard let cap = parseCap(response.body) else {
+    if capNotEnabled(response.body) {
+      throw EmbedNotEnabledError()
+    }
     throw CapReadError(description: "the answer is not a cap object")
   }
   return cap

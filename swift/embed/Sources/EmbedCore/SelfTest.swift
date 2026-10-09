@@ -232,6 +232,14 @@ public func checkClientLimitText() throws {
 public func checkStatusLines() throws {
   var unavailable = Caps()
   unavailable.apply(nil)
+  // the first reading answers the Embed-not-enabled refusal; and a capped
+  // monthly reading, then the refusal
+  var refused = Caps()
+  refused.clear()
+  var cleared = reading(
+    monthly: 5_000_000_000, monthlyUsed: 5_000_000_000, capped: true, reason: "monthly",
+    periodEnd: "2026-11-01T00:00:00Z")
+  cleared.clear()
   let cases: [(StatusInput, String)] = [
     (
       StatusInput(caps: Caps(), providersAdded: 0),
@@ -243,6 +251,14 @@ public func checkStatusLines() throws {
     ),
     (
       StatusInput(caps: unavailable, providersAdded: 1),
+      "status: connected | data this month: unavailable | data total: unavailable"
+    ),
+    (
+      StatusInput(caps: refused, providersAdded: 1),
+      "status: connected | data this month: unavailable | data total: unavailable"
+    ),
+    (
+      StatusInput(caps: cleared, providersAdded: 1),
       "status: connected | data this month: unavailable | data total: unavailable"
     ),
     (
@@ -334,6 +350,10 @@ public func checkDataFields() throws {
   try expect(dataField(caps, monthly: false) == "1.2 kB of 2.0 kB", "used of limit")
   caps.apply(nil)
   try expect(dataField(caps, monthly: false) == "1.2 kB of 2.0 kB", "a later failure")
+  caps.clear()
+  try expect(
+    dataField(caps, monthly: true) == "unavailable" && dataField(caps, monthly: false) == "unavailable",
+    "the Embed-not-enabled refusal did not clear the last reading")
 }
 
 /// The cap object: null or absent limits, capped and its reason, an unknown
@@ -374,8 +394,14 @@ public func checkCapObject() throws {
     #"{"monthly_used_byte_count":1.5}"#, #"{"capped":"yes"}"#, #"{"capped_reason":7}"#,
     #"{"total_byte_limit":9223372036854775808}"#, "[]", "null", "not json",
   ] {
-    try expect(parseCap(Data(refused.utf8)) == nil, "\(refused) read as a cap object")
+    try expect(
+      parseCap(Data(refused.utf8)) == nil && !capNotEnabled(Data(refused.utf8)),
+      "\(refused) read as a cap object")
   }
+  // the Embed-not-enabled refusal is no cap object, and is recognized
+  let notEnabled = Data(#"{"error":{"message":"Embed isn't enabled for this network."}}"#.utf8)
+  try expect(
+    parseCap(notEnabled) == nil && capNotEnabled(notEnabled), "the Embed-not-enabled refusal misread")
 }
 
 /// The C ABI's JSON values decode to the status inputs; NULL and junk are
@@ -554,10 +580,24 @@ public func checkCapRead() throws {
   ]
   for (index, response) in failed.enumerated() {
     let failing = StandIn([response])
-    try expect(
-      throwsError { _ = try readCaps(http: failing.http, apiUrl: testApiUrl, clientJwt: clientJwt1) },
-      "failed cap answer \(index) was read")
+    var failure: Error?
+    do {
+      _ = try readCaps(http: failing.http, apiUrl: testApiUrl, clientJwt: clientJwt1)
+    } catch {
+      failure = error
+    }
+    try expect(failure is CapReadError, "failed cap answer \(index) was read")
   }
+  let refusing = StandIn([answer(200, #"{"error":{"message":"Embed isn't enabled for this network."}}"#)])
+  var refusal: Error?
+  do {
+    _ = try readCaps(http: refusing.http, apiUrl: testApiUrl, clientJwt: clientJwt1)
+  } catch {
+    refusal = error
+  }
+  try expect(
+    refusal is EmbedNotEnabledError && "\(refusal!)" == embedNotEnabledMessage,
+    "the Embed-not-enabled refusal read as \(String(describing: refusal))")
 }
 
 /// State files are private, atomic and created once; a symlink is refused.
