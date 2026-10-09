@@ -6,7 +6,7 @@
 
 import {randomBytes} from "node:crypto";
 import {setTimeout as sleep} from "node:timers/promises";
-import {apiOrigin, defaultApiUrl, readDataCap} from "./caps.mjs";
+import {EmbedNotEnabledError, apiOrigin, defaultApiUrl, readDataCap} from "./caps.mjs";
 import {CompanionProcess, companionEnvironment, freeLoopbackAddress, readEmbedStatus} from "./companion.mjs";
 import {checkStateDir, loadClientJwt, loadOrCreateInstanceId} from "./state.mjs";
 import {CapReadings, dataChecking, dataFields, statusLine, statusText} from "./status.mjs";
@@ -139,14 +139,19 @@ export class EmbedSession {
 
   // Reads this client's caps with the client JWT that the companion keeps
   // refreshed in client.jwt. A failure keeps the last good reading; only a
-  // first failure shows "unavailable".
+  // first failure shows "unavailable". The Embed-not-enabled refusal clears
+  // the last reading.
   syncCaps() {
     this.#capSync ??= (async () => {
       try {
         const {clientJwt} = await loadClientJwt(this.#stateDir);
         this.#capReadings.succeeded(await readDataCap({apiUrl: this.#apiUrl, clientJwt, fetchFunction: this.#fetchFunction}));
-      } catch {
-        this.#capReadings.failed();
+      } catch (error) {
+        if (error instanceof EmbedNotEnabledError) {
+          this.#capReadings.notEnabled();
+        } else {
+          this.#capReadings.failed();
+        }
       } finally {
         this.#capSync = null;
       }
