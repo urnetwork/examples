@@ -86,7 +86,7 @@ Start the app (`cargo run`, or the bundle), enter the token server settings and 
 | Field | Meaning |
 | --- | --- |
 | Status | `stopped` before start and after stop; `signed out` after the server rejected the credential or the token server answered 401 or 409, until started again; `connecting`, then `connected` once the window has a provider added; `client limit, retry at HH:MM UTC` while the platform holds this client off; `paused` at a cap of 0; `data cap reached, resets YYYY-MM-DD HH:MM UTC` at the monthly cap, or `data cap reached` at the running total. |
-| Data this month | `<used> of <limit>` for the monthly cap, in decimal units; `no cap` without one; `checking` before the first read; `unavailable` if that read failed. |
+| Data this month | `<used> of <limit>` for the monthly cap, in decimal units; `no cap` without one; `checking` before the first read; `unavailable` if that read failed. While Embed isn't enabled for your network, the cap read answers `Embed isn't enabled for this network.` and both data fields read `unavailable` ([contract](../../EMBED_CONTRACT.md#embed-enablement)). |
 | Data total | The same for the running-total cap. |
 | Client ID, Installation ID | This installation's client and its `instance-id`. |
 

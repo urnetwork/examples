@@ -53,7 +53,7 @@ gradle assembleDebug testDebugUnitTest
 
 `assembleDebug` builds `build/outputs/apk/debug/urnetwork-android-embed-debug.apk`.
 
-`testDebugUnitTest` is the self-test. It runs on the JVM with no credentials, no network, no device and without loading the native SDK runtime, and checks the byte, reset time, client limit text and status line vectors; the status rules with the rule vectors; the data fields (checking, unavailable, a later failure keeping the last value, no cap); the cap object parsing; the JWT `client_id` claim; the token fetch against a stand-in token server (the bearer session, the `installation_id`, saving `client.jwt` atomically, a mismatched client refused, and the answers mapped to the states below); the state directory (private permissions, atomic replacement, `instance-id` created once, a symlinked file refused); the token server URL rules; and the configuration errors. The app's screen shows the SDK version at the bottom.
+`testDebugUnitTest` is the self-test. It runs on the JVM with no credentials, no network, no device and without loading the native SDK runtime, and checks the byte, reset time, client limit text and status line vectors; the status rules with the rule vectors; the data fields (checking, unavailable, a later failure keeping the last value, the Embed-not-enabled refusal clearing it, no cap); the cap object parsing; the JWT `client_id` claim; the token fetch against a stand-in token server (the bearer session, the `installation_id`, saving `client.jwt` atomically, a mismatched client refused, and the answers mapped to the states below); the state directory (private permissions, atomic replacement, `instance-id` created once, a symlinked file refused); the token server URL rules; and the configuration errors. The app's screen shows the SDK version at the bottom.
 
 ## Backend: provision clients and set data caps
 
@@ -142,7 +142,7 @@ status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap
 | Field | Meaning |
 | --- | --- |
 | Status | `stopped` before Start and after Stop; `signed out` after the server rejects the client credential or the token server answers 401 or 409; `client limit, retry at HH:MM UTC` while the platform holds this client off; `paused` while a cap of 0 is reached; `data cap reached, resets YYYY-MM-DD HH:MM UTC` at the monthly cap, `data cap reached` at the running total; `connected` once the device has a provider; `connecting` otherwise. |
-| Data this month | `checking` until the first cap read, `unavailable` if it fails, `no cap` without a monthly cap, otherwise the used amount of the cap in decimal units. |
+| Data this month | `checking` until the first cap read, `unavailable` if it fails, `no cap` without a monthly cap, otherwise the used amount of the cap in decimal units. While Embed isn't enabled for your network, the cap read answers `Embed isn't enabled for this network.` and both data fields read `unavailable` ([contract](../../EMBED_CONTRACT.md#embed-enablement)). |
 | Data total | The same for the running total. |
 | Client ID, Installation ID | The installation's client in your network, and its `instance-id`. |
 

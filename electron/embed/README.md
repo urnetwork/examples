@@ -100,7 +100,7 @@ Start the app with `npm start`, or the packaged app. Press **Start**: the app ob
 | Field | Shows |
 | --- | --- |
 | Status | `signed out`, `stopped`, `client limit, retry at HH:MM UTC`, `paused`, `data cap reached, resets YYYY-MM-DD HH:MM UTC`, `data cap reached`, `connected` or `connecting`: the first that applies ([rules](../../EMBED_CONTRACT.md#status)). |
-| Data this month | `checking`, `unavailable`, `no cap`, or the bytes used this UTC month of the monthly cap. |
+| Data this month | `checking`, `unavailable`, `no cap`, or the bytes used this UTC month of the monthly cap. While Embed isn't enabled for your network, the cap read answers `Embed isn't enabled for this network.` and both data fields read `unavailable` ([contract](../../EMBED_CONTRACT.md#embed-enablement)). |
 | Data total | The same for the running-total cap. |
 | Client ID, Installation ID | The installation's client and its `instance-id`. |
 
