@@ -6,13 +6,17 @@ check; test_provider.py runs each one as a test."""
 
 import base64
 import contextlib
+import ctypes as C
 import hashlib
 import io
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 
+from sdk_load import EXIT_CONFIG as SDK_EXIT_CONFIG, SdkLoadError, load_urnetwork, sdk_mismatch_message
 from state import (
     CLIENT_JWT_FILE_NAME,
     IDENTITY_FILE_NAME,
@@ -99,6 +103,7 @@ def run_self_test():
         check_state_files,
         check_provider_config,
         check_usage_exit_code,
+        check_sdk_mismatch,
     ]
     for check in checks:
         check()
@@ -484,3 +489,86 @@ def check_usage_exit_code():
         exit_code = main.run(["--unknown"])
     if exit_code != main.EXIT_CONFIG:
         raise SelfTestError(f"usage error exit code {exit_code}, want {main.EXIT_CONFIG}")
+
+
+# a urnetwork package whose bindings name a function that the native library
+# lacks, as when the library is older than the package: ctypes raises its own
+# AttributeError on every platform
+STALE_PACKAGE = """
+import ctypes
+import os
+
+_library = ctypes.WinDLL("kernel32") if os.name == "nt" else ctypes.CDLL(None)
+_library.urnet_self_test_newer_function.restype = ctypes.c_void_p
+"""
+
+
+def run_main_with_stale_package(args: list, **settings):
+    """Runs main.py in a child process with STALE_PACKAGE first on the import
+    path; returns the exit code, stdout and stderr."""
+    package_root = tempfile.mkdtemp(prefix="ur-provider-self-test-")
+    try:
+        os.mkdir(os.path.join(package_root, "urnetwork"))
+        with open(os.path.join(package_root, "urnetwork", "__init__.py"), "w") as file:
+            file.write(STALE_PACKAGE)
+        environment = {name: value for name, value in os.environ.items() if not name.startswith("URNETWORK_")}
+        environment.update(settings, PYTHONPATH=package_root, PYTHONDONTWRITEBYTECODE="1")
+        main_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+        completed = subprocess.run([sys.executable, main_path, *args], env=environment, capture_output=True, text=True, timeout=60)
+        return completed.returncode, completed.stdout, completed.stderr
+    finally:
+        shutil.rmtree(package_root, ignore_errors=True)
+
+
+def check_sdk_mismatch():
+    """A native library older than the urnetwork package exits 78 (a
+    configuration problem that a restart does not fix) with the SDK version
+    mismatch line, not a traceback, from every command that loads the package;
+    other load failures exit 1."""
+    library = C.WinDLL("kernel32") if os.name == "nt" else C.CDLL(None)
+    try:
+        library.urnet_self_test_newer_function
+    except AttributeError as error:
+        missing = error
+    else:
+        raise SelfTestError("the platform library has the self-test's function")
+    message = sdk_mismatch_message(missing)
+    if message is None or "SDK version mismatch" not in message or "urnet_self_test_newer_function" not in message:
+        raise SelfTestError(f"a missing C ABI function is not a version mismatch: {missing}")
+    if sdk_mismatch_message(AttributeError("'NoneType' object has no attribute 'raw'")) is not None:
+        raise SelfTestError("another AttributeError is a version mismatch")
+    if sdk_mismatch_message(OSError("dlopen failed: urnet_x")) is not None:
+        raise SelfTestError("a library that does not load is a version mismatch")
+
+    def raising(error):
+        def importer(_name):
+            raise error
+
+        return importer
+
+    for error, exit_code in [(missing, SDK_EXIT_CONFIG), (ImportError("No module named 'urnetwork'"), 1), (OSError("no library"), 1)]:
+        try:
+            load_urnetwork(raising(error))
+        except SdkLoadError as load_error:
+            if load_error.exit_code != exit_code:
+                raise SelfTestError(f"{error!r} exits {load_error.exit_code}, want {exit_code}") from None
+        else:
+            raise SelfTestError(f"{error!r} loaded")
+
+    state_dir = tempfile.mkdtemp(prefix="ur-provider-self-test-")
+    try:
+        if POSIX:
+            os.chmod(state_dir, 0o700)
+        client_jwt = self_test_jwt(f'{{"client_id":"{TEST_PROVIDER_ID}"}}')
+        write_private_file(os.path.join(state_dir, CLIENT_JWT_FILE_NAME), (client_jwt + "\n").encode())
+        for args, settings in [(["--version"], {}), (["run"], {"URNETWORK_PROVIDER_STATE_DIR": state_dir})]:
+            code, out, err = run_main_with_stale_package(args, **settings)
+            if code != SDK_EXIT_CONFIG:
+                raise SelfTestError(f"{args} with a stale native library exits {code}, want 78: {err}")
+            lines = err.strip().splitlines()
+            if len(lines) != 1 or not lines[0].startswith("SDK version mismatch") or "urnet_self_test_newer_function" not in lines[0]:
+                raise SelfTestError(f"{args} with a stale native library prints {err!r}, want the one mismatch line")
+            if args == ["run"] and out.strip() != CONSENT_DISCLAIMER.strip():
+                raise SelfTestError("run prints more than the disclaimer before the mismatch")
+    finally:
+        shutil.rmtree(state_dir, ignore_errors=True)

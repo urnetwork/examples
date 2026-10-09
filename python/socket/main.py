@@ -1,20 +1,22 @@
 """Run with python main.py --mode httpx; see README.md for account setup."""
 
 import argparse
+from pathlib import Path
+import sys
 import time
 from urllib.parse import urlsplit
 import uuid
-import urnetwork
-import httpx
-import requests
-from ur_http import UrHttpxTransport, UrRequestsAdapter
-
-
-from pathlib import Path
-import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
-from client import local_device
+from sdk_load import load_urnetwork_or_exit
+
+# first, so that a native library older than the package exits 78 with one line
+urnetwork = load_urnetwork_or_exit()
+
+import httpx  # noqa: E402
+import requests  # noqa: E402
+from ur_http import UrHttpxTransport, UrRequestsAdapter  # noqa: E402
+from client import local_device  # noqa: E402
 
 
 def main():

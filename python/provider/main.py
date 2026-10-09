@@ -6,7 +6,8 @@ mapped by the backend and is only displayed here.
 
 Usage: main.py [run] | --self-test | --version. All installation state is in the
 private directory named by URNETWORK_PROVIDER_STATE_DIR (state.py). The
-self-test needs only Python; the other commands load the urnetwork package.
+self-test needs only Python; the other commands load the urnetwork package, and
+a native library older than the package exits 78 (sdk_load.py).
 
 Exit codes, for supervisors: 0 stopped on request, 78 configuration or
 credential problem (restarting does not help), 1 any other failure."""
@@ -16,6 +17,7 @@ import queue
 import signal
 import sys
 
+from sdk_load import SdkLoadError, load_urnetwork, sdk_mismatch_message
 from state import ConfigError, load_provider_config
 from status import CONSENT_DISCLAIMER
 
@@ -52,10 +54,10 @@ def run(args: list) -> int:
         return EXIT_STOPPED
     if args == ["--version"]:
         try:
-            import urnetwork
-        except (ImportError, OSError) as error:
-            print(f"could not load the urnetwork package: {error}", file=sys.stderr)
-            return EXIT_FAILURE
+            urnetwork = load_urnetwork()
+        except SdkLoadError as error:
+            print(error, file=sys.stderr)
+            return error.exit_code
         print(urnetwork.version())
         return EXIT_STOPPED
     if args not in ([], ["run"]):
@@ -69,17 +71,16 @@ def run(args: list) -> int:
         print(error, file=sys.stderr)
         return EXIT_CONFIG
     try:
-        import urnetwork
-    except (ImportError, OSError) as error:
-        print(f"could not load the urnetwork package: {error}", file=sys.stderr)
-        return EXIT_FAILURE
+        urnetwork = load_urnetwork()
+    except SdkLoadError as error:
+        print(error, file=sys.stderr)
+        return error.exit_code
     from session import EVENT_STOP, ProviderSession, configure_sdk_logs
 
     try:
         configure_sdk_logs(urnetwork, os.path.join(config.state_dir, "logs"))
-    except OSError as error:
-        print(f"could not set the sdk log directory: {error}", file=sys.stderr)
-        return EXIT_FAILURE
+    except (OSError, AttributeError) as error:
+        return report_sdk_failure(error, "could not set the sdk log directory")
 
     # the run loop's events; a stop request is one of them. SimpleQueue.put is
     # safe in a signal handler, which can interrupt the main thread anywhere.
@@ -94,8 +95,7 @@ def run(args: list) -> int:
     try:
         session = ProviderSession(config, urnetwork, events)
     except Exception as error:
-        print(f"could not start the provider: {error}", file=sys.stderr)
-        return EXIT_FAILURE
+        return report_sdk_failure(error, "could not start the provider")
     try:
         print(f"provider client {config.client_id}, instance {config.instance_id}")
         session.run()
@@ -106,6 +106,18 @@ def run(args: list) -> int:
         return EXIT_CONFIG
     finally:
         session.close()
+
+
+def report_sdk_failure(error: Exception, doing: str) -> int:
+    """Prints why an SDK call failed and returns the exit code: 78 with the SDK
+    version mismatch line for a C ABI function that the native library lacks, 1
+    otherwise."""
+    mismatch = sdk_mismatch_message(error)
+    if mismatch is not None:
+        print(mismatch, file=sys.stderr)
+        return EXIT_CONFIG
+    print(f"{doing}: {error}", file=sys.stderr)
+    return EXIT_FAILURE
 
 
 if __name__ == "__main__":

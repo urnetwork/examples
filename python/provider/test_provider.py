@@ -45,7 +45,9 @@ from status import PROVIDE_MODE_NONE, PROVIDE_MODE_PUBLIC
 try:
     import urnetwork
     from urnetwork import _raw as native_callback_types
-except (ImportError, OSError):
+except (ImportError, OSError, AttributeError):
+    # not installed, no native library, or a native library older than the
+    # package (an SDK version mismatch, which main.py reports with exit 78)
     urnetwork = None
     native_callback_types = None
 
@@ -431,6 +433,9 @@ class SelfTestChecks(unittest.TestCase):
 
     def test_usage_exit_code(self):
         selftest.check_usage_exit_code()
+
+    def test_sdk_mismatch(self):
+        selftest.check_sdk_mismatch()
 
 
 class ProviderRunExitCodes(unittest.TestCase):

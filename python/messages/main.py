@@ -21,7 +21,11 @@ def main():
     if args == ["--self-test"]:
         self_test()
         return
-    import urnetwork
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
+    from sdk_load import load_urnetwork_or_exit
+
+    # a native library older than the package exits 78 with one line
+    urnetwork = load_urnetwork_or_exit()
     from urnetwork import raw
     from urnetwork._raw import (
         urnet_network_peers_change_cb,
@@ -29,7 +33,6 @@ def main():
         urnet_subprotocols_query_cb,
     )
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
     from client import local_device, take_string
 
     if args == ["--version"]:
