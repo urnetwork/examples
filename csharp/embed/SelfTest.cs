@@ -40,6 +40,7 @@ internal static class SelfTest {
       CheckStateFiles,
       CheckSettings,
       CheckUsageExitCode,
+      CheckStartLine,
     ];
     foreach (Action check in checks) {
       check();
@@ -63,14 +64,15 @@ internal static class SelfTest {
     throw new Exception(reason);
   }
 
-  /// Decimal units, one decimal, ties to even, the next unit at 1000.0.
+  /// Decimal units, one decimal, ties to even on the exact integer, the next
+  /// unit at 1000.0.
   private static void CheckFormatByteCount() {
     (long ByteCount, string Text)[] cases = [
       (0, "0 B"), (999, "999 B"), (1000, "1.0 kB"), (999949, "999.9 kB"),
-      // exact halves round to even, as Go's %.1f does
-      (1250, "1.2 kB"), (1750, "1.8 kB"),
-      // 999.999 kB rounds to 1000.0 kB and moves to the next unit
-      (999999, "1.0 MB"),
+      // exact halves round to even on the integer: 1.05 is not a binary fraction
+      (1050, "1.0 kB"), (1150, "1.2 kB"), (1250, "1.2 kB"), (1750, "1.8 kB"),
+      // 999.95 kB ties to the even 1000.0 kB and moves to the next unit, as does 999.999 kB
+      (999950, "1.0 MB"), (999999, "1.0 MB"),
       (1234567890, "1.2 GB"), (5000000000, "5.0 GB"), (10000000000, "10.0 GB"),
       (3000000000000, "3.0 TB"), (long.MaxValue, "9.2 EB"),
     ];
@@ -376,6 +378,10 @@ internal static class SelfTest {
         (HttpStatusCode.InternalServerError, """{"error":{"code":"upstream","message":"upstream failed"}}""", 1, "stopped", "HTTP 500"),
         (HttpStatusCode.ServiceUnavailable, """{"error":{"code":"busy","message":"retry"}}""", 1, "stopped", "HTTP 503"),
         (HttpStatusCode.BadRequest, """{"error":{"code":"invalid_request","message":"bad"}}""", 1, "stopped", "HTTP 400"),
+        (HttpStatusCode.NotFound, "404 page not found", 1, "stopped", "HTTP 404"),
+        (HttpStatusCode.MethodNotAllowed, """{"error":{"code":"method_not_allowed","message":"use POST"}}""", 1, "stopped", "HTTP 405"),
+        (HttpStatusCode.InternalServerError, """{"error":{"code":"internal","message":"internal error"}}""", 1, "stopped", "HTTP 500"),
+        (HttpStatusCode.BadGateway, """{"error":{"code":"upstream","message":"upstream failed"}}""", 1, "stopped", "HTTP 502"),
         (HttpStatusCode.OK, "not json", 1, "stopped", "invalid"),
         (HttpStatusCode.OK, $$"""{"client_id":"{{ClientId}}","by_client_jwt":"{{Jwt(new { network_id = ClientId })}}"}""", 1, "stopped", "client_id"),
       ];
@@ -513,6 +519,17 @@ internal static class SelfTest {
     } finally {
       Directory.Delete(stateDir, recursive: true);
     }
+  }
+
+  /// The start line and the kind of app whose licenses --licenses prints.
+  private static void CheckStartLine() {
+    Expect(StatusRules.StartLine(ClientId, InstanceId) == $"embed client {ClientId}, installation {InstanceId}",
+           "the start line is not the contract's");
+    Expect(StatusRules.LicenseApp(windows: true, macOs: false) == "windows" &&
+           StatusRules.LicenseApp(windows: false, macOs: true) == "apple" &&
+           StatusRules.LicenseApp(windows: false, macOs: false) == "linux",
+           "--licenses asks for the wrong kind of app");
+    Expect(Program.Usage.Contains("--licenses"), "the usage does not name --licenses");
   }
 
   /// An unknown command is a usage error, exit 78.

@@ -25,6 +25,14 @@ internal sealed class StandInApi {
   public Dictionary<string, string> Pages = [];
   // when set, the cap routes answer this body
   public string? CapAnswer;
+  // the ACL group each client was set to
+  public readonly Dictionary<string, string> AclGroups = [];
+  // how many ACL requests still fail with HTTP 500
+  public int AclFailures;
+  // when set, the ACL route answers 404, as a server without ACL groups does
+  public bool AclUnsupported;
+  // when set, the ACL route answers the other group
+  public bool AclMismatch;
   private int nextClient = 1;
   private int generation;
 
@@ -74,12 +82,32 @@ internal sealed class StandInApi {
       string cursor = rest.StartsWith("&cursor=", StringComparison.Ordinal) ? Uri.UnescapeDataString(rest[8..]) : "";
       return Answer(200, Pages.GetValueOrDefault(cursor, """{"clients":[],"next_cursor":null}"""));
     }
+    if (request.Method == "POST" && path == Program.AclPath && !AclUnsupported) {
+      if (AclFailures > 0) {
+        AclFailures--;
+        return Answer(500, "{}");
+      }
+      string id = Program.Text(body["client_id"]) ?? "";
+      string group = Program.Text(body["acl_group"]) ?? "";
+      if (Missing.Contains(id)) {
+        return Answer(200, """{"error":{"message":"Client does not exist."}}""");
+      }
+      if (group is not ("default" or "isolated")) {
+        return Answer(200, """{"error":{"message":"Invalid ACL group."}}""");
+      }
+      AclGroups[id] = group;
+      string answered = AclMismatch ? (group == "default" ? "isolated" : "default") : group;
+      return Answer(200, new JsonObject { ["client_id"] = id, ["acl_group"] = answered }.ToJsonString());
+    }
     if (request.Method == "POST" && path == Program.RemovePath) {
       string id = Program.Text(body["client_id"]) ?? "";
       return Answer(200, Missing.Contains(id) ? """{"error":{"message":"Client does not exist."}}""" : "{}");
     }
     return Answer(404, "404 page not found");
   }
+
+  /// The ACL requests this stand-in answered.
+  public List<ApiRequest> AclRequests() => Requests.Where(r => r.PathAndQuery == Program.AclPath).ToList();
 
   /// A cap object for a client.
   public static string Cap(string clientId) =>
@@ -114,6 +142,8 @@ internal static class SelfTest {
       CheckUsageAll(dir);
       CheckRemove(dir);
       CheckMap(dir);
+      CheckAclGroups(dir);
+      CheckFailureTexts(dir);
       CheckNothingSecretPrinted();
     } finally {
       Directory.Delete(dir, recursive: true);
@@ -126,12 +156,14 @@ internal static class SelfTest {
     }
   }
 
-  /// The settings of a run with a map in dir.
-  private static Func<string, string?> Env(string dir, string map = "clients.json") {
+  /// The settings of a run with a map in dir. The checks that do not test ACL
+  /// groups keep new clients in "default", which sends no ACL request.
+  private static Func<string, string?> Env(string dir, string map = "clients.json", string? aclGroup = "default") {
     var settings = new Dictionary<string, string?> {
       ["URNETWORK_ROOT_JWT"] = Root,
       ["URNETWORK_CLIENT_MAP"] = Path.Combine(dir, map),
       ["URNETWORK_API_URL"] = "http://127.0.0.1:1234",
+      ["URNETWORK_DEFAULT_ACL_GROUP"] = aclGroup,
     };
     return name => settings.GetValueOrDefault(name);
   }
@@ -228,6 +260,8 @@ internal static class SelfTest {
       ["cap", "user:a"], ["cap", "user:a", "--monthly", "1GB"], ["cap", "user:a", "--monthly", "-1"],
       ["cap", "user:a", "--monthly", "9223372036854775808"], ["cap", "user:a", "--monthly", "1", "--monthly", "2"],
       ["cap", "user:a", "--foo"], ["cap", "user:a", "--monthly"], ["cap", "user:a", "--reset-total", "--reset-total"],
+      ["acl"], ["acl", "user:a"], ["acl", "user:a", "other"], ["acl", "user:a", "Default"],
+      ["acl", "user:a", "default", "extra"], ["acl", "alice", "default"],
     ];
     foreach (string[] args in usage) {
       Expect(Exec(api, env, args).Exit == 78, $"the arguments [{string.Join(' ', args)}] do not exit 78");
@@ -240,7 +274,11 @@ internal static class SelfTest {
       ["URNETWORK_ROOT_JWT"] = Root, ["URNETWORK_CLIENT_MAP"] = Path.Combine(dir, "clients.json"),
       ["URNETWORK_API_URL"] = "http://api.example.com",
     };
-    foreach (var settings in new[] { noRoot, noMap, relativeMap, plainHttp }) {
+    var badGroup = new Dictionary<string, string?> {
+      ["URNETWORK_ROOT_JWT"] = Root, ["URNETWORK_CLIENT_MAP"] = Path.Combine(dir, "clients.json"),
+      ["URNETWORK_DEFAULT_ACL_GROUP"] = "private",
+    };
+    foreach (var settings in new[] { noRoot, noMap, relativeMap, plainHttp, badGroup }) {
       Expect(Exec(api, name => settings.GetValueOrDefault(name), "provision", "user:a", jwtFile).Exit == 78,
              "missing or invalid settings do not exit 78");
     }
@@ -343,6 +381,138 @@ internal static class SelfTest {
     using (Program.CreatePrivate(locked + ".lock")) {
       Expect(Exec(api, Env(dir, "locked.json"), "provision", "user:hana", Path.Combine(dir, "hana.jwt")).Exit == 1,
              "a held lock does not exit 1");
+    }
+  }
+
+  /// The keys a map file records in pending_acl.
+  private static List<string> PendingAcl(string dir, string map) => ClientMap.Load(Path.Combine(dir, map)).PendingAcl;
+
+  /// The default ACL group: applied to a new client only, with pending_acl
+  /// set before and cleared after, kept and retried after a failure, kept on
+  /// a server without ACL groups, and settled by acl; the acl command.
+  private static void CheckAclGroups(string dir) {
+    var api = new StandInApi();
+    var isolated = Env(dir, "acl.json", aclGroup: null);
+    string jwtFile = Path.Combine(dir, "ivan.jwt");
+    string id = StandInApi.Id(1);
+
+    // unset means isolated: one ACL request after the new client, then no record
+    var run = Exec(api, isolated, "provision", "user:ivan", jwtFile);
+    Expect(run.Exit == 0 && api.Requests.Count == 2 && api.Requests[1].PathAndQuery == Program.AclPath &&
+           Canonical(api.Requests[1].Body!) == Canonical($"{{\"client_id\":\"{id}\",\"acl_group\":\"isolated\"}}"),
+           $"a new client is not put in isolated: {run.Err}");
+    Expect(api.AclGroups[id] == "isolated" && PendingAcl(dir, "acl.json").Count == 0 &&
+           !File.ReadAllText(Path.Combine(dir, "acl.json")).Contains("pending_acl") &&
+           File.ReadAllText(jwtFile) == api.IssuedJwts[0] + "\n",
+           "an applied group leaves its record or no client JWT");
+    run = Exec(api, isolated, "provision", "user:ivan", jwtFile);
+    Expect(run.Exit == 0 && api.AclRequests().Count == 1, "a reissue sends an ACL request");
+
+    // a failed request keeps the record and writes no client JWT; the next issue retries
+    api.AclFailures = 1;
+    string judyJwt = Path.Combine(dir, "judy.jwt");
+    run = Exec(api, isolated, "provision", "user:judy", judyJwt);
+    Expect(run.Exit == 1 && !File.Exists(judyJwt) &&
+           PendingAcl(dir, "acl.json").SequenceEqual(new[] { "user:judy" }) &&
+           ClientMap.Load(Path.Combine(dir, "acl.json")).Clients["user:judy"] == StandInApi.Id(2),
+           $"a failed ACL request does not keep the record: {run.Exit} {run.Err}");
+    run = Exec(api, isolated, "provision", "user:judy", judyJwt);
+    Expect(run.Exit == 0 && api.AclGroups[StandInApi.Id(2)] == "isolated" &&
+           PendingAcl(dir, "acl.json").Count == 0 && File.Exists(judyJwt),
+           "a pending group is not applied on the next issue");
+
+    // a server without ACL groups: exit 1 with the record kept; a default of default then provisions
+    var older = new StandInApi { AclUnsupported = true };
+    string kimJwt = Path.Combine(dir, "kim.jwt");
+    run = Exec(older, Env(dir, "older.json", aclGroup: "isolated"), "provision", "user:kim", kimJwt);
+    Expect(run.Exit == 1 && run.Err.Trim() == Program.AclUnsupportedMessage && !File.Exists(kimJwt) &&
+           PendingAcl(dir, "older.json").SequenceEqual(new[] { "user:kim" }),
+           $"a server without ACL groups answers {run.Exit}: {run.Err}");
+    run = Exec(older, Env(dir, "older.json"), "provision", "user:kim", kimJwt);
+    Expect(run.Exit == 0 && File.Exists(kimJwt) && PendingAcl(dir, "older.json").Count == 0 &&
+           older.AclRequests().Count == 1,
+           "a default of default does not settle the record without a request");
+    // a default of default sends no request for a new client
+    run = Exec(older, Env(dir, "older.json"), "provision", "user:leo", Path.Combine(dir, "leo.jwt"));
+    Expect(run.Exit == 0 && older.AclRequests().Count == 1 && PendingAcl(dir, "older.json").Count == 0,
+           "a default of default sends an ACL request");
+
+    // the acl command: request body, printed answer, and refusals
+    run = Exec(api, isolated, "acl", "user:ivan", "default");
+    Expect(run.Exit == 0 && run.Out.Trim() == $"{{\"client_id\":\"{id}\",\"acl_group\":\"default\"}}" &&
+           Canonical(api.Requests[^1].Body!) == Canonical($"{{\"client_id\":\"{id}\",\"acl_group\":\"default\"}}") &&
+           api.AclGroups[id] == "default",
+           $"acl printed {run.Out}{run.Err}");
+    int sent = api.Requests.Count;
+    Expect(Exec(api, isolated, "acl", "user:ivan", "public").Exit == 78 && api.Requests.Count == sent,
+           "an invalid group is sent");
+    api.AclMismatch = true;
+    Expect(Exec(api, isolated, "acl", "user:ivan", "isolated").Exit == 1, "an answer for another group is accepted");
+    api.AclMismatch = false;
+    api.Missing.Add(id);
+    Expect(Exec(api, isolated, "acl", "user:ivan", "isolated").Exit == 1, "a refused ACL request does not exit 1");
+    api.Missing.Remove(id);
+    run = Exec(new StandInApi { AclUnsupported = true }, isolated, "acl", "user:ivan", "isolated");
+    Expect(run.Exit == 1 && run.Err.Trim() == Program.AclUnsupportedMessage, $"acl on an older server: {run.Err}");
+
+    // an explicit group settles a pending record, so a later issue keeps it
+    api.AclFailures = 1;
+    Exec(api, isolated, "provision", "user:mia", Path.Combine(dir, "mia.jwt"));
+    Expect(PendingAcl(dir, "acl.json").SequenceEqual(new[] { "user:mia" }), "the failed group is not recorded");
+    run = Exec(api, isolated, "acl", "user:mia", "default");
+    Expect(run.Exit == 0 && PendingAcl(dir, "acl.json").Count == 0, "acl does not settle a pending record");
+    sent = api.AclRequests().Count;
+    Expect(Exec(api, isolated, "provision", "user:mia", Path.Combine(dir, "mia.jwt")).Exit == 0 &&
+           api.AclRequests().Count == sent && api.AclGroups[StandInApi.Id(3)] == "default",
+           "a settled group is overridden on the next issue");
+
+    // remove drops a pending record with its mapping
+    api.AclFailures = 1;
+    Exec(api, isolated, "provision", "user:noor", Path.Combine(dir, "noor.jwt"));
+    Expect(Exec(api, isolated, "remove", "user:noor").Exit == 0 && PendingAcl(dir, "acl.json").Count == 0,
+           "remove keeps a pending record");
+
+    // a pending_acl that is not a list of distinct mapped keys is refused untouched
+    string[] invalid = [
+      """{"version":1,"clients":{},"pending_acl":["user:x"]}""",
+      $$"""{"version":1,"clients":{"user:x":"{{id}}"},"pending_acl":["user:x","user:x"]}""",
+      $$"""{"version":1,"clients":{"user:x":"{{id}}"},"pending_acl":"user:x"}""",
+      $$"""{"version":1,"clients":{"user:x":"{{id}}"},"pending_acl":[1]}""",
+    ];
+    foreach (string text in invalid) {
+      string map = Path.Combine(dir, "pending.json");
+      Program.WritePrivate(map, Encoding.UTF8.GetBytes(text));
+      var refused = new StandInApi();
+      Expect(Exec(refused, Env(dir, "pending.json"), "provision", "user:x", Path.Combine(dir, "x.jwt")).Exit == 78 &&
+             File.ReadAllText(map) == text && refused.Requests.Count == 0,
+             $"the map {text} is accepted");
+    }
+  }
+
+  /// The unmapped-key and 404 texts.
+  private static void CheckFailureTexts(string dir) {
+    var api = new StandInApi();
+    var env = Env(dir, "texts.json");
+    foreach (string[] args in new[] {
+               new[] { "cap", "user:nobody", "--monthly", "1" }, new[] { "usage", "user:nobody" },
+               new[] { "remove", "user:nobody" }, new[] { "acl", "user:nobody", "default" },
+             }) {
+      var run = Exec(api, env, args);
+      Expect(run.Exit == 78 && run.Err.Trim() == Program.UnmappedMessage,
+             $"{args[0]} for an unmapped key answers {run.Exit}: {run.Err}");
+    }
+    Expect(api.Requests.Count == 0, "an unmapped key reached the API");
+
+    Exec(api, env, "provision", "user:olga", Path.Combine(dir, "olga.jwt"));
+    var older = new StandInApi { Status = 404 };
+    foreach (var (args, route) in new[] {
+               (new[] { "cap", "user:olga", "--monthly", "1" }, Program.CapPath),
+               (new[] { "usage", "user:olga" }, Program.CapPath),
+               (new[] { "usage-all" }, Program.CapsPath),
+             }) {
+      var run = Exec(older, env, args);
+      Expect(run.Exit == 1 && run.Err.Trim() == $"{route} answered 404: the server predates the data-cap routes",
+             $"{args[0]} on a server without the cap routes answers {run.Exit}: {run.Err}");
     }
   }
 

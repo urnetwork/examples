@@ -5,7 +5,9 @@
 // the connection and the installation's data caps (Status.cs). In-app traffic
 // only: no VPN APIs, and the device does not provide.
 //
-// Usage: EmbedExample [run] | --self-test | --version. Installation state is
+// Usage: EmbedExample [run] | --self-test | --licenses | --version.
+// --licenses prints the SDK's licenses and data attributions, as JSON, to
+// publish with the app. Installation state is
 // in the private directory named by URNETWORK_EMBED_STATE_DIR (State.cs). With
 // URNETWORK_TOKEN_SERVER_URL and URNETWORK_DEMO_SESSION set, every start
 // fetches the client JWT from the token server; otherwise the app uses the
@@ -24,7 +26,7 @@ internal static class Program {
   // sysexits EX_CONFIG
   public const int ExitConfig = 78;
 
-  public const string Usage = "usage: EmbedExample [run] | --self-test | --version";
+  public const string Usage = "usage: EmbedExample [run] | --self-test | --licenses | --version";
 
   /// Runs the command; an unexpected error exits with 1.
   public static int Main(string[] args) {
@@ -49,6 +51,15 @@ internal static class Program {
         return ExitFailure;
       }
       output.WriteLine("embed self-test passed");
+      return ExitStopped;
+    case ["--licenses"]:
+      string? licenses = Sdk.TakeString(Raw.urnet_get_licenses(
+          StatusRules.LicenseApp(OperatingSystem.IsWindows(), OperatingSystem.IsMacOS())));
+      if (licenses == null) {
+        error.WriteLine("the sdk returned no licenses");
+        return ExitFailure;
+      }
+      output.WriteLine(licenses);
       return ExitStopped;
     case ["--version"]:
       output.WriteLine(Sdk.Version);
@@ -109,7 +120,7 @@ internal static class Program {
         return ExitFailure;
       }
       using (session) {
-        output.WriteLine($"embed client {credential.ClientId}, installation {settings.InstanceId}");
+        output.WriteLine(StatusRules.StartLine(credential.ClientId, settings.InstanceId));
         return session.Run(stop.Token);
       }
     } finally {

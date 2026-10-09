@@ -41,24 +41,40 @@ internal static class StatusRules {
       @"\A(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?([Zz]|[+-]\d{2}:\d{2})\z");
 
   /// Decimal units with one decimal: "0 B", "999 B", "1.0 kB", "5.0 GB". Data
-  /// plans are sold in decimal units. A value that rounds to 1000.0 moves to
-  /// the next unit, decided with midpoints away from zero as the Go
-  /// reference's math.Round does. The text rounds to the nearest tenth with
-  /// ties to even on the exact value, as Go's %.1f does, and F1 matches it
-  /// (1250 bytes is "1.2 kB", 1750 bytes "1.8 kB").
+  /// plans are sold in decimal units. The tenths round half to even on the
+  /// exact integer, never on a binary fraction (1050 bytes is "1.0 kB", 1150
+  /// bytes "1.2 kB"), and a value that rounds to 1000.0 moves to the next unit
+  /// (999999 bytes is "1.0 MB").
   public static string FormatByteCount(long byteCount) {
     if (byteCount < 1000) {
       return byteCount.ToString(CultureInfo.InvariantCulture) + " B";
     }
     string[] units = ["kB", "MB", "GB", "TB", "PB", "EB"];
-    double value = byteCount / 1000.0;
-    int unitIndex = 0;
-    while (unitIndex < units.Length - 1 &&
-           1000 <= Math.Round(value * 10, MidpointRounding.AwayFromZero) / 10) {
-      value /= 1000;
-      unitIndex += 1;
+    // the bytes in a tenth of the unit
+    long tenth = 100;
+    for (int unitIndex = 0;; unitIndex += 1) {
+      long tenths = byteCount / tenth;
+      long remainder = byteCount % tenth;
+      if (tenth < 2 * remainder || (2 * remainder == tenth && tenths % 2 == 1)) {
+        tenths += 1;
+      }
+      if (tenths < 10000 || unitIndex == units.Length - 1) {
+        return FormattableString.Invariant($"{tenths / 10}.{tenths % 10} {units[unitIndex]}");
+      }
+      tenth *= 1000;
     }
-    return value.ToString("F1", CultureInfo.InvariantCulture) + " " + units[unitIndex];
+  }
+
+  /// The line the console apps print once the device runs (EMBED_CONTRACT.md,
+  /// "Status").
+  public static string StartLine(string clientId, string instanceId) {
+    return $"embed client {clientId}, installation {instanceId}";
+  }
+
+  /// The kind of app whose licenses --licenses prints: "apple" on macOS,
+  /// "windows" on Windows, "linux" elsewhere.
+  public static string LicenseApp(bool windows, bool macOs) {
+    return windows ? "windows" : macOs ? "apple" : "linux";
   }
 
   /// The client limit text: "client limit, retry at 19:05 UTC". The retry

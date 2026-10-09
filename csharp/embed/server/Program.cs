@@ -2,24 +2,27 @@
 // the integration allocator (../../integration/server) extended with what a
 // backend needs to embed URnetwork. It provisions one client per user
 // installation, sets and reads that client's data caps, reads every capped
-// client of the network, and removes a client. Your service authenticates its
-// user first and supplies the key internally: never take a key, a client ID or
-// a cap from a raw request field.
+// client of the network, removes a client, and sets a client's ACL group.
+// Your service authenticates its user first and supplies the key internally:
+// never take a key, a client ID or a cap from a raw request field.
 //
 //   dotnet run -- provision <key> <client-jwt-file>
 //   dotnet run -- cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total]
 //   dotnet run -- usage <key>
 //   dotnet run -- usage-all
 //   dotnet run -- remove <key>
+//   dotnet run -- acl <key> default|isolated
 //   dotnet run -- --self-test
 //
 // <key> is user:<service-user-id> or user:<service-user-id>:<installation-id>.
 // Settings: URNETWORK_ROOT_JWT (an API key or a network JWT, from the
 // backend's secret store), URNETWORK_CLIENT_MAP (absolute path of this tool's
 // private map, in an existing service-owned directory; never the token
-// server's map) and optional URNETWORK_API_URL. The map lock is an
-// exclusively created <map>.lock file; a crash may leave it, so remove it only
-// after confirming that no tool still runs.
+// server's map), optional URNETWORK_API_URL and optional
+// URNETWORK_DEFAULT_ACL_GROUP (the ACL group of each new client: "isolated",
+// the default, or "default"). The map lock is an exclusively created
+// <map>.lock file; a crash may leave it, so remove it only after confirming
+// that no tool still runs.
 //
 // Exit codes: 0 success; 78 a configuration or credential problem (missing
 // settings, an invalid key or map, the root credential refused, the client
@@ -84,8 +87,13 @@ internal sealed class Api {
       throw new ToolException(Program.ExitConfig, "the URnetwork API refused the root credential");
     }
     if (response.Status == 404) {
+      // a server that predates a route (EMBED_CONTRACT.md, "Backend tools")
+      string route = pathAndQuery.Split('?')[0];
       throw new ToolException(Program.ExitFailure,
-                              "the URnetwork API answered HTTP 404; a server without this route answers 404");
+                              route == Program.AclPath ? Program.AclUnsupportedMessage
+                              : route.StartsWith(Program.CapPath, StringComparison.Ordinal)
+                                  ? $"{route} answered 404: the server predates the data-cap routes"
+                                  : $"{route} answered 404");
     }
     if (response.Status is < 200 or > 299) {
       throw new ToolException(Program.ExitFailure, $"the URnetwork API answered HTTP {response.Status}");
@@ -102,10 +110,12 @@ internal sealed class Api {
 }
 
 /// The tool's private map from keys to client ids, in the allocator's format:
-/// {"version": 1, "clients": {key: client_id}}. It stores client ids, never
-/// tokens.
+/// {"version": 1, "clients": {key: client_id}}, plus "pending_acl", the keys
+/// whose new clients still owe their default ACL group, written only while it
+/// is not empty. It stores client ids, never tokens.
 internal sealed class ClientMap {
   public Dictionary<string, string> Clients { get; } = new();
+  public List<string> PendingAcl { get; } = new();
 
   /// The map in file; an empty map when the file does not exist. A map with
   /// fields this tool does not write, such as the token server's pending_caps,
@@ -132,7 +142,7 @@ internal sealed class ClientMap {
       throw Program.Config("the client map is not a JSON object");
     }
     foreach (var (name, _) in root) {
-      if (name is not ("version" or "clients")) {
+      if (name is not ("version" or "clients" or "pending_acl")) {
         throw Program.Config(
             "the client map has fields this tool does not write, such as the token server's pending_caps; give each tool its own map");
       }
@@ -149,6 +159,18 @@ internal sealed class ClientMap {
       }
       map.Clients[key] = id;
     }
+    if (root.ContainsKey("pending_acl")) {
+      if (root["pending_acl"] is not JsonArray pending) {
+        throw Program.Config("the client map's pending_acl is not a list of mapped keys");
+      }
+      foreach (JsonNode? entry in pending) {
+        string? key = Program.Text(entry);
+        if (key == null || !map.Clients.ContainsKey(key) || map.PendingAcl.Contains(key)) {
+          throw Program.Config("the client map's pending_acl is not a list of mapped keys");
+        }
+        map.PendingAcl.Add(key);
+      }
+    }
     return map;
   }
 
@@ -159,6 +181,9 @@ internal sealed class ClientMap {
       clients[key] = id;
     }
     var root = new JsonObject { ["version"] = 1, ["clients"] = clients };
+    if (PendingAcl.Count > 0) {
+      root["pending_acl"] = new JsonArray(PendingAcl.Select(key => (JsonNode?)key).ToArray());
+    }
     Program.WritePrivate(file, Encoding.UTF8.GetBytes(root.ToJsonString()));
   }
 }
@@ -212,8 +237,11 @@ internal static class Program {
   public const string CapPath = "/network/client-data-cap";
   public const string CapsPath = "/network/client-data-caps";
   public const string RemovePath = "/network/remove-client";
+  public const string AclPath = "/network/client-acl-group";
+  public const string UnmappedMessage = "no client is mapped for that key; run provision first";
+  public const string AclUnsupportedMessage = "/network/client-acl-group answered 404: the server predates ACL groups";
   public const string Usage =
-      "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | --self-test";
+      "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test";
 
   public static readonly Regex Keys = new(@"\Auser:[A-Za-z0-9][A-Za-z0-9_.:@-]{0,122}\z");
   public static readonly Regex Ids = new(@"\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z");
@@ -223,8 +251,8 @@ internal static class Program {
   public delegate Func<ApiRequest, Task<ApiResponse>> TransportFactory(Uri origin, string root);
 
   /// The settings of one run: the API and, for the commands that use it, the
-  /// map file.
-  private sealed record ToolSettings(Api Api, string? MapFile);
+  /// map file, and the ACL group of each new client ("isolated" or "default").
+  private sealed record ToolSettings(Api Api, string? MapFile, string AclGroup);
 
   /// "client_id" is mapped to a client that no longer exists.
   private sealed class ClientMissingException : Exception {}
@@ -243,7 +271,8 @@ internal static class Program {
       case ["--self-test"]:
         try {
           SelfTest.Run();
-        } catch (Exception e) when (e is not ToolException) {
+        } catch (Exception e) {
+          // a tool failure inside a check fails the self-test too
           stderr.WriteLine($"embed backend tool self-test failed: {e.Message}");
           return ExitFailure;
         }
@@ -263,6 +292,10 @@ internal static class Program {
         return ExitOk;
       case ["remove", var key]:
         Remove(CheckKey(key), Settings(env, transport, map: true), stdout);
+        return ExitOk;
+      case ["acl", var key, var group]:
+        Acl(CheckKey(key), group is "default" or "isolated" ? group : throw Config(Usage),
+            Settings(env, transport, map: true), stdout);
         return ExitOk;
       default:
         throw Config(Usage);
@@ -298,6 +331,7 @@ internal static class Program {
         result = AuthClientResult(settings.Api.Call("POST", AuthClientPath, AuthClientBody(mapped)), mapped);
       } catch (ClientMissingException) {
         map.Clients.Remove(key);
+        map.PendingAcl.Remove(key);
         map.Save(mapFile);
       }
     }
@@ -311,6 +345,19 @@ internal static class Program {
         throw new ToolException(ExitFailure, "the API answered a client that the map assigns to another key");
       }
       map.Clients[key] = result.Value.ClientId;
+      // the mapping and the record that the client owes its group, in one save
+      if (settings.AclGroup == "isolated") {
+        map.PendingAcl.Add(key);
+      }
+      map.Save(mapFile);
+    }
+    if (map.PendingAcl.Contains(key)) {
+      // a new client is "default": only an isolated default needs the request.
+      // A failure throws with the record kept, before any client JWT is written.
+      if (settings.AclGroup == "isolated") {
+        PostAclGroup(settings.Api, result.Value.ClientId, "isolated");
+      }
+      map.PendingAcl.Remove(key);
       map.Save(mapFile);
     }
     WritePrivate(jwtFile, Encoding.UTF8.GetBytes(result.Value.Jwt + "\n"));
@@ -375,8 +422,34 @@ internal static class Program {
       }
     }
     map.Clients.Remove(key);
+    map.PendingAcl.Remove(key);
     map.Save(mapFile);
     stdout.WriteLine(new JsonObject { ["removed"] = clientId }.ToJsonString());
+  }
+
+  /// Sets the ACL group of the key's client and prints {"client_id": ...,
+  /// "acl_group": ...}. An explicit group settles a pending default group, so
+  /// the record is dropped.
+  private static void Acl(string key, string group, ToolSettings settings, TextWriter stdout) {
+    string mapFile = settings.MapFile!;
+    using MapLock _ = MapLock.Take(mapFile);
+    ClientMap map = ClientMap.Load(mapFile);
+    string clientId = MappedClient(map, key);
+    PostAclGroup(settings.Api, clientId, group);
+    if (map.PendingAcl.Remove(key)) {
+      map.Save(mapFile);
+    }
+    stdout.WriteLine($"{{\"client_id\":\"{clientId}\",\"acl_group\":\"{group}\"}}");
+  }
+
+  /// Posts the client's ACL group; the answer must name the client and the
+  /// group. A refusal or another answer fails (1).
+  private static void PostAclGroup(Api api, string clientId, string group) {
+    JsonObject answer = api.Call("POST", AclPath, new JsonObject { ["client_id"] = clientId, ["acl_group"] = group });
+    CheckRefusal(answer);
+    if (Text(answer["client_id"]) != clientId || Text(answer["acl_group"]) != group) {
+      throw new ToolException(ExitFailure, "the URnetwork API answered another client or ACL group");
+    }
   }
 
   /// The auth-client request: a new client without client_id, or a reissue of
@@ -507,7 +580,7 @@ internal static class Program {
   private static string MappedClient(ClientMap map, string key) {
     return map.Clients.TryGetValue(key, out string? clientId)
                ? clientId
-               : throw Config("no client is mapped for this key; provision it first");
+               : throw Config(UnmappedMessage);
   }
 
   /// A valid key: user:<service-user-id>, optionally with :<installation-id>.
@@ -546,7 +619,11 @@ internal static class Program {
         throw Config("set URNETWORK_CLIENT_MAP to an absolute file path in an existing private, service-owned directory");
       }
     }
-    return new ToolSettings(new Api(transport(origin, root)), mapFile);
+    string aclGroup = env("URNETWORK_DEFAULT_ACL_GROUP") ?? "";
+    if (aclGroup is not ("" or "isolated" or "default")) {
+      throw Config("URNETWORK_DEFAULT_ACL_GROUP must be default or isolated");
+    }
+    return new ToolSettings(new Api(transport(origin, root)), mapFile, aclGroup == "" ? "isolated" : aclGroup);
   }
 
   /// The API origin: HTTPS, or explicit loopback HTTP for local mocks; no
