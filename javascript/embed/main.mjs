@@ -7,8 +7,10 @@
 // native companion (../integration/companion, embed mode) owns the device as
 // this program's child process and serves its status (session.mjs).
 //
-// Usage: node main.mjs [run] | --self-test | --version. All installation state
-// is in the private directory named by URNETWORK_EMBED_STATE_DIR (state.mjs).
+// Usage: node main.mjs [run] | --self-test | --licenses | --version. --licenses
+// prints the SDK's licenses and data attributions, as JSON from the companion,
+// to publish with the app. All installation state is in the private directory
+// named by URNETWORK_EMBED_STATE_DIR (state.mjs).
 //
 // Exit codes, for supervisors: 0 stopped on request, 78 configuration or
 // credential problem (restarting does not help), 1 any other failure.
@@ -16,10 +18,11 @@
 import {realpathSync} from "node:fs";
 import {fileURLToPath} from "node:url";
 import {parseCommand, usage} from "./command.mjs";
-import {checkCompanionPath, companionPath, companionVersion} from "./companion.mjs";
+import {checkCompanionPath, companionLicenses, companionPath, companionVersion} from "./companion.mjs";
 import {runSelfTest} from "./selftest.mjs";
 import {EmbedSession, exitConfig, exitFailure, exitStopped, loadEmbedSettings, obtainInstallation} from "./session.mjs";
 import {ConfigurationError} from "./state.mjs";
+import {startLine} from "./status.mjs";
 import {TokenError} from "./token.mjs";
 
 // The exit code for an error that stopped the run before the device started.
@@ -47,13 +50,13 @@ export async function run(args, {environment = process.env, log = console.log, e
     log("embed self-test passed");
     return exitStopped;
   }
-  if (command === "version") {
+  if (command === "version" || command === "licenses") {
     const path = companionPath(environment);
     try {
       await checkCompanionPath(path);
-      log(await companionVersion(path));
-    } catch (versionError) {
-      error(versionError.message);
+      log(await (command === "version" ? companionVersion(path) : companionLicenses(path)));
+    } catch (companionError) {
+      error(companionError.message);
       return exitFailure;
     }
     return exitStopped;
@@ -92,7 +95,7 @@ export async function run(args, {environment = process.env, log = console.log, e
     fetchFunction,
   });
   try {
-    log(`embed client ${installation.clientId}, installation ${installation.instanceId}`);
+    log(startLine(installation.clientId, installation.instanceId));
     await session.start(environment);
     return await session.run(controller.signal);
   } catch (runError) {

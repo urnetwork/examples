@@ -138,6 +138,44 @@ test("the program runs as the entry point without import.meta.main", () => {
   assert.equal(isEntryPoint({url}, undefined), false);
 });
 
+// the stand-in companion's answers to --licenses and --version, in embed mode
+// only, as the companion prints them; FAKE_FAIL makes it exit 1
+const fakeCompanionCommandsSource = `#!/usr/bin/env node
+if (process.env.URNETWORK_COMPANION_EMBED !== "1" || process.env.URNETWORK_COMPANION_PROVIDE || process.env.FAKE_FAIL) {
+  process.exit(1);
+}
+const answers = {"--licenses": JSON.stringify([{Name: "fake", License: "MPL-2.0"}]), "--version": "URnetwork native embed companion test"};
+process.stdout.write(answers[process.argv[2]] + "\\n");
+`;
+
+test("--licenses prints the companion's licenses JSON, and --version its version line", {skip: process.platform === "win32"}, async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "ur-embed-test-"));
+  try {
+    const path = join(rootDir, "fake-companion.mjs");
+    await writeFile(path, fakeCompanionCommandsSource);
+    await chmod(path, 0o755);
+    const lines = [];
+    const errors = [];
+    const options = {environment: {URNETWORK_COMPANION_PATH: path}, log: message => lines.push(message), error: message => errors.push(message)};
+    assert.equal(await run(["--licenses"], options), 0);
+    assert.deepEqual(JSON.parse(lines.at(-1)), [{Name: "fake", License: "MPL-2.0"}]);
+    assert.equal(await run(["--version"], options), 0);
+    assert.equal(lines.at(-1), "URnetwork native embed companion test");
+    assert.deepEqual(errors, []);
+    // a companion that fails, and one that is missing
+    process.env.FAKE_FAIL = "1";
+    try {
+      assert.equal(await run(["--licenses"], options), 1);
+    } finally {
+      delete process.env.FAKE_FAIL;
+    }
+    assert.equal(await run(["--licenses"], {...options, environment: {URNETWORK_COMPANION_PATH: join(rootDir, "missing")}}), 1);
+    assert.match(errors.join("\n"), /build the native companion first/);
+  } finally {
+    await rm(rootDir, {recursive: true, force: true});
+  }
+});
+
 test("a usage error exits with 78", async () => {
   const errors = [];
   assert.equal(await run(["--unknown"], {log: () => {}, error: message => errors.push(message)}), 78);

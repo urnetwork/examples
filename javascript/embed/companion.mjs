@@ -39,9 +39,25 @@ export async function checkCompanionPath(path) {
 
 // The companion's version line in embed mode, for --version.
 export function companionVersion(path) {
+  return companionOutput(path, "--version");
+}
+
+// The SDK's licenses and data attributions for the host OS, as the JSON array
+// that the companion prints in embed mode, for --licenses.
+export function companionLicenses(path) {
+  return companionOutput(path, "--licenses");
+}
+
+// What the companion prints in embed mode for one argument.
+function companionOutput(path, argument) {
   return new Promise((resolve, reject) => {
-    execFile(path, ["--version"], {env: {...process.env, URNETWORK_COMPANION_EMBED: "1", URNETWORK_COMPANION_PROVIDE: ""}, timeout: 30 * 1000, windowsHide: true},
-      (error, stdout) => error ? reject(error) : resolve(stdout.trim()));
+    execFile(path, [argument], {
+      env: {...process.env, URNETWORK_COMPANION_EMBED: "1", URNETWORK_COMPANION_PROVIDE: ""},
+      // the licenses are hundreds of kilobytes
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: 30 * 1000,
+      windowsHide: true,
+    }, (error, stdout) => error ? reject(error) : resolve(stdout.trim()));
   });
 }
 
