@@ -32,6 +32,17 @@ const clientDoesNotExistMessage = "Client does not exist."
 // it and still answers the token.
 var errAclUnsupported = errors.New("/network/client-acl-group answered 404: the server predates ACL groups")
 
+// The server answers the data-cap and ACL-group routes with this refusal while
+// the team has not enabled Embed for the caller's network (EMBED_CONTRACT.md,
+// "Embed enablement"). Caps and groups set earlier stay enforced.
+const embedNotEnabledMessage = "Embed isn't enabled for this network."
+
+// Whether err is the server's Embed-not-enabled refusal.
+func isEmbedNotEnabled(err error) bool {
+	var refusal *apiRefusal
+	return errors.As(err, &refusal) && refusal.message == embedNotEnabledMessage
+}
+
 // Sends one api request: the method, the path (with its query) below the api
 // origin and an optional json body. Returns the http status and the bounded
 // response body.
@@ -107,6 +118,10 @@ func (self *apiClient) call(method string, path string, body []byte) ([]byte, er
 		// a server without the data-cap routes (EMBED_CONTRACT.md, "Backend tools")
 		route, _, _ := strings.Cut(path, "?")
 		return nil, upstreamErrorf("%s answered 404: the server predates the data-cap routes", route)
+	}
+	if status == http.StatusNotFound && path == "/network/embed" {
+		// a server without Embed enablement (EMBED_CONTRACT.md, "Backend tools")
+		return nil, upstreamErrorf("/network/embed answered 404: the server predates Embed enablement")
 	}
 	if status < 200 || 300 <= status {
 		return nil, upstreamErrorf("the URnetwork API answered http %d", status)
@@ -253,6 +268,44 @@ func (self *apiClient) SetAclGroup(clientId string, aclGroup string) (json.RawMe
 		return nil, upstreamErrorf("the URnetwork API answered client-acl-group for another client or group")
 	}
 	return json.Marshal(map[string]string{"client_id": result.ClientId, "acl_group": result.AclGroup})
+}
+
+// The network's Embed state (EMBED_CONTRACT.md, "Embed enablement").
+type embedState struct {
+	enabled           bool
+	clientLimit       int64
+	activeClientCount int64
+}
+
+// Reads GET /network/embed, which takes the network credential only: a
+// refusal, such as for a client JWT, answers 200 with the error object.
+func (self *apiClient) GetEmbed() (*embedState, error) {
+	body, err := self.call(http.MethodGet, "/network/embed", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Enabled           *bool  `json:"enabled"`
+		ClientLimit       *int64 `json:"client_limit"`
+		ActiveClientCount *int64 `json:"active_client_count"`
+		Error             *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, upstreamErrorf("the URnetwork API answered network/embed with something invalid")
+	}
+	if result.Error != nil {
+		return nil, &apiRefusal{message: result.Error.Message}
+	}
+	if result.Enabled == nil || result.ClientLimit == nil || result.ActiveClientCount == nil || *result.ClientLimit < 0 || *result.ActiveClientCount < 0 {
+		return nil, upstreamErrorf("the URnetwork API answered network/embed with something invalid")
+	}
+	return &embedState{
+		enabled:           *result.Enabled,
+		clientLimit:       *result.ClientLimit,
+		activeClientCount: *result.ActiveClientCount,
+	}, nil
 }
 
 // Removes one client. A missing client answers the "Client does not exist."

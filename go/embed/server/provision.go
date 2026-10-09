@@ -27,6 +27,10 @@ type issuedClient struct {
 	// the server predates ACL groups, so the key still owes its default ACL
 	// group (pending_acl keeps it, and a later issue applies it)
 	aclUnsupported bool
+	// Embed isn't enabled for the network, so the key still owes its default
+	// ACL group and caps (pending_acl and pending_caps keep it, and an issue
+	// after the team enables Embed applies them)
+	embedNotEnabled bool
 }
 
 // The default caps of a new client could not be applied. The key stays in
@@ -79,16 +83,19 @@ func (self *issuer) Issue(clients *clientMap, key string, beforeNew func(*client
 		return nil, err
 	}
 	if clients.AclPending(key) {
-		unsupported, err := self.applyDefaultAclGroup(clients, key, issued.clientId)
+		unsupported, notEnabled, err := self.applyDefaultAclGroup(clients, key, issued.clientId)
 		if err != nil {
 			return nil, err
 		}
 		issued.aclUnsupported = unsupported
+		issued.embedNotEnabled = notEnabled
 	}
 	if clients.Pending(key) {
-		if err := self.applyDefaultCaps(clients, key, issued.clientId); err != nil {
+		notEnabled, err := self.applyDefaultCaps(clients, key, issued.clientId)
+		if err != nil {
 			return nil, err
 		}
+		issued.embedNotEnabled = issued.embedNotEnabled || notEnabled
 	}
 	return issued, nil
 }
@@ -140,35 +147,43 @@ func (self *issuer) reissueOrProvision(clients *clientMap, key string, beforeNew
 
 // Applies the default ACL group that key owes, then clears its pending
 // record. A new client is already in the default group, so a default of
-// "default" only clears the record. On a server without ACL groups the record
-// stays and it returns true.
-func (self *issuer) applyDefaultAclGroup(clients *clientMap, key string, clientId string) (bool, error) {
+// "default" only clears the record. The record stays on a server without ACL
+// groups (unsupported) and while Embed isn't enabled for the network
+// (notEnabled).
+func (self *issuer) applyDefaultAclGroup(clients *clientMap, key string, clientId string) (unsupported bool, notEnabled bool, err error) {
 	if self.aclGroup == aclGroupIsolated {
 		_, err := self.api.SetAclGroup(clientId, aclGroupIsolated)
 		if errors.Is(err, errAclUnsupported) {
-			return true, nil
+			return true, false, nil
+		}
+		if isEmbedNotEnabled(err) {
+			return false, true, nil
 		}
 		if err != nil {
-			return false, &aclError{err: err}
+			return false, false, &aclError{err: err}
 		}
 	}
 	clients.SetAclPending(key, false)
-	return false, self.store.Save(clients)
+	return false, false, self.store.Save(clients)
 }
 
 // Applies the default caps that key owes (only the configured fields), then
 // clears its pending record. Without configured defaults there is nothing to
-// apply, and the record is cleared.
-func (self *issuer) applyDefaultCaps(clients *clientMap, key string, clientId string) error {
+// apply, and the record is cleared. While Embed isn't enabled for the network
+// the record stays and it returns true.
+func (self *issuer) applyDefaultCaps(clients *clientMap, key string, clientId string) (bool, error) {
 	if self.defaults.configured() {
 		body, err := self.defaults.body(clientId)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if _, err := self.api.SetDataCap(clientId, body); err != nil {
-			return &capsError{err: err}
+			if isEmbedNotEnabled(err) {
+				return true, nil
+			}
+			return false, &capsError{err: err}
 		}
 	}
 	clients.SetPending(key, false)
-	return self.store.Save(clients)
+	return false, self.store.Save(clients)
 }

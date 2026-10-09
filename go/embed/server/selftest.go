@@ -57,6 +57,9 @@ func runSelfTest() error {
 		checkCommands,
 		checkCommandAclGroups,
 		checkUsageAll,
+		checkCommandEmbedNotEnabled,
+		checkTokenServerEmbedNotEnabled,
+		checkEmbedStatus,
 	}
 	for _, check := range checks {
 		if err := check(); err != nil {
@@ -117,6 +120,14 @@ type mockApi struct {
 	setAclFailures int
 	// a server without ACL groups: their route answers 404
 	aclUnsupported bool
+	// Embed isn't enabled for the network: the data-cap and ACL-group routes
+	// answer the refusal, and GET /network/embed answers enabled false
+	embedDisabled bool
+	// GET /network/embed answers 404 (a server without Embed enablement), an
+	// answer missing its fields, or this refusal
+	embedUnsupported bool
+	embedInvalid     bool
+	embedRefusal     string
 	// list calls so far; past mockListCallBudget the list answers 500, so a
 	// paging loop that never stops fails instead of hanging
 	listCalls int
@@ -184,7 +195,22 @@ func (self *mockApi) handle(method string, path string, body []byte) (int, []byt
 		data, _ := json.Marshal(map[string]string{"client_id": clientId, "by_client_jwt": selfTestClientJwt(clientId)})
 		return data
 	}
+	if self.embedDisabled && (route == "/network/client-data-cap" || route == "/network/client-data-caps" || route == "/network/client-acl-group") {
+		return http.StatusOK, []byte(`{"error":{"message":"Embed isn't enabled for this network."}}`), nil
+	}
 	switch {
+	case method == http.MethodGet && route == "/network/embed":
+		switch {
+		case self.embedUnsupported:
+			return http.StatusNotFound, []byte(`404 page not found`), nil
+		case self.embedInvalid:
+			return http.StatusOK, []byte(`{"enabled":true}`), nil
+		case self.embedRefusal != "":
+			data, _ := json.Marshal(map[string]any{"error": map[string]string{"message": self.embedRefusal}})
+			return http.StatusOK, data, nil
+		}
+		data, _ := json.Marshal(map[string]any{"enabled": !self.embedDisabled, "client_limit": 100, "active_client_count": len(self.clients)})
+		return http.StatusOK, data, nil
 	case method == http.MethodPost && route == "/network/auth-client":
 		var args map[string]any
 		if json.Unmarshal(body, &args) != nil {
@@ -1456,6 +1482,170 @@ func checkCommandAclGroups() error {
 	}
 	if _, err := os.Stat(newJwtPath); err != nil {
 		return errors.New("provision with the default group \"default\" wrote no client JWT")
+	}
+	return nil
+}
+
+// The Embed-not-enabled refusal in the commands (EMBED_CONTRACT.md, "Embed
+// enablement"): cap, usage, usage-all and acl exit 78 with the fixed line;
+// provision still provisions and writes the client JWT, keeps the default ACL
+// group and caps pending with the fixed stderr line, and a provision after
+// the team enables Embed applies them and clears the records.
+func checkCommandEmbedNotEnabled() error {
+	files, err := newSelfTestFiles()
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(files.dir)
+	api := newMockApi()
+	runWith := func(settings map[string]string, args ...string) (int, string, string) {
+		env, stdout, stderr := selfTestEnvironment(api, settings)
+		code := run(args, env)
+		return code, stdout.String(), stderr.String()
+	}
+	settings := files.settings()
+	settings["URNETWORK_DEFAULT_MONTHLY_BYTE_LIMIT"] = "5000000000"
+	key := "user:alice:" + selfTestInstallationA
+	if code, _, stderr := runWith(settings, "provision", key, filepath.Join(files.dir, "a.jwt")); code != exitSuccess || stderr != "" {
+		return fmt.Errorf("provision exit %d: %q", code, stderr)
+	}
+
+	api.embedDisabled = true
+	for _, args := range [][]string{{"cap", key, "--monthly", "1"}, {"usage", key}, {"usage-all"}, {"acl", key, "isolated"}} {
+		if code, stdout, stderr := runWith(settings, args...); code != exitConfig || stdout != "" || stderr != embedNotEnabledLine+"\n" {
+			return fmt.Errorf("%q while Embed isn't enabled exit %d printed %q, %q", args, code, stdout, stderr)
+		}
+	}
+
+	newKey := "user:alice:" + selfTestInstallationB
+	newJwtPath := filepath.Join(files.dir, "b.jwt")
+	code, stdout, stderr := runWith(settings, "provision", newKey, newJwtPath)
+	clients, err := newMapStore(files.mapPath).Load()
+	if err != nil {
+		return err
+	}
+	newClientId := clients.Clients[newKey]
+	if code != exitSuccess || newClientId == "" || stdout != fmt.Sprintf("{\"client_id\":%q}\n", newClientId) || stderr != embedPendingLine+"\n" {
+		return fmt.Errorf("provision while Embed isn't enabled exit %d printed %q, %q", code, stdout, stderr)
+	}
+	if jwt, err := os.ReadFile(newJwtPath); err != nil || strings.TrimSpace(string(jwt)) != selfTestClientJwt(newClientId) {
+		return errors.New("provision while Embed isn't enabled wrote no client JWT")
+	}
+	if !clients.AclPending(newKey) || !clients.Pending(newKey) {
+		return errors.New("provision while Embed isn't enabled did not keep the default ACL group and caps pending")
+	}
+
+	api.embedDisabled = false
+	if code, _, stderr := runWith(settings, "provision", newKey, newJwtPath); code != exitSuccess || stderr != "" {
+		return fmt.Errorf("provision after Embed was enabled exit %d: %q", code, stderr)
+	}
+	if clients, err = newMapStore(files.mapPath).Load(); err != nil || clients.AclPending(newKey) || clients.Pending(newKey) {
+		return fmt.Errorf("provision after Embed was enabled did not clear the pending records (%v)", err)
+	}
+	if api.aclGroups[newClientId] != aclGroupIsolated || api.caps[newClientId] == nil || api.caps[newClientId].monthly == nil || *api.caps[newClientId].monthly != 5000000000 {
+		return errors.New("provision after Embed was enabled did not apply the pending defaults")
+	}
+	return nil
+}
+
+// The Embed-not-enabled refusal in the token server: the token still answers
+// with data_cap null, the refusal is logged once, the key keeps its pending
+// defaults, and a request after the team enables Embed applies them.
+func checkTokenServerEmbedNotEnabled() error {
+	files, err := newSelfTestFiles()
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(files.dir)
+	api := newMockApi()
+	api.embedDisabled = true
+	settings := files.settings()
+	settings["URNETWORK_DEFAULT_MONTHLY_BYTE_LIMIT"] = "5000000000"
+	server, logs, err := newSelfTestTokenServer(api, settings)
+	if err != nil {
+		return err
+	}
+	var answers []*selfTestAnswer
+	key := "user:alice:" + selfTestInstallationA
+	var clientId string
+	for i := 0; i < 2; i += 1 {
+		answer := selfTestTokenRequest(server, &answers, selfTestAliceToken, selfTestInstallationA)
+		if err := expectAnswer(answer, http.StatusOK, ""); err != nil {
+			return err
+		}
+		if string(answer.decoded.DataCap) != "null" {
+			return fmt.Errorf("data_cap while Embed isn't enabled is %s, want null", answer.decoded.DataCap)
+		}
+		clientId = answer.decoded.ClientId
+	}
+	clients, err := newMapStore(files.mapPath).Load()
+	if err != nil || !clients.AclPending(key) || !clients.Pending(key) {
+		return fmt.Errorf("the token server did not keep the defaults pending while Embed isn't enabled (%v)", err)
+	}
+	if strings.Count(logs.String(), "Embed isn't enabled for this network") != 1 {
+		return fmt.Errorf("Embed not being enabled was not reported once: %q", logs.String())
+	}
+
+	api.embedDisabled = false
+	answer := selfTestTokenRequest(server, &answers, selfTestAliceToken, selfTestInstallationA)
+	if err := expectAnswer(answer, http.StatusOK, ""); err != nil {
+		return err
+	}
+	if string(answer.decoded.DataCap) == "null" {
+		return errors.New("data_cap is still null after Embed was enabled")
+	}
+	if clients, err = newMapStore(files.mapPath).Load(); err != nil || clients.AclPending(key) || clients.Pending(key) {
+		return fmt.Errorf("the token server did not clear the pending defaults after Embed was enabled (%v)", err)
+	}
+	if api.aclGroups[clientId] != aclGroupIsolated || api.caps[clientId] == nil || api.caps[clientId].monthly == nil {
+		return errors.New("the token server did not apply the pending defaults after Embed was enabled")
+	}
+	return expectNoRootCredential(answers, logs.String())
+}
+
+// The status command: GET /network/embed with the root credential, printed
+// as the fixed line for an enabled and a not enabled network; a refusal exits
+// 78; a server without the route and an invalid answer exit 1.
+func checkEmbedStatus() error {
+	files, err := newSelfTestFiles()
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(files.dir)
+	api := newMockApi()
+	api.clients[selfTestClientId] = true
+	runWith := func(settings map[string]string, args ...string) (int, string, string) {
+		env, stdout, stderr := selfTestEnvironment(api, settings)
+		code := run(args, env)
+		return code, stdout.String(), stderr.String()
+	}
+	settings := files.settings()
+	if code, stdout, stderr := runWith(settings, "status"); code != exitSuccess || stdout != "embed enabled: yes | client limit: 100 | active clients: 1\n" {
+		return fmt.Errorf("status exit %d printed %q, %q", code, stdout, stderr)
+	}
+	if calls := api.callsTo("/network/embed"); len(calls) != 1 || calls[0].method != http.MethodGet || calls[0].path != "/network/embed" {
+		return fmt.Errorf("status request %v", calls)
+	}
+	api.embedDisabled = true
+	if code, stdout, _ := runWith(settings, "status"); code != exitSuccess || stdout != "embed enabled: no | client limit: 100 | active clients: 1\n" {
+		return fmt.Errorf("status while Embed isn't enabled exit %d printed %q", code, stdout)
+	}
+	api.embedRefusal = "Invalid credential."
+	if code, stdout, stderr := runWith(settings, "status"); code != exitConfig || stdout != "" || strings.Count(stderr, "\n") != 1 || !strings.Contains(stderr, "Invalid credential.") {
+		return fmt.Errorf("status on a refusal exit %d: %q", code, stderr)
+	}
+	api.embedRefusal = ""
+	api.embedUnsupported = true
+	if code, _, stderr := runWith(settings, "status"); code != exitFailure || stderr != "/network/embed answered 404: the server predates Embed enablement\n" {
+		return fmt.Errorf("status on a server without Embed enablement exit %d: %q", code, stderr)
+	}
+	api.embedUnsupported = false
+	api.embedInvalid = true
+	if code, _, _ := runWith(settings, "status"); code != exitFailure {
+		return fmt.Errorf("status on an invalid answer exit %d", code)
+	}
+	if code, _, _ := runWith(settings, "status", "extra"); code != exitConfig {
+		return fmt.Errorf("status with an extra argument exit %d", code)
 	}
 	return nil
 }

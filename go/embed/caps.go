@@ -19,6 +19,11 @@ const (
 	cappedReasonTotal   = "total"
 )
 
+// The server refuses the cap read with this message while the team has not
+// enabled Embed for the network (EMBED_CONTRACT.md, "Embed enablement"). It
+// clears the last reading, so both data fields read unavailable.
+var errEmbedNotEnabled = errors.New("Embed isn't enabled for this network.")
+
 // One cap reading: the fields of the cap object that the status uses.
 type capReading struct {
 	// nil for no cap
@@ -68,6 +73,9 @@ func parseCapObject(raw []byte, expectedClientId string) (*capReading, error) {
 		return nil, errors.New("invalid cap object")
 	}
 	if parsed.Error != nil {
+		if parsed.Error.Message == errEmbedNotEnabled.Error() {
+			return nil, errEmbedNotEnabled
+		}
 		return nil, fmt.Errorf("the cap read failed: %s", oneLine(parsed.Error.Message))
 	}
 	if parsed.ClientId != expectedClientId {
@@ -109,7 +117,8 @@ func readOwnDataCap(ctx context.Context, client *http.Client, apiOrigin string, 
 
 // The latest cap reading, as the data fields show it: checking until the
 // first reading finishes, unavailable if it failed, and the last successful
-// reading after that, which a later failure keeps.
+// reading after that, which a later failure keeps. The Embed-not-enabled
+// refusal is not a passing failure: it clears the last reading.
 type capState struct {
 	// the latest successful reading; nil before the first success
 	reading *capReading
@@ -120,6 +129,10 @@ type capState struct {
 // Records one reading.
 func (self *capState) Record(reading *capReading, err error) {
 	self.attempted = true
+	if errors.Is(err, errEmbedNotEnabled) {
+		self.reading = nil
+		return
+	}
 	if err == nil && reading != nil {
 		self.reading = reading
 	}

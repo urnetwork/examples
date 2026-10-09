@@ -66,6 +66,8 @@ type tokenServer struct {
 	logf func(format string, args ...any)
 	// reports once that the server predates ACL groups
 	aclUnsupportedReport sync.Once
+	// reports once that Embed isn't enabled for the network
+	embedNotEnabledReport sync.Once
 }
 
 // The answer of a successful request. DataCap is the client's cap object, or
@@ -265,6 +267,15 @@ func (self *tokenServer) clientToken(key string, userPrefix string) (*clientToke
 			self.logf("the URnetwork API predates ACL groups: new clients stay in the default group until it adds them")
 		})
 	}
+	if issued.embedNotEnabled {
+		// Embed isn't enabled for the network: the token still answers, the
+		// key keeps its pending defaults, and a request after the team enables
+		// Embed applies them
+		self.embedNotEnabledReport.Do(func() {
+			self.logf("Embed isn't enabled for this network: new clients' default ACL group and caps stay pending until it is; see https://ur.io/services")
+		})
+	}
+	// a failed read, including the Embed-not-enabled refusal, answers null
 	dataCap, err := self.api.GetDataCap(issued.clientId)
 	if err != nil {
 		dataCap = nil

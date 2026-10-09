@@ -9,6 +9,7 @@
 //	token-server usage-all                          prints the cap object of every capped client, one per line
 //	token-server remove <key>                       removes the key's client and its mapping
 //	token-server acl <key> default|isolated         sets the ACL group of the key's client
+//	token-server status                             prints the network's Embed state
 //	token-server --self-test                        credential-free checks
 //
 // The token server and the commands share one private client map, so a key
@@ -54,10 +55,18 @@ const (
 const defaultApiUrl = "https://api.bringyour.com"
 
 // the command forms
-const usage = "usage: token-server [serve] | provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test"
+const usage = "usage: token-server [serve] | provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | status | --self-test"
 
 // What every tool prints for a client limit refusal (either flag).
 const clientLimitMessage = "client limit reached: your network is at its client limit; see https://ur.io/services"
+
+// What every tool prints for the Embed-not-enabled refusal from cap, usage,
+// usage-all and acl (EMBED_CONTRACT.md, "Embed enablement"); exit 78.
+const embedNotEnabledLine = "embed not enabled: Embed isn't enabled for this network; see https://ur.io/services"
+
+// What provision prints on stderr when it succeeds but the client's default
+// ACL group or caps stay pending because Embed isn't enabled; exit 0.
+const embedPendingLine = "embed not enabled: the client's defaults stay pending until Embed is enabled; see https://ur.io/services"
 
 // The description and device spec that the commands send, as every language's
 // backend tool does. The token server's own requests use theirs
@@ -147,6 +156,7 @@ func runCommand(args []string, env *environment) error {
 	case (command == "usage" || command == "remove") && len(args) == 2:
 	case command == "usage-all" && len(args) == 1:
 	case command == "acl" && len(args) == 3:
+	case command == "status" && len(args) == 1:
 	default:
 		return configErrorf("%s", usage)
 	}
@@ -165,6 +175,8 @@ func runCommand(args []string, env *environment) error {
 		return tool.UsageAll()
 	case "acl":
 		return tool.Acl(args[1], args[2])
+	case "status":
+		return tool.Status()
 	default:
 		return tool.Remove(args[1])
 	}

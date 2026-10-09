@@ -164,6 +164,9 @@ func checkClientLimitText() error {
 func checkStatusLines() error {
 	failed := capState{}
 	failed.Record(nil, errors.New("http 404"))
+	// a capped monthly reading, then the Embed-not-enabled refusal
+	notEnabled := readCaps(selfTestReading(true, cappedReasonMonthly, byteLimit(5000000000), 5000000000, nil, 0, "2026-11-01T00:00:00Z"))
+	notEnabled.Record(nil, errEmbedNotEnabled)
 	cases := []struct {
 		status embedStatus
 		line   string
@@ -178,6 +181,10 @@ func checkStatusLines() error {
 		},
 		{
 			status: embedStatus{started: true, providersAdded: 3, caps: failed},
+			line:   "status: connected | data this month: unavailable | data total: unavailable",
+		},
+		{
+			status: embedStatus{started: true, providersAdded: 3, caps: notEnabled},
 			line:   "status: connected | data this month: unavailable | data total: unavailable",
 		},
 		{
@@ -283,6 +290,11 @@ func checkDataFields() error {
 	if status.MonthlyText() != "1.2 GB of 5.0 GB" {
 		return errors.New("a later failure did not keep the last value")
 	}
+	// the Embed-not-enabled refusal clears the last reading
+	status.caps.Record(nil, errEmbedNotEnabled)
+	if status.MonthlyText() != "unavailable" || status.TotalText() != "unavailable" {
+		return errors.New("the Embed-not-enabled refusal did not clear the last reading")
+	}
 	return nil
 }
 
@@ -299,6 +311,9 @@ func checkCapObjects() error {
 	reading, err = parseCapObject([]byte(`{"client_id":"11111111-1111-1111-1111-111111111111","total_byte_limit":10,"total_used_byte_count":10,"capped":true,"capped_reason":"total"}`), selfTestClientId)
 	if err != nil || !reading.capped || reading.cappedReason != cappedReasonTotal {
 		return fmt.Errorf("capped object parse %+v (%v)", reading, err)
+	}
+	if _, err := parseCapObject([]byte(`{"error":{"message":"Embed isn't enabled for this network."}}`), selfTestClientId); !errors.Is(err, errEmbedNotEnabled) {
+		return fmt.Errorf("the Embed-not-enabled refusal parsed as %v", err)
 	}
 	for _, invalid := range []string{
 		`{"error":{"message":"Not allowed."}}`,

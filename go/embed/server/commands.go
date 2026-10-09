@@ -18,6 +18,7 @@ type backendTool struct {
 	store  *mapStore
 	issuer *issuer
 	out    io.Writer
+	errOut io.Writer
 }
 
 // Validates the shared settings.
@@ -39,7 +40,8 @@ func newBackendTool(env *environment) (*backendTool, error) {
 			description: commandDescription,
 			deviceSpec:  commandDeviceSpec,
 		},
-		out: env.stdout,
+		out:    env.stdout,
+		errOut: env.stderr,
 	}, nil
 }
 
@@ -77,7 +79,40 @@ func (self *backendTool) Provision(key string, clientJwtPath string) error {
 	if err := writePrivateFile(filepath.Clean(clientJwtPath), []byte(issued.clientJwt+"\n")); err != nil {
 		return fmt.Errorf("could not write the client JWT file (provision again to reissue): %v", err)
 	}
-	return printJson(self.out, map[string]string{"client_id": issued.clientId})
+	if err := printJson(self.out, map[string]string{"client_id": issued.clientId}); err != nil {
+		return err
+	}
+	if issued.embedNotEnabled {
+		// the client works; its defaults stay pending until the team enables
+		// Embed for the network, and a later provision applies them
+		fmt.Fprintln(self.errOut, embedPendingLine)
+	}
+	return nil
+}
+
+// Prints the network's Embed state from GET /network/embed as one line,
+// "embed enabled: yes | client limit: 5000 | active clients: 1234". A
+// refusal, such as for a client JWT, is a configuration error.
+func (self *backendTool) Status() error {
+	state, err := self.api.GetEmbed()
+	if err != nil {
+		var refusal *apiRefusal
+		if errors.As(err, &refusal) {
+			return &configError{message: refusal.Error()}
+		}
+		return err
+	}
+	_, err = fmt.Fprintln(self.out, embedStatusLine(state))
+	return err
+}
+
+// The status command's line (EMBED_CONTRACT.md, "Backend tools").
+func embedStatusLine(state *embedState) string {
+	enabled := "no"
+	if state.enabled {
+		enabled = "yes"
+	}
+	return fmt.Sprintf("embed enabled: %s | client limit: %d | active clients: %d", enabled, state.clientLimit, state.activeClientCount)
 }
 
 // Posts only the given cap options for the key's client and prints its cap
@@ -204,11 +239,14 @@ func (self *backendTool) mappedClientId(key string) (string, error) {
 	return clientId, nil
 }
 
-// A client limit refusal (either flag) is a configuration error with the
-// tools' fixed message.
+// A client limit refusal (either flag) and the Embed-not-enabled refusal are
+// configuration errors with the tools' fixed messages.
 func commandError(err error) error {
 	if isClientLimit(err) {
 		return &configError{message: clientLimitMessage}
+	}
+	if isEmbedNotEnabled(err) {
+		return &configError{message: embedNotEnabledLine}
 	}
 	return err
 }
