@@ -17,7 +17,10 @@ use serde_json::json;
 
 use crate::{
     EXIT_CONFIG, EXIT_FAILURE,
-    caps::{CapReading, DataCap, parse_data_cap, parse_data_cap_json, read_own_data_cap},
+    caps::{
+        CapReadError, CapReading, DataCap, is_embed_not_enabled, parse_data_cap,
+        parse_data_cap_json, read_own_data_cap,
+    },
     config::{StartError, api_origin_from_setting, load_embed_config, token_server_from_settings},
     http::{DEFAULT_API_ORIGIN, parse_origin},
     id::parse_id,
@@ -226,6 +229,12 @@ pub fn check_client_limit_text() -> CheckResult {
     Ok(())
 }
 
+/// A cap reading after the Embed-not-enabled refusal.
+fn after_refusal(mut cap_reading: CapReading) -> CapReading {
+    cap_reading.apply(Err(CapReadError::EmbedNotEnabled));
+    cap_reading
+}
+
 /// The contract's status line vectors.
 pub fn check_status_lines() -> CheckResult {
     let monthly_end = "2026-11-01T00:00:00Z";
@@ -258,6 +267,26 @@ pub fn check_status_lines() -> CheckResult {
         ),
         (
             inputs(CapReading::Unavailable, 1),
+            "status: connected | data this month: unavailable | data total: unavailable",
+        ),
+        // the first reading answers the Embed-not-enabled refusal
+        (
+            inputs(after_refusal(CapReading::Checking), 1),
+            "status: connected | data this month: unavailable | data total: unavailable",
+        ),
+        // a capped monthly reading, then the refusal
+        (
+            inputs(
+                after_refusal(CapReading::Read(test_cap(
+                    Some(5000000000),
+                    5000000000,
+                    None,
+                    0,
+                    "monthly",
+                    monthly_end,
+                ))),
+                1,
+            ),
             "status: connected | data this month: unavailable | data total: unavailable",
         ),
         (
@@ -472,7 +501,8 @@ pub fn check_status_rules() -> CheckResult {
 }
 
 /// The data fields: `checking`, `unavailable` after a failed first reading, the last value kept
-/// after a later failure, `no cap` for a null limit, `<used> of <limit>` otherwise.
+/// after a later failure, the Embed-not-enabled refusal clearing it, `no cap` for a null limit,
+/// `<used> of <limit>` otherwise.
 pub fn check_data_fields() -> CheckResult {
     let fields = |cap_reading: &CapReading| {
         (
@@ -484,7 +514,7 @@ pub fn check_data_fields() -> CheckResult {
     if fields(&cap_reading) != ("checking".to_string(), "checking".to_string()) {
         return Err(format!("before a reading: {:?}", fields(&cap_reading)));
     }
-    cap_reading.apply(Err("synthetic failure".to_string()));
+    cap_reading.apply(Err(CapReadError::Failed("synthetic failure".to_string())));
     if fields(&cap_reading) != ("unavailable".to_string(), "unavailable".to_string()) {
         return Err(format!(
             "after a failed first reading: {:?}",
@@ -505,9 +535,19 @@ pub fn check_data_fields() -> CheckResult {
         return Err(format!("after a reading: {:?}", fields(&cap_reading)));
     }
     // a later failure keeps the last value
-    cap_reading.apply(Err("synthetic failure".to_string()));
+    cap_reading.apply(Err(CapReadError::Failed("synthetic failure".to_string())));
     if cap_reading != CapReading::Read(read) {
         return Err("a later failure dropped the last reading".to_string());
+    }
+    // the Embed-not-enabled refusal clears it
+    cap_reading.apply(Err(CapReadError::EmbedNotEnabled));
+    if cap_reading != CapReading::Unavailable
+        || fields(&cap_reading) != ("unavailable".to_string(), "unavailable".to_string())
+    {
+        return Err(format!(
+            "the Embed-not-enabled refusal kept {:?}",
+            fields(&cap_reading)
+        ));
     }
     let zero = CapReading::Read(test_cap(Some(0), 0, Some(10000000000), 1750, "", ""));
     if fields(&zero) != ("0 B of 0 B".to_string(), "1.8 kB of 10.0 GB".to_string()) {
@@ -576,9 +616,14 @@ pub fn check_cap_object() -> CheckResult {
         json!("text"),
     ];
     for value in refused {
-        if parse_data_cap(&value).is_some() {
+        if parse_data_cap(&value).is_some() || is_embed_not_enabled(&value) {
             return Err(format!("an invalid cap object {value} was accepted"));
         }
+    }
+    // the Embed-not-enabled refusal is no cap object, and is recognized
+    let refusal = json!({"error": {"message": "Embed isn't enabled for this network."}});
+    if parse_data_cap(&refusal).is_some() || !is_embed_not_enabled(&refusal) {
+        return Err("the Embed-not-enabled refusal was misread".to_string());
     }
     if parse_data_cap_json(b"not json").is_some() {
         return Err("non-JSON was accepted as a cap object".to_string());
@@ -906,7 +951,8 @@ pub fn check_token_fetch() -> CheckResult {
     Ok(())
 }
 
-/// The app reads its own caps with its client JWT; a server without the cap routes is a failure.
+/// The app reads its own caps with its client JWT; a server without the cap routes is a failure,
+/// and the Embed-not-enabled refusal is its own error.
 pub fn check_cap_read() -> CheckResult {
     let client_jwt = test_client_jwt();
     let stand_in = StandInServer::start(vec![
@@ -916,20 +962,30 @@ pub fn check_cap_read() -> CheckResult {
         ),
         StandInAnswer::json(404, r#"{"error":{"message":"Not found."}}"#),
         StandInAnswer::json(200, r#"{"error":{"message":"Client does not exist."}}"#),
+        StandInAnswer::json(
+            200,
+            r#"{"error":{"message":"Embed isn't enabled for this network."}}"#,
+        ),
     ])
     .map_err(|error| error.to_string())?;
-    let data_cap = read_own_data_cap(stand_in.origin(), &client_jwt)?;
+    let data_cap =
+        read_own_data_cap(stand_in.origin(), &client_jwt).map_err(|error| error.to_string())?;
     if data_cap.monthly_byte_limit != Some(5000000000)
         || data_cap.monthly_used_byte_count != 1234567890
     {
         return Err(format!("cap read parsed as {data_cap:?}"));
     }
     match read_own_data_cap(stand_in.origin(), &client_jwt) {
-        Err(message) if !message.contains(&client_jwt) => {}
+        Err(CapReadError::Failed(message)) if !message.contains(&client_jwt) => {}
         other => return Err(format!("a 404 cap read gave {other:?}")),
     }
-    if read_own_data_cap(stand_in.origin(), &client_jwt).is_ok() {
-        return Err("a cap read answering an error was accepted".to_string());
+    match read_own_data_cap(stand_in.origin(), &client_jwt) {
+        Err(CapReadError::Failed(_)) => {}
+        other => return Err(format!("a cap read answering an error gave {other:?}")),
+    }
+    match read_own_data_cap(stand_in.origin(), &client_jwt) {
+        Err(CapReadError::EmbedNotEnabled) => {}
+        other => return Err(format!("the Embed-not-enabled refusal gave {other:?}")),
     }
     let requests = stand_in.requests();
     let request = requests.first().ok_or("the API got no request")?;

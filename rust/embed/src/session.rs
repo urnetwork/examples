@@ -30,7 +30,7 @@ use std::{
 use urnetwork_sdk::{Device, Handle, native, raw::Raw, take_string};
 
 use crate::{
-    caps::{CapReading, DataCap, read_own_data_cap},
+    caps::{CapReadError, CapReading, DataCap, read_own_data_cap},
     config::EmbedConfig,
     sdk_json::{licenses_app_kind, parse_client_limit_status, parse_providers_added},
     state::{create_private_dir, save_client_jwt},
@@ -545,7 +545,7 @@ impl EmbedSession {
     }
 
     /// Starts a cap read on its own thread; the result arrives on `results`.
-    fn spawn_cap_read(&self, results: &Sender<Result<DataCap, String>>) {
+    fn spawn_cap_read(&self, results: &Sender<Result<DataCap, CapReadError>>) {
         let api_origin = self.api_origin.clone();
         let client_jwt = self.client_jwt.clone();
         let results = results.clone();

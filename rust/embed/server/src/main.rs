@@ -1,8 +1,9 @@
 //! SERVER ONLY. The Rust embed backend tool (EMBED_CONTRACT.md, "Backend tools"). It extends the
 //! integration allocator (`rust/integration/server`, INTEGRATION_CONTRACT.md "Runnable backend
 //! allocators") with the embed commands: provision an installation's client, set and read its data
-//! caps, list every capped client, remove a client, and set a client's ACL group (`acl <key>
-//! default|isolated`). The authenticated backend supplies each
+//! caps, list every capped client, remove a client, set a client's ACL group (`acl <key>
+//! default|isolated`), and read the network's Embed state (`status`). The authenticated backend
+//! supplies each
 //! `user:<service-user-id>[:<installation-id>]` key internally; never pass an untrusted request
 //! field or a URnetwork client ID.
 //!
@@ -54,11 +55,24 @@ const UNMAPPED_MESSAGE: &str = "no client is mapped for that key; run provision 
 /// The stderr line for a server without ACL groups.
 const ACL_UNSUPPORTED_MESSAGE: &str =
     "/network/client-acl-group answered 404: the server predates ACL groups";
+/// The server refuses the data-cap and ACL-group routes with this message while the team has not
+/// enabled Embed for the network (EMBED_CONTRACT.md, "Embed enablement"); caps and groups set
+/// earlier stay enforced.
+const EMBED_NOT_ENABLED_MESSAGE: &str = "Embed isn't enabled for this network.";
+/// What `cap`, `usage`, `usage-all` and `acl` print for the refusal, with exit 78.
+const EMBED_NOT_ENABLED_LINE: &str =
+    "embed not enabled: Embed isn't enabled for this network; see https://ur.io/services";
+/// What `provision` prints on stderr when the client's default ACL group stays pending because
+/// Embed isn't enabled, with exit 0.
+const EMBED_PENDING_LINE: &str = "embed not enabled: the client's defaults stay pending until Embed is enabled; see https://ur.io/services";
+const EMBED_UNSUPPORTED_MESSAGE: &str =
+    "/network/embed answered 404: the server predates Embed enablement";
 const AUTH_CLIENT_PATH: &str = "/network/auth-client";
 const CAP_PATH: &str = "/network/client-data-cap";
 const CAPS_PATH: &str = "/network/client-data-caps";
 const REMOVE_PATH: &str = "/network/remove-client";
 const ACL_PATH: &str = "/network/client-acl-group";
+const EMBED_PATH: &str = "/network/embed";
 const ACL_GROUP_DEFAULT: &str = "default";
 const ACL_GROUP_ISOLATED: &str = "isolated";
 
@@ -66,7 +80,7 @@ const EXIT_OK: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
 const EXIT_CONFIG: i32 = 78;
 
-const USAGE: &str = "usage: urnetwork-embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test";
+const USAGE: &str = "usage: urnetwork-embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | status | --self-test";
 
 /// URL-safe base64 for JWT segments, accepting missing padding, as Go's decoder does.
 const URL_SAFE_LENIENT: GeneralPurpose = GeneralPurpose::new(
@@ -111,6 +125,8 @@ enum ToolError {
     Config(String),
     /// URnetwork refused a new client at the client limit: exit 78.
     ClientLimit,
+    /// URnetwork refused a data-cap or ACL-group request because Embed isn't enabled: exit 78.
+    EmbedNotEnabled,
     /// Any other failure: exit 1.
     Failure(String),
 }
@@ -119,7 +135,9 @@ impl ToolError {
     /// The exit code.
     fn exit_code(&self) -> i32 {
         match self {
-            ToolError::Config(_) | ToolError::ClientLimit => EXIT_CONFIG,
+            ToolError::Config(_) | ToolError::ClientLimit | ToolError::EmbedNotEnabled => {
+                EXIT_CONFIG
+            }
             ToolError::Failure(_) => EXIT_FAILURE,
         }
     }
@@ -129,6 +147,7 @@ impl ToolError {
         match self {
             ToolError::Config(message) | ToolError::Failure(message) => message.clone(),
             ToolError::ClientLimit => CLIENT_LIMIT_MESSAGE.to_string(),
+            ToolError::EmbedNotEnabled => EMBED_NOT_ENABLED_LINE.to_string(),
         }
     }
 }
@@ -181,6 +200,7 @@ enum Command {
         key: String,
         group: &'static str,
     },
+    Status,
     SelfTest,
 }
 
@@ -281,6 +301,7 @@ fn parse_command(args: &[String]) -> Result<Command, ToolError> {
             key: checked_key(key)?,
         }),
         ["usage-all"] => Ok(Command::UsageAll),
+        ["status"] => Ok(Command::Status),
         ["remove", key] => Ok(Command::Remove {
             key: checked_key(key)?,
         }),
@@ -487,6 +508,9 @@ fn answer_object(
                 "{route} answered 404: the server predates the data-cap routes"
             )));
         }
+        404 if route == EMBED_PATH => {
+            return Err(ToolError::Failure(EMBED_UNSUPPORTED_MESSAGE.to_string()));
+        }
         404 => {
             return Err(ToolError::Failure(format!("{what}: {route} answered 404")));
         }
@@ -515,6 +539,15 @@ fn error_message(object: &serde_json::Map<String, Value>) -> Option<String> {
             .map(one_line)
             .unwrap_or_default(),
     )
+}
+
+/// Whether an answer object is the Embed-not-enabled refusal.
+fn embed_not_enabled(object: &serde_json::Map<String, Value>) -> bool {
+    object
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        == Some(EMBED_NOT_ENABLED_MESSAGE)
 }
 
 /// The `client_id` claim of a JWT, as a consistency check, not signature verification.
@@ -727,7 +760,8 @@ fn print_json(out: &mut dyn Write, value: &Value) -> Result<(), ToolError> {
 /// `Client does not exist.` it drops the mapping and provisions a new client. A new client goes into
 /// `acl_group`, with a `pending_acl` record until the group is applied, before any client JWT is
 /// written. Writes the client JWT to the file (owner-only, replaced atomically), never prints it,
-/// and prints `{"client_id": ...}`.
+/// and prints `{"client_id": ...}`. While Embed isn't enabled the record stays, with a line on
+/// `err`, and a provision after the team enables Embed applies it.
 fn provision(
     key: &str,
     client_jwt_file: &Path,
@@ -735,6 +769,7 @@ fn provision(
     acl_group: &str,
     api: &mut dyn Api,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), ToolError> {
     let _lock = lock_map(map_file)?;
     let mut map = load_map(map_file)?;
@@ -776,18 +811,30 @@ fn provision(
         map.set_acl_pending(key, acl_group == ACL_GROUP_ISOLATED);
         save_map(map_file, &map)?;
     }
+    let mut embed_enabled = true;
     if map.acl_pending(key) {
         // a new client is `default`: only an isolated default needs the request. A failure returns
         // with the record kept, before any client JWT is written.
         if acl_group == ACL_GROUP_ISOLATED {
-            post_acl_group(api, &client_id, ACL_GROUP_ISOLATED)?;
+            match post_acl_group(api, &client_id, ACL_GROUP_ISOLATED) {
+                Ok(()) => {}
+                // while Embed isn't enabled the record stays and the client works
+                Err(ToolError::EmbedNotEnabled) => embed_enabled = false,
+                Err(error) => return Err(error),
+            }
         }
-        map.set_acl_pending(key, false);
-        save_map(map_file, &map)?;
+        if embed_enabled {
+            map.set_acl_pending(key, false);
+            save_map(map_file, &map)?;
+        }
     }
     write_private_atomically(client_jwt_file, format!("{by_client_jwt}\n").as_bytes())
         .map_err(|_| ToolError::Failure("could not write the client JWT file".to_string()))?;
-    print_json(out, &json!({ "client_id": client_id }))
+    print_json(out, &json!({ "client_id": client_id }))?;
+    if !embed_enabled {
+        writeln!(err, "{EMBED_PENDING_LINE}")?;
+    }
+    Ok(())
 }
 
 /// Sets the client's ACL group; the answer must name the client and the group.
@@ -797,6 +844,9 @@ fn post_acl_group(api: &mut dyn Api, client_id: &str, group: &str) -> Result<(),
         &json!({ "client_id": client_id, "acl_group": group }),
     )?;
     let object = answer_object(&answer, ACL_PATH, "acl")?;
+    if embed_not_enabled(&object) {
+        return Err(ToolError::EmbedNotEnabled);
+    }
     if let Some(message) = error_message(&object) {
         return Err(ToolError::Failure(format!(
             "acl: the URnetwork API refused: {message}"
@@ -843,6 +893,9 @@ fn acl(
 /// The cap object of an answer, refused when it carries an error.
 fn cap_object(answer: &ApiAnswer, route: &str, what: &str) -> Result<Value, ToolError> {
     let object = answer_object(answer, route, what)?;
+    if embed_not_enabled(&object) {
+        return Err(ToolError::EmbedNotEnabled);
+    }
     if let Some(message) = error_message(&object) {
         return Err(ToolError::Failure(format!(
             "{what}: the URnetwork API refused: {message}"
@@ -960,6 +1013,34 @@ fn remove(
     print_json(out, &json!({ "removed": client_id }))
 }
 
+/// `status`: prints the network's Embed state from `GET /network/embed` as one line, `embed
+/// enabled: yes | client limit: 5000 | active clients: 1234`. A refusal, such as for a client JWT,
+/// is a configuration problem.
+fn embed_status(api: &mut dyn Api, out: &mut dyn Write) -> Result<(), ToolError> {
+    let answer = api.get(EMBED_PATH, &[])?;
+    let object = answer_object(&answer, EMBED_PATH, "status")?;
+    if let Some(message) = error_message(&object) {
+        return Err(ToolError::Config(format!(
+            "status: the URnetwork API refused: {message}"
+        )));
+    }
+    let (Some(enabled), Some(client_limit), Some(active_client_count)) = (
+        object.get("enabled").and_then(Value::as_bool),
+        object.get("client_limit").and_then(Value::as_u64),
+        object.get("active_client_count").and_then(Value::as_u64),
+    ) else {
+        return Err(ToolError::Failure(
+            "status: the URnetwork API answered something that is not an Embed state".to_string(),
+        ));
+    };
+    let enabled = if enabled { "yes" } else { "no" };
+    writeln!(
+        out,
+        "embed enabled: {enabled} | client limit: {client_limit} | active clients: {active_client_count}"
+    )?;
+    Ok(())
+}
+
 /// Runs a parsed command other than the self-test; `acl_group` is the ACL group of each new client.
 fn execute(
     command: &Command,
@@ -967,6 +1048,7 @@ fn execute(
     acl_group: &str,
     api: &mut dyn Api,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), ToolError> {
     if !map_file.is_absolute() {
         return Err(ToolError::Config(
@@ -977,7 +1059,7 @@ fn execute(
         Command::Provision {
             key,
             client_jwt_file,
-        } => provision(key, client_jwt_file, map_file, acl_group, api, out),
+        } => provision(key, client_jwt_file, map_file, acl_group, api, out, err),
         Command::Cap {
             key,
             monthly,
@@ -988,6 +1070,7 @@ fn execute(
         Command::UsageAll => usage_all(api, out),
         Command::Remove { key } => remove(key, map_file, api, out),
         Command::Acl { key, group } => acl(key, group, map_file, api, out),
+        Command::Status => embed_status(api, out),
         Command::SelfTest => Err(ToolError::Config(USAGE.to_string())),
     }
 }
@@ -1013,7 +1096,7 @@ fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         )?;
         let acl_group = default_acl_group(env::var("URNETWORK_DEFAULT_ACL_GROUP").ok().as_deref())?;
         let mut api = HttpApi::new(origin, required_setting("URNETWORK_ROOT_JWT")?)?;
-        execute(&command, &map_file, acl_group, &mut api, out)
+        execute(&command, &map_file, acl_group, &mut api, out, err)
     });
     match result {
         Ok(()) => EXIT_OK,
@@ -1150,11 +1233,16 @@ mod self_test {
     ) -> (i32, String, String) {
         let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
         let mut out = Vec::new();
+        let mut err = Vec::new();
         let result = parse_command(&args)
-            .and_then(|command| execute(&command, map_file, acl_group, api, &mut out));
-        let (code, err) = match result {
-            Ok(()) => (EXIT_OK, String::new()),
-            Err(error) => (error.exit_code(), format!("{}\n", error.message())),
+            .and_then(|command| execute(&command, map_file, acl_group, api, &mut out, &mut err));
+        let mut err = String::from_utf8_lossy(&err).into_owned();
+        let code = match result {
+            Ok(()) => EXIT_OK,
+            Err(error) => {
+                err.push_str(&format!("{}\n", error.message()));
+                error.exit_code()
+            }
         };
         (code, String::from_utf8_lossy(&out).into_owned(), err)
     }
@@ -1188,6 +1276,8 @@ mod self_test {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
         let result = checks(&dir)
             .and_then(|()| acl_checks(&dir))
+            .and_then(|()| embed_not_enabled_checks(&dir))
+            .and_then(|()| embed_status_checks(&dir))
             .and_then(|()| failure_text_checks(&dir));
         let _ = fs::remove_dir_all(&dir);
         result?;
@@ -1371,6 +1461,7 @@ mod self_test {
             vec!["cap", KEY, "--reset-total", "--reset-total"],
             vec!["cap", KEY, "--weekly", "1"],
             vec!["usage-all", "extra"],
+            vec!["status", "extra"],
             vec!["remove"],
             vec!["--unknown"],
             vec![],
@@ -1829,6 +1920,154 @@ mod self_test {
                     && fs::read_to_string(&pending_map)? == text
                     && api.calls.is_empty(),
                 &format!("the map {text} was accepted"),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The Embed-not-enabled refusal: `cap`, `usage`, `usage-all` and `acl` exit 78 with the fixed
+    /// line; `provision` still provisions and writes the client JWT, keeps the default group
+    /// pending with the fixed stderr line, and a provision after the team enables Embed applies it.
+    fn embed_not_enabled_checks(dir: &Path) -> Result<(), ToolError> {
+        let map_file = dir.join("embed.json");
+        let refusal = (
+            200,
+            json!({ "error": { "message": EMBED_NOT_ENABLED_MESSAGE } }),
+        );
+        let pia_path = dir.join("pia.jwt").to_string_lossy().to_string();
+        let mut api = MockApi::new(&[auth_ok(CLIENT_A), acl_answer(CLIENT_A, ACL_GROUP_ISOLATED)]);
+        let (code, _, stderr) = invoke_with(
+            &["provision", "user:pia", &pia_path],
+            &map_file,
+            ACL_GROUP_ISOLATED,
+            &mut api,
+        );
+        ensure(
+            code == EXIT_OK,
+            &format!("provision before the refusal: {stderr}"),
+        )?;
+        for args in [
+            vec!["cap", "user:pia", "--monthly", "1"],
+            vec!["usage", "user:pia"],
+            vec!["usage-all"],
+            vec!["acl", "user:pia", ACL_GROUP_ISOLATED],
+        ] {
+            let mut api = MockApi::new(std::slice::from_ref(&refusal));
+            let (code, stdout, stderr) =
+                invoke_with(&args, &map_file, ACL_GROUP_ISOLATED, &mut api);
+            ensure(
+                code == EXIT_CONFIG
+                    && stdout.is_empty()
+                    && stderr == format!("{EMBED_NOT_ENABLED_LINE}\n"),
+                &format!("{args:?} while Embed isn't enabled: {code} {stderr}"),
+            )?;
+        }
+        let quinn_file = dir.join("quinn.jwt");
+        let quinn_path = quinn_file.to_string_lossy().to_string();
+        let mut api = MockApi::new(&[auth_ok(CLIENT_B), refusal.clone()]);
+        let (code, stdout, stderr) = invoke_with(
+            &["provision", "user:quinn", &quinn_path],
+            &map_file,
+            ACL_GROUP_ISOLATED,
+            &mut api,
+        );
+        ensure(
+            code == EXIT_OK
+                && stdout == format!("{{\"client_id\":\"{CLIENT_B}\"}}\n")
+                && stderr == format!("{EMBED_PENDING_LINE}\n"),
+            &format!("provision while Embed isn't enabled: {code} {stdout} {stderr}"),
+        )?;
+        ensure(
+            api.calls.len() == 2 && api.calls[1].path == ACL_PATH,
+            "provision while Embed isn't enabled did not try the group",
+        )?;
+        ensure(
+            fs::read_to_string(&quinn_file)? == format!("{}\n", jwt(CLIENT_B))
+                && pending(&map_file)? == vec!["user:quinn".to_string()],
+            "provision while Embed isn't enabled wrote no client JWT or dropped the record",
+        )?;
+        let mut api = MockApi::new(&[auth_ok(CLIENT_B), acl_answer(CLIENT_B, ACL_GROUP_ISOLATED)]);
+        let (code, _, stderr) = invoke_with(
+            &["provision", "user:quinn", &quinn_path],
+            &map_file,
+            ACL_GROUP_ISOLATED,
+            &mut api,
+        );
+        ensure(
+            code == EXIT_OK
+                && stderr.is_empty()
+                && pending(&map_file)?.is_empty()
+                && api.calls[1].body
+                    == Some(json!({ "client_id": CLIENT_B, "acl_group": ACL_GROUP_ISOLATED })),
+            &format!("provision after Embed was enabled: {stderr}"),
+        )
+    }
+
+    /// The `status` command: `GET /network/embed` with the root credential, printed as the fixed
+    /// line for an enabled and a not enabled network; a refusal exits 78; a server without the
+    /// route and an invalid answer exit 1.
+    fn embed_status_checks(dir: &Path) -> Result<(), ToolError> {
+        let map_file = dir.join("status.json");
+        for (answer, line) in [
+            (
+                json!({ "enabled": true, "client_limit": 5000, "active_client_count": 1234 }),
+                "embed enabled: yes | client limit: 5000 | active clients: 1234\n",
+            ),
+            (
+                json!({ "enabled": false, "client_limit": 100, "active_client_count": 0 }),
+                "embed enabled: no | client limit: 100 | active clients: 0\n",
+            ),
+        ] {
+            let mut api = MockApi::new(&[(200, answer)]);
+            let (code, stdout, stderr) = invoke(&["status"], &map_file, &mut api);
+            ensure(
+                code == EXIT_OK && stdout == line && stderr.is_empty(),
+                &format!("status printed {stdout} {stderr}"),
+            )?;
+            ensure(
+                api.calls.len() == 1
+                    && api.calls[0].method == "GET"
+                    && api.calls[0].path == EMBED_PATH
+                    && api.calls[0].query.is_empty(),
+                "the status request is not GET /network/embed",
+            )?;
+        }
+        let mut api = MockApi::new(&[(
+            200,
+            json!({ "error": { "message": "Invalid credential." } }),
+        )]);
+        let (code, stdout, stderr) = invoke(&["status"], &map_file, &mut api);
+        ensure(
+            code == EXIT_CONFIG
+                && stdout.is_empty()
+                && stderr.contains("Invalid credential.")
+                && stderr.matches('\n').count() == 1,
+            &format!("status on a refusal: {code} {stderr}"),
+        )?;
+        let mut api = MockApi::new(&[(401, json!({}))]);
+        ensure(
+            invoke(&["status"], &map_file, &mut api).0 == EXIT_CONFIG,
+            "status with a refused root credential",
+        )?;
+        let mut api = MockApi::new(&[(404, json!({}))]);
+        let (code, _, stderr) = invoke(&["status"], &map_file, &mut api);
+        ensure(
+            code == EXIT_FAILURE && stderr == format!("{EMBED_UNSUPPORTED_MESSAGE}\n"),
+            &format!("status on a server without Embed enablement: {code} {stderr}"),
+        )?;
+        for answer in [
+            json!({ "enabled": true }),
+            json!({ "enabled": "yes", "client_limit": 1, "active_client_count": 1 }),
+            json!({ "enabled": true, "client_limit": -1, "active_client_count": 0 }),
+            json!({ "enabled": true, "client_limit": 1.5, "active_client_count": 0 }),
+            json!({ "enabled": 1, "client_limit": 1, "active_client_count": 1 }),
+            json!({ "enabled": true, "client_limit": "1", "active_client_count": 1 }),
+        ] {
+            let mut api = MockApi::new(&[(200, answer.clone())]);
+            let (code, stdout, _) = invoke(&["status"], &map_file, &mut api);
+            ensure(
+                code == EXIT_FAILURE && stdout.is_empty(),
+                &format!("status accepted {answer}"),
             )?;
         }
         Ok(())
