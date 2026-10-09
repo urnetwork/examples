@@ -13,17 +13,15 @@ void ur_embed_print_line(const char *line) {
   fflush(stdout);
 }
 
-/* Decimal units with one decimal: "0 B", "999 B", "1.0 kB", "12.4 GB". Data
- * plans and the Embed plan's monthly data budget are sold in these units. A
- * value that rounds to 1000.0 moves to the next unit. The arithmetic is exact
- * integer arithmetic, so the text does not depend on the C library's float
- * formatting; a tie rounds to even, as Go's %.1f does. */
+/* "embed client <client_id>, installation <instance_id>", printed at start. */
 void ur_embed_start_line(const char *client_id, const char *instance_id,
                          char *line, size_t capacity) {
   snprintf(line, capacity, "embed client %s, installation %s", client_id,
            instance_id);
 }
 
+/* The GetLicenses app kind that --licenses prints: "apple" on Apple
+ * platforms, "windows" on Windows, "linux" elsewhere. */
 const char *ur_embed_license_app(void) {
 #if defined(_WIN32)
   return "windows";
@@ -34,6 +32,12 @@ const char *ur_embed_license_app(void) {
 #endif
 }
 
+/* Decimal units with one decimal: "0 B", "999 B", "1.0 kB", "12.4 GB". Data
+ * plans and the Embed plan's monthly data budget are sold in these units. A
+ * value that rounds to 1000.0 moves to the next unit. The arithmetic is exact
+ * integer arithmetic, so the text does not depend on the C library's float
+ * formatting: a tie rounds to even on the exact value, so 1050 bytes is
+ * "1.0 kB". */
 void ur_embed_format_byte_count(int64_t byte_count, char *text,
                                 size_t capacity) {
   static const char *const units[] = {"kB", "MB", "GB", "TB", "PB", "EB"};

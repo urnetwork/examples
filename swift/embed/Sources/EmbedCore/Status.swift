@@ -32,11 +32,6 @@ public let cappedReasonTotal = "total"
 public let clientLimitStatusNone = ""
 public let clientLimitStatusExceeded = "client_limit_exceeded"
 
-/// Decimal units with one decimal: "0 B", "999 B", "1.0 kB", "12.4 GB". Data
-/// plans and the Embed plan's monthly data budget are sold in these units. A
-/// value that rounds to 1000.0 moves to the next unit. The arithmetic is exact
-/// integer arithmetic, so the text does not depend on float formatting; a tie
-/// rounds to even, as Go's %.1f does.
 /// "embed client <client_id>, installation <instance_id>", printed at start.
 public func startLine(clientId: String, instanceId: String) -> String {
   return "embed client \(clientId), installation \(instanceId)"
@@ -52,6 +47,11 @@ public func startLine(clientId: String, instanceId: String) -> String {
   public let licenseApp = "linux"
 #endif
 
+/// Decimal units with one decimal: "0 B", "999 B", "1.0 kB", "12.4 GB". Data
+/// plans and the Embed plan's monthly data budget are sold in these units. A
+/// value that rounds to 1000.0 moves to the next unit. The arithmetic is exact
+/// integer arithmetic, so the text does not depend on float formatting: a tie
+/// rounds to even on the exact value, so 1050 bytes is "1.0 kB".
 public func formatByteCount(_ byteCount: Int64) -> String {
   let units = ["kB", "MB", "GB", "TB", "PB", "EB"]
   if byteCount < 1000 {

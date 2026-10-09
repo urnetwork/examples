@@ -45,10 +45,6 @@ inline void printLine(std::string_view line) {
     std::cout << line << std::endl;
 }
 
-// Decimal units with one decimal: "0 B", "999 B", "1.0 kB", "12.4 GB". Data
-// plans and the Embed plan's monthly data budget are sold in these units. A
-// value that rounds to 1000.0 moves to the next unit. The arithmetic is exact
-// integer arithmetic; a tie rounds to even, as Go's %.1f does.
 // "embed client <client_id>, installation <instance_id>", printed at start.
 inline std::string startLine(const std::string& clientId, const std::string& instanceId) {
     return "embed client " + clientId + ", installation " + instanceId;
@@ -66,6 +62,11 @@ inline const char* licenseApp() {
 #endif
 }
 
+// Decimal units with one decimal: "0 B", "999 B", "1.0 kB", "12.4 GB". Data
+// plans and the Embed plan's monthly data budget are sold in these units. A
+// value that rounds to 1000.0 moves to the next unit. The arithmetic is exact
+// integer arithmetic: a tie rounds to even on the exact value, so 1050 bytes
+// is "1.0 kB".
 inline std::string formatByteCount(int64_t byteCount) {
     static constexpr const char* units[] = {"kB", "MB", "GB", "TB", "PB", "EB"};
     if (byteCount < 1000) {
