@@ -1,7 +1,8 @@
 //! The window's state without Tauri: the view the window shows, how starts, stops, sign-outs and
-//! failures change it, and the start's preparation (the state directory, `token-server.json` and the
-//! client JWT). Pure apart from the state files and the token fetch, so its tests run without a
-//! window or the native runtime, with a loopback stand-in for the token server.
+//! failures change it, the start's preparation (the state directory, `token-server.json` and the
+//! client JWT), the commands and the event the window uses, and the licenses text. Pure apart from
+//! the state files and the token fetch, so its tests run without a window, the Tauri crate or the
+//! native runtime, with a loopback stand-in for the token server.
 
 use std::path::Path;
 
@@ -15,6 +16,18 @@ use urnetwork_embed::{
     status::{EmbedStatus, StatusInputs, status_text},
     token::TokenServer,
 };
+
+/// The event that carries an [`EmbedView`] to the window.
+pub const EMBED_VIEW_EVENT: &str = "embed-view";
+
+/// The SDK's licenses for the window: the JSON pretty-printed for reading, or the SDK's own text
+/// when it is not JSON.
+pub fn licenses_for_window(json: String) -> String {
+    serde_json::from_str::<serde_json::Value>(&json)
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+        .unwrap_or(json)
+}
 
 /// What the window shows: the status fields as the core formats them, the installation's identity,
 /// the token server settings without the session, and the controls' state.
@@ -241,6 +254,8 @@ mod tests {
     use super::*;
 
     const TEST_CLIENT_ID: &str = "11111111-1111-1111-1111-111111111111";
+    /// The commands that main.rs registers and the window calls.
+    const COMMANDS: [&str; 4] = ["embed_view", "start_embed", "stop_embed", "licenses"];
     const TEST_SESSION: &str = "synthetic-demo-session-token-0123456789";
 
     /// A private temporary state directory (the app's `embed` directory).
@@ -254,6 +269,80 @@ mod tests {
     /// The state directory inside the temporary directory, created by the app on start.
     fn embed_dir(temp_dir: &tempfile::TempDir) -> PathBuf {
         temp_dir.path().join("embed")
+    }
+
+    #[test]
+    fn window_has_the_fields_and_controls() {
+        let page = include_str!("../../ui/index.html");
+        for id in [
+            "token-server-url",
+            "demo-session",
+            "start",
+            "stop",
+            "status",
+            "data-this-month",
+            "data-total",
+            "client-id",
+            "installation-id",
+            "message",
+            "state-dir",
+            "licenses",
+        ] {
+            assert!(
+                page.contains(&format!("id=\"{id}\"")),
+                "the window lacks #{id}"
+            );
+        }
+        // the closing pointer to the Sockets and Messages examples
+        assert!(page.contains("Sockets") && page.contains("Messages"));
+    }
+
+    #[test]
+    fn window_calls_the_registered_commands() {
+        let script = include_str!("../../ui/main.js");
+        let main = include_str!("main.rs");
+        let registered = main
+            .split("generate_handler![")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("main.rs registers no commands");
+        for command in COMMANDS {
+            assert!(
+                script.contains(&format!("'{command}'")),
+                "main.js does not call {command}"
+            );
+            assert!(
+                registered.contains(command) && main.contains(&format!("fn {command}(")),
+                "main.rs does not register {command}"
+            );
+        }
+        assert_eq!(
+            registered
+                .split(',')
+                .filter(|name| !name.trim().is_empty())
+                .count(),
+            COMMANDS.len(),
+            "main.rs registers a command the window does not call"
+        );
+        assert!(script.contains(&format!("'{EMBED_VIEW_EVENT}'")));
+        // Tauri maps the commands' snake_case arguments to camelCase
+        assert!(script.contains("tokenServerUrl") && script.contains("demoSession"));
+    }
+
+    #[test]
+    fn licenses_are_pretty_json_or_the_sdk_text() {
+        assert_eq!(
+            licenses_for_window(r#"[{"Name":"a"}]"#.to_string()),
+            "[\n  {\n    \"Name\": \"a\"\n  }\n]"
+        );
+        assert_eq!(licenses_for_window("not json".to_string()), "not json");
+    }
+
+    #[test]
+    fn core_self_test() {
+        if let Err(message) = urnetwork_embed::self_test::run_self_test() {
+            panic!("{message}");
+        }
     }
 
     #[test]

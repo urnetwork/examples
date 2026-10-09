@@ -17,7 +17,7 @@ use tauri::{AppHandle, Manager, RunEvent, State};
 use urnetwork_embed::session::licenses_json;
 
 use embed::EmbedController;
-use embed_state::EmbedView;
+use embed_state::{EmbedView, licenses_for_window};
 
 /// The main window's label (tauri.conf.json).
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -61,12 +61,9 @@ fn stop_embed(controller: State<'_, EmbedController>) -> EmbedView {
 /// The SDK's licenses and data attributions for this OS, as JSON, to publish with the app.
 #[tauri::command]
 fn licenses() -> Result<String, String> {
-    let json = licenses_json().map_err(|error| error.to_string())?;
-    // pretty-printed for reading; the SDK's own text when it is not JSON
-    Ok(serde_json::from_str::<serde_json::Value>(&json)
-        .ok()
-        .and_then(|value| serde_json::to_string_pretty(&value).ok())
-        .unwrap_or(json))
+    licenses_json()
+        .map(licenses_for_window)
+        .map_err(|error| error.to_string())
 }
 
 /// Runs the app until its window closes.
@@ -99,56 +96,5 @@ fn main() {
     });
 }
 
-#[cfg(test)]
-mod tests {
-    //! The window's fields and commands, and the shared core's self-test, without starting the app.
-
-    use urnetwork_embed::self_test;
-
-    #[test]
-    fn window_has_the_fields_and_controls() {
-        let page = include_str!("../../ui/index.html");
-        for id in [
-            "token-server-url",
-            "demo-session",
-            "start",
-            "stop",
-            "status",
-            "data-this-month",
-            "data-total",
-            "client-id",
-            "installation-id",
-            "message",
-            "state-dir",
-            "licenses",
-        ] {
-            assert!(
-                page.contains(&format!("id=\"{id}\"")),
-                "the window lacks #{id}"
-            );
-        }
-        // the closing pointer to the Sockets and Messages examples
-        assert!(page.contains("Sockets") && page.contains("Messages"));
-    }
-
-    #[test]
-    fn window_calls_the_registered_commands() {
-        let script = include_str!("../../ui/main.js");
-        for command in ["embed_view", "start_embed", "stop_embed", "licenses"] {
-            assert!(
-                script.contains(&format!("'{command}'")),
-                "main.js does not call {command}"
-            );
-        }
-        assert!(script.contains(&format!("'{}'", crate::embed::EMBED_VIEW_EVENT)));
-        // Tauri maps the commands' snake_case arguments to camelCase
-        assert!(script.contains("tokenServerUrl") && script.contains("demoSession"));
-    }
-
-    #[test]
-    fn core_self_test() {
-        if let Err(message) = self_test::run_self_test() {
-            panic!("{message}");
-        }
-    }
-}
+// The window's fields, the commands it calls and the licenses text are tested in embed_state.rs,
+// which builds without the Tauri crate.

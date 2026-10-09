@@ -21,10 +21,9 @@ use urnetwork_embed::{
     status::EmbedStatus,
 };
 
-use crate::embed_state::{EmbedView, Finish, ViewState, prepare_start, save_token_server_settings};
-
-/// The event that carries an [`EmbedView`] to the window.
-pub const EMBED_VIEW_EVENT: &str = "embed-view";
+use crate::embed_state::{
+    EMBED_VIEW_EVENT, EmbedView, Finish, ViewState, prepare_start, save_token_server_settings,
+};
 
 /// The description and spec recorded for this installation's device.
 const DEVICE_INFO: DeviceInfo = DeviceInfo {
