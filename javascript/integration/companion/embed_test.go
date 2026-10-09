@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -69,6 +70,52 @@ func TestEmbedCompanionMode(t *testing.T) {
 		if !c.valid && err == nil {
 			t.Fatalf("mode for provide %q embed %q was accepted", c.provide, c.embed)
 		}
+	}
+}
+
+// Embed mode runs without arguments, prints for --version or --licenses, and
+// refuses anything else as a usage error.
+func TestEmbedCommand(t *testing.T) {
+	cases := []struct {
+		args    []string
+		command string
+		valid   bool
+	}{
+		{args: nil, command: "", valid: true},
+		{args: []string{"--version"}, command: "--version", valid: true},
+		{args: []string{"--licenses"}, command: "--licenses", valid: true},
+		{args: []string{"--licenses", "extra"}, valid: false},
+		{args: []string{"--version", "--licenses"}, valid: false},
+		{args: []string{"run"}, valid: false},
+		{args: []string{"--license"}, valid: false},
+	}
+	for _, c := range cases {
+		command, ok := embedCommand(c.args)
+		if ok != c.valid || (ok && command != c.command) {
+			t.Fatalf("command for %q is %q %v, want %q %v", c.args, command, ok, c.command, c.valid)
+		}
+	}
+	if !strings.Contains(embedUsage, "--licenses") {
+		t.Fatalf("the usage does not name --licenses: %s", embedUsage)
+	}
+}
+
+// --licenses writes one line: the json array that /embed-status carries.
+func TestWriteEmbedLicenses(t *testing.T) {
+	var out bytes.Buffer
+	if code := writeEmbedLicenses(&out, runtime.GOOS); code != exitStopped {
+		t.Fatalf("exit code %d", code)
+	}
+	if !strings.HasSuffix(out.String(), "\n") || strings.Count(out.String(), "\n") != 1 {
+		t.Fatalf("the licenses are not one line")
+	}
+	var licenses []map[string]any
+	if err := json.Unmarshal(out.Bytes(), &licenses); err != nil || len(licenses) == 0 {
+		t.Fatalf("the licenses are not a json array: %v", err)
+	}
+	want, err := embedLicensesJson(runtime.GOOS)
+	if err != nil || strings.TrimSpace(out.String()) != string(want) {
+		t.Fatalf("--licenses differs from the /embed-status licenses")
 	}
 }
 

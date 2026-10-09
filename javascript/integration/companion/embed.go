@@ -26,6 +26,10 @@
 // never outlives the app that shows it. When the server rejects the client
 // credential, the companion closes the device and exits with 78.
 //
+// --licenses prints the licenses for the host OS's app kind, as json, for the
+// apps' own --licenses, and --version the companion's version line; neither
+// needs the settings or the installation state.
+//
 // Exit codes, for supervisors: 0 stopped on request, 78 configuration or
 // credential problem (restarting does not help), 1 any other failure.
 package main
@@ -35,6 +39,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -189,19 +194,52 @@ func embedLicensesJson(goos string) (json.RawMessage, error) {
 	return json.RawMessage(licensesJson), nil
 }
 
+// The embed mode usage line.
+const embedUsage = "usage: ur-companion [--version | --licenses]"
+
+// The embed mode command of the arguments: "" to run, "--version" or
+// "--licenses"; false for a usage error.
+func embedCommand(args []string) (string, bool) {
+	switch {
+	case len(args) == 0:
+		return "", true
+	case len(args) == 1 && (args[0] == "--version" || args[0] == "--licenses"):
+		return args[0], true
+	default:
+		return "", false
+	}
+}
+
+// Writes the licenses for the host OS's app kind, as one line of json, and
+// returns the exit code.
+func writeEmbedLicenses(out io.Writer, goos string) int {
+	licensesJson, err := embedLicensesJson(goos)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not read the licenses: %v\n", err)
+		return exitFailure
+	}
+	if _, err := fmt.Fprintln(out, string(licensesJson)); err != nil {
+		return exitFailure
+	}
+	return exitStopped
+}
+
 // Runs embed mode and returns the exit code.
 func runEmbed(args []string) int {
+	command, ok := embedCommand(args)
 	switch {
-	case len(args) == 1 && args[0] == "--version":
+	case !ok:
+		fmt.Fprintln(os.Stderr, embedUsage)
+		return exitConfig
+	case command == "--version":
 		version := sdk.Version
 		if version == "" {
 			version = "development SDK"
 		}
 		fmt.Println("URnetwork native embed companion", version)
 		return exitStopped
-	case len(args) != 0:
-		fmt.Fprintln(os.Stderr, "usage: ur-companion [--version]")
-		return exitConfig
+	case command == "--licenses":
+		return writeEmbedLicenses(os.Stdout, runtime.GOOS)
 	}
 
 	settings, err := loadEmbedCompanionSettings(os.Getenv)
