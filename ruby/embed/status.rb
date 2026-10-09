@@ -38,33 +38,39 @@ module Embed
 
   MINUTE_MILLIS = 60 * 1000
   MINUTES_PER_DAY = 24 * 60
-  HALF = Rational(1, 2)
 
   # Decimal units with one decimal: "0 B", "999 B", "1.0 kB", "1.2 GB". The
-  # amount is rounded from its exact binary value to the nearest tenth, ties
-  # to even, as Go's %.1f does: 1250 bytes is "1.2 kB", and 1050 bytes, just
-  # above 1.05 in binary, is "1.1 kB". A value that rounds to 1000.0 moves to
-  # the next unit, so 999999 bytes is "1.0 MB".
+  # tenths round half to even on the exact integer, never on a binary
+  # fraction, so 1050 bytes is "1.0 kB" and 1150 bytes "1.2 kB"; a value that
+  # rounds to 1000.0 moves to the next unit, so 999999 bytes is "1.0 MB".
   def self.format_byte_count(byte_count)
     return "#{byte_count} B" if byte_count < 1000
 
+    # the bytes in a tenth of the unit
+    tenth = 100
     DECIMAL_UNITS.each_with_index do |unit, unit_index|
-      tenths = round_tenths(byte_count.fdiv(1000**(unit_index + 1)))
+      tenths, remainder = byte_count.divmod(tenth)
+      tenths += 1 if tenth < 2 * remainder || (2 * remainder == tenth && tenths.odd?)
       return "#{tenths / 10}.#{tenths % 10} #{unit}" if tenths < 10_000 || unit_index == DECIMAL_UNITS.length - 1
+
+      tenth *= 1000
     end
   end
 
-  # The value in tenths, rounded from its exact binary value with ties to
-  # even. Ruby's format("%.1f") rounds 1.0500000000000000444 down to 1.0,
-  # where Go's %.1f rounds it up, so the rounding is done exactly here.
-  def self.round_tenths(value)
-    scaled = value.to_r * 10
-    whole = scaled.floor
-    remainder = scaled - whole
-    return whole + 1 if remainder > HALF
-    return whole if remainder < HALF
+  # The line the console app prints once the device runs (EMBED_CONTRACT.md,
+  # "Status").
+  def self.start_line(client_id, instance_id)
+    "embed client #{client_id}, installation #{instance_id}"
+  end
 
-    whole.even? ? whole : whole + 1
+  # The kind of app whose licenses --licenses prints, from RbConfig's
+  # host_os: "apple" on macOS, "windows" on Windows, "linux" elsewhere.
+  def self.license_app(host_os)
+    case host_os
+    when /darwin/i then "apple"
+    when /mswin|mingw|cygwin/i then "windows"
+    else "linux"
+    end
   end
 
   # "resets YYYY-MM-DD HH:MM UTC" for a monthly period end in RFC 3339: in

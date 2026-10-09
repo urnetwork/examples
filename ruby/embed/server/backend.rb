@@ -10,6 +10,7 @@
 #   ruby backend.rb usage <key>
 #   ruby backend.rb usage-all
 #   ruby backend.rb remove <key>
+#   ruby backend.rb acl <key> default|isolated
 #   ruby backend.rb --self-test
 #
 # <key> is user:<service-user-id>, or user:<service-user-id>:<installation-id>
@@ -22,6 +23,9 @@
 # - URNETWORK_CLIENT_MAP: absolute filename of this tool's private client map,
 #   in an existing private, service-owned directory. Not the token server's map.
 # - URNETWORK_API_URL: optional HTTPS origin, default https://api.bringyour.com.
+# - URNETWORK_DEFAULT_ACL_GROUP: optional, the ACL group of each new client:
+#   isolated (the default), so your users never see each other in the peer
+#   list, or default, for an app that uses Messages.
 #
 # Exit codes: 0 success; 78 a configuration or credential problem (missing
 # settings, an invalid key or map, the root credential refused, the client
@@ -46,6 +50,7 @@ module EmbedBackend
   REMOVE_CLIENT_ROUTE = "/network/remove-client"
   CAP_ROUTE = "/network/client-data-cap"
   CAPS_ROUTE = "/network/client-data-caps"
+  ACL_ROUTE = "/network/client-acl-group"
   USAGE_ALL_PAGE_LIMIT = 1000
 
   MAX_BYTE_COUNT = 9_223_372_036_854_775_807
@@ -53,9 +58,16 @@ module EmbedBackend
 
   CLIENT_DOES_NOT_EXIST = "Client does not exist."
   CLIENT_LIMIT_MESSAGE = "client limit reached: your network is at its client limit; see https://ur.io/services"
+  UNMAPPED_MESSAGE = "no client is mapped for that key; run provision first"
+  ACL_UNSUPPORTED_MESSAGE = "/network/client-acl-group answered 404: the server predates ACL groups"
 
-  # a language tool's map has only these fields; the token server's adds pending_caps
-  MAP_FIELDS = %w[version clients].freeze
+  ACL_GROUP_DEFAULT = "default"
+  ACL_GROUP_ISOLATED = "isolated"
+  ACL_GROUPS = [ACL_GROUP_DEFAULT, ACL_GROUP_ISOLATED].freeze
+
+  # a language tool's map has only these fields, pending_acl only while it is
+  # not empty; the token server's adds pending_caps
+  MAP_FIELDS = %w[version clients pending_acl].freeze
 
   EXIT_OK = 0
   EXIT_FAILURE = 1
@@ -65,10 +77,11 @@ module EmbedBackend
   # the longest API error message the tool shows
   ERROR_MESSAGE_LIMIT = 300
 
-  COMMANDS = %w[provision cap usage usage-all remove].freeze
+  COMMANDS = %w[provision cap usage usage-all remove acl].freeze
 
   USAGE = "usage: backend.rb provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] " \
-          "[--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | --self-test"
+          "[--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | " \
+          "acl <key> default|isolated | --self-test"
 
   # A failure with its exit code and its stderr line, which never carries a
   # secret.
@@ -111,8 +124,9 @@ module EmbedBackend
     base.sub(%r{/\z}, "")
   end
 
-  # The allocator's private map, refusing one with fields other than version
-  # and clients (the token server's map has pending_caps), so that two tools
+  # The allocator's private map, with an optional pending_acl: the keys whose
+  # new clients still owe their default ACL group. A map with other fields
+  # (the token server's map has pending_caps) is refused, so that two tools
   # never rewrite each other's map.
   def load_map(file)
     begin
@@ -121,15 +135,31 @@ module EmbedBackend
       raise config_problem("invalid client map: #{error.message}")
     end
     extra = map.keys - MAP_FIELDS
-    raise config_problem("the client map has fields other than version and clients (#{extra.sort.join(', ')}); give this tool its own map") unless extra.empty?
+    raise config_problem("the client map has fields other than version, clients and pending_acl (#{extra.sort.join(', ')}); give this tool its own map") unless extra.empty?
+
+    pending = map["pending_acl"] ||= []
+    unless pending.is_a?(Array) && pending.all? { |key| key.is_a?(String) && map["clients"].key?(key) } && pending.uniq.length == pending.length
+      raise config_problem("the client map's pending_acl is not a list of mapped keys")
+    end
 
     map
   end
 
+  # Saves the map; pending_acl only while it is not empty.
   def save_map(file, map)
-    Allocator.save_map(file, map)
+    saved = {"version" => map["version"], "clients" => map["clients"]}
+    saved["pending_acl"] = map["pending_acl"] unless map.fetch("pending_acl", []).empty?
+    Allocator.save_map(file, saved)
   rescue SystemCallError, IOError => error
     raise failure("save the client map: #{error.message}")
+  end
+
+  # Records that key's new client owes its default ACL group, or drops the
+  # record.
+  def set_acl_pending(map, key, pending)
+    keys = map.fetch("pending_acl", []).reject { |entry| entry == key }
+    keys << key if pending
+    map["pending_acl"] = keys
   end
 
   # The allocator's exclusive <map>.lock directory, held through the remote
@@ -257,7 +287,13 @@ module EmbedBackend
       status, answer = @transport.call(method, path, body.nil? ? nil : JSON.generate(body))
       route = path.split("?", 2).first
       raise EmbedBackend.config_problem("the root credential was refused; check URNETWORK_ROOT_JWT") if [401, 403].include?(status)
-      raise EmbedBackend.failure("#{route} answered 404: the server needs a release with this route") if status == 404
+      if status == 404
+        # a server that predates the route (EMBED_CONTRACT.md, "Backend tools")
+        raise EmbedBackend.failure(ACL_UNSUPPORTED_MESSAGE) if route == ACL_ROUTE
+        raise EmbedBackend.failure("#{route} answered 404: the server predates the data-cap routes") if [CAP_ROUTE, CAPS_ROUTE].include?(route)
+
+        raise EmbedBackend.failure("#{route} answered 404")
+      end
       raise EmbedBackend.failure("#{route} failed with HTTP #{status}") unless (200..299).cover?(status)
 
       value =
@@ -308,9 +344,11 @@ module EmbedBackend
   end
 
   # Reissues the key's client, or provisions a new one; on "Client does not
-  # exist." it drops the mapping and provisions a new client. Writes the
-  # client JWT to client_jwt_file and prints only the client ID.
-  def provision(api, file, key, client_jwt_file)
+  # exist." it drops the mapping and provisions a new client. A new client
+  # goes into acl_group, with a pending_acl record until the group is applied,
+  # before any client JWT is written. Writes the client JWT to client_jwt_file
+  # and prints only the client ID.
+  def provision(api, file, key, client_jwt_file, acl_group)
     result = nil
     with_map_lock(file) do
       map = load_map(file)
@@ -321,6 +359,7 @@ module EmbedBackend
         if client_does_not_exist?(answer)
           # deactivated after 30 days without connecting, or removed
           map["clients"].delete(key)
+          set_acl_pending(map, key, false)
           save_map(file, map)
           old = nil
         end
@@ -339,6 +378,15 @@ module EmbedBackend
         raise failure("the API returned a client that the map assigns to another key") if map["clients"].value?(result["client_id"])
 
         map["clients"][key] = result["client_id"]
+        # the mapping and the record that the client owes its group, in one save
+        set_acl_pending(map, key, acl_group == ACL_GROUP_ISOLATED)
+        save_map(file, map)
+      end
+      if map["pending_acl"].include?(key)
+        # a new client is "default": only an isolated default needs the request.
+        # A failure raises with the record kept, before any client JWT is written.
+        post_acl_group(api, result["client_id"], ACL_GROUP_ISOLATED) if acl_group == ACL_GROUP_ISOLATED
+        set_acl_pending(map, key, false)
         save_map(file, map)
       end
       begin
@@ -352,9 +400,36 @@ module EmbedBackend
 
   def mapped_client(file, key)
     client = load_map(file)["clients"][key]
-    raise config_problem("no client is mapped for that key; run provision first") if client.nil?
+    raise config_problem(UNMAPPED_MESSAGE) if client.nil?
 
     client
+  end
+
+  # Sets the client's ACL group; the answer must name the client and the
+  # group.
+  def post_acl_group(api, client, acl_group)
+    answer = api.call("POST", ACL_ROUTE, {"client_id" => client, "acl_group" => acl_group})
+    raise failure("the ACL group request was refused: #{message_of(answer['error'])}") unless answer["error"].nil?
+    raise failure("the API answered another client or ACL group") unless answer["client_id"] == client && answer["acl_group"] == acl_group
+  end
+
+  # Sets the ACL group of the key's client and prints {"client_id": ...,
+  # "acl_group": ...}. An explicit group settles a pending default group, so
+  # the record is dropped.
+  def acl(api, file, key, acl_group)
+    client = nil
+    with_map_lock(file) do
+      map = load_map(file)
+      client = map["clients"][key]
+      raise config_problem(UNMAPPED_MESSAGE) if client.nil?
+
+      post_acl_group(api, client, acl_group)
+      if map["pending_acl"].include?(key)
+        set_acl_pending(map, key, false)
+        save_map(file, map)
+      end
+    end
+    puts JSON.generate({"client_id" => client, "acl_group" => acl_group})
   end
 
   # Posts only the given fields to POST /network/client-data-cap and prints
@@ -408,12 +483,13 @@ module EmbedBackend
     with_map_lock(file) do
       map = load_map(file)
       client = map["clients"][key]
-      raise config_problem("no client is mapped for that key") if client.nil?
+      raise config_problem(UNMAPPED_MESSAGE) if client.nil?
 
       answer = api.call("POST", REMOVE_CLIENT_ROUTE, {"client_id" => client})
       raise failure("remove was refused: #{message_of(answer['error'])}") if !answer["error"].nil? && !client_does_not_exist?(answer)
 
       map["clients"].delete(key)
+      set_acl_pending(map, key, false)
       save_map(file, map)
     end
     puts JSON.generate({"removed" => client})
@@ -440,6 +516,7 @@ module EmbedBackend
     raise config_problem(USAGE) if %w[usage remove].include?(command) && operands.length != 1
     raise config_problem(USAGE) if command == "cap" && operands.empty?
     raise config_problem(USAGE) if command == "usage-all" && !operands.empty?
+    raise config_problem(USAGE) if command == "acl" && (operands.length != 2 || !ACL_GROUPS.include?(operands[1]))
 
     key = command == "usage-all" ? nil : check_key(operands.first)
     fields = command == "cap" ? parse_cap_options(operands.drop(1)) : nil
@@ -449,6 +526,9 @@ module EmbedBackend
 
     api_url = env.fetch("URNETWORK_API_URL", "")
     origin = api_origin(api_url.empty? ? "https://api.bringyour.com" : api_url)
+    acl_group = env.fetch("URNETWORK_DEFAULT_ACL_GROUP", "")
+    acl_group = ACL_GROUP_ISOLATED if acl_group.empty?
+    raise config_problem("URNETWORK_DEFAULT_ACL_GROUP must be default or isolated") unless ACL_GROUPS.include?(acl_group)
     file = nil
     unless command == "usage-all"
       file = env.fetch("URNETWORK_CLIENT_MAP", "")
@@ -459,10 +539,11 @@ module EmbedBackend
     end
     api = Api.new(transport_factory.call(origin, root))
     case command
-    when "provision" then provision(api, file, key, operands[1])
+    when "provision" then provision(api, file, key, operands[1], acl_group)
     when "cap" then cap(api, file, key, fields)
     when "usage" then usage(api, file, key)
     when "usage-all" then usage_all(api)
+    when "acl" then acl(api, file, key, operands[1])
     else remove(api, file, key)
     end
     EXIT_OK
@@ -546,7 +627,10 @@ module EmbedBackend
       File.chmod(0o700, directory) unless Gem.win_platform?
       map_path = File.join(directory, "clients.json")
       jwt_path = File.join(directory, "client.jwt")
-      env = {"URNETWORK_ROOT_JWT" => SELF_TEST_ROOT, "URNETWORK_CLIENT_MAP" => map_path, "URNETWORK_API_URL" => "http://127.0.0.1:1"}
+      # the checks before the ACL group checks keep new clients in "default",
+      # which sends no ACL request
+      env = {"URNETWORK_ROOT_JWT" => SELF_TEST_ROOT, "URNETWORK_CLIENT_MAP" => map_path, "URNETWORK_API_URL" => "http://127.0.0.1:1",
+             "URNETWORK_DEFAULT_ACL_GROUP" => ACL_GROUP_DEFAULT}
       tool = ->(args, api) { self_test_tool(args, env, api) }
       expect = method(:self_test_expect)
       client_jwt = self_test_jwt(SELF_TEST_CLIENT)
@@ -679,6 +763,120 @@ module EmbedBackend
       expect.call(code == EXIT_CONFIG, "a refused root credential must exit 78")
       code, = tool.call(["usage-all"], StandInApi.new(failure("could not reach the URnetwork API")))
       expect.call(code == EXIT_FAILURE, "an unreachable API must exit 1")
+      [["acl"], ["acl", SELF_TEST_KEY], ["acl", SELF_TEST_KEY, "public"], ["acl", SELF_TEST_KEY, "Default"],
+       ["acl", SELF_TEST_KEY, "default", "extra"], ["acl", "alice", "default"]].each do |args|
+        code, = tool.call(args, StandInApi.new)
+        expect.call(code == EXIT_CONFIG, "#{args} must be a usage error")
+      end
+      code, _, err = self_test_tool(["provision", "user:x", jwt_path], env.merge("URNETWORK_DEFAULT_ACL_GROUP" => "private"), StandInApi.new)
+      expect.call(code == EXIT_CONFIG && err.strip == "URNETWORK_DEFAULT_ACL_GROUP must be default or isolated", "an invalid default ACL group must exit 78")
+
+      self_test_acl_groups(directory, env, expect)
+      self_test_failure_texts(directory, env, expect)
+    end
+  end
+
+  # The default ACL group: applied to a new client only, with pending_acl set
+  # before and cleared after, kept and retried after a failure, kept on a
+  # server without ACL groups, and settled by acl; the acl command.
+  def self_test_acl_groups(directory, env, expect)
+    acl_map = File.join(directory, "acl.json")
+    isolated = env.merge("URNETWORK_CLIENT_MAP" => acl_map).reject { |name, _| name == "URNETWORK_DEFAULT_ACL_GROUP" }
+    jwt_path = File.join(directory, "acl.jwt")
+    pending = -> { load_map(acl_map)["pending_acl"] }
+    provisioned = ->(client) { [200, {"client_id" => client, "by_client_jwt" => self_test_jwt(client)}] }
+    applied = ->(client, group) { [200, {"client_id" => client, "acl_group" => group}] }
+
+    # unset means isolated: the new client, then one ACL request, then no record
+    api = StandInApi.new(provisioned.call(SELF_TEST_CLIENT), applied.call(SELF_TEST_CLIENT, ACL_GROUP_ISOLATED))
+    code, _, err = self_test_tool(["provision", "user:ivan", jwt_path], isolated, api)
+    expect.call(code == EXIT_OK && api.requests.map { |request| request[:path] } == [AUTH_CLIENT_ROUTE, ACL_ROUTE], "a new client must be put in isolated: #{err}")
+    expect.call(api.requests[1][:body] == {"client_id" => SELF_TEST_CLIENT, "acl_group" => ACL_GROUP_ISOLATED}, "the ACL request must name the client and isolated")
+    expect.call(pending.call.empty? && !File.read(acl_map).include?("pending_acl"), "an applied group must leave no record")
+    expect.call(File.read(jwt_path) == "#{self_test_jwt(SELF_TEST_CLIENT)}\n", "the client JWT must be written after the group")
+    api = StandInApi.new(provisioned.call(SELF_TEST_CLIENT))
+    code, = self_test_tool(["provision", "user:ivan", jwt_path], isolated, api)
+    expect.call(code == EXIT_OK && api.requests.length == 1, "a reissue must send no ACL request")
+
+    # a failed request keeps the record and writes no client JWT; the next issue retries
+    judy_jwt = File.join(directory, "judy.jwt")
+    code, = self_test_tool(["provision", "user:judy", judy_jwt], isolated, StandInApi.new(provisioned.call(SELF_TEST_OTHER_CLIENT), [500, {}]))
+    expect.call(code == EXIT_FAILURE && !File.exist?(judy_jwt) && pending.call == ["user:judy"], "a failed ACL request must keep the record and write no client JWT")
+    expect.call(load_map(acl_map)["clients"]["user:judy"] == SELF_TEST_OTHER_CLIENT, "the new client must be mapped with its record")
+    api = StandInApi.new(provisioned.call(SELF_TEST_OTHER_CLIENT), applied.call(SELF_TEST_OTHER_CLIENT, ACL_GROUP_ISOLATED))
+    code, = self_test_tool(["provision", "user:judy", judy_jwt], isolated, api)
+    expect.call(code == EXIT_OK && api.requests[1][:path] == ACL_ROUTE && pending.call.empty? && File.exist?(judy_jwt), "a pending group must be applied on the next issue")
+
+    # a server without ACL groups: exit 1 with the record kept; a default of default then provisions
+    older_map = File.join(directory, "older.json")
+    kim_jwt = File.join(directory, "kim.jwt")
+    older = isolated.merge("URNETWORK_CLIENT_MAP" => older_map)
+    kim = "55555555-5555-5555-5555-555555555555"
+    code, _, err = self_test_tool(["provision", "user:kim", kim_jwt], older, StandInApi.new(provisioned.call(kim), [404, {}]))
+    expect.call(code == EXIT_FAILURE && err.strip == ACL_UNSUPPORTED_MESSAGE && !File.exist?(kim_jwt), "a server without ACL groups must exit 1 with its line: #{err}")
+    expect.call(load_map(older_map)["pending_acl"] == ["user:kim"], "a server without ACL groups must keep the record")
+    api = StandInApi.new(provisioned.call(kim))
+    code, = self_test_tool(["provision", "user:kim", kim_jwt], older.merge("URNETWORK_DEFAULT_ACL_GROUP" => ACL_GROUP_DEFAULT), api)
+    expect.call(code == EXIT_OK && api.requests.length == 1 && load_map(older_map)["pending_acl"].empty? && File.exist?(kim_jwt),
+                "a default of default must settle the record without a request")
+
+    # the acl command: the request, the printed answer, and its refusals
+    api = StandInApi.new(applied.call(SELF_TEST_CLIENT, ACL_GROUP_DEFAULT))
+    code, out, = self_test_tool(["acl", "user:ivan", ACL_GROUP_DEFAULT], isolated, api)
+    expect.call(code == EXIT_OK && JSON.parse(out) == {"client_id" => SELF_TEST_CLIENT, "acl_group" => ACL_GROUP_DEFAULT}, "acl must print the answer")
+    expect.call(api.requests == [{method: "POST", path: ACL_ROUTE, body: {"client_id" => SELF_TEST_CLIENT, "acl_group" => ACL_GROUP_DEFAULT}}], "acl must post the client and the group")
+    code, = self_test_tool(["acl", "user:ivan", ACL_GROUP_ISOLATED], isolated, StandInApi.new(applied.call(SELF_TEST_CLIENT, ACL_GROUP_DEFAULT)))
+    expect.call(code == EXIT_FAILURE, "an answer for another group must fail")
+    code, = self_test_tool(["acl", "user:ivan", ACL_GROUP_ISOLATED], isolated, StandInApi.new([200, {"error" => {"message" => CLIENT_DOES_NOT_EXIST}}]))
+    expect.call(code == EXIT_FAILURE, "a refused ACL request must fail")
+    code, _, err = self_test_tool(["acl", "user:ivan", ACL_GROUP_ISOLATED], isolated, StandInApi.new([404, {}]))
+    expect.call(code == EXIT_FAILURE && err.strip == ACL_UNSUPPORTED_MESSAGE, "acl on a server without ACL groups must print its line: #{err}")
+
+    # an explicit group settles a pending record, so a later issue keeps it
+    mia = "66666666-6666-6666-6666-666666666666"
+    self_test_tool(["provision", "user:mia", File.join(directory, "mia.jwt")], isolated, StandInApi.new(provisioned.call(mia), [500, {}]))
+    expect.call(pending.call == ["user:mia"], "the failed group must be recorded")
+    code, = self_test_tool(["acl", "user:mia", ACL_GROUP_DEFAULT], isolated, StandInApi.new(applied.call(mia, ACL_GROUP_DEFAULT)))
+    expect.call(code == EXIT_OK && pending.call.empty?, "acl must settle a pending record")
+    api = StandInApi.new(provisioned.call(mia))
+    code, = self_test_tool(["provision", "user:mia", File.join(directory, "mia.jwt")], isolated, api)
+    expect.call(code == EXIT_OK && api.requests.length == 1, "a settled group must not be overridden on the next issue")
+
+    # remove drops a pending record with its mapping
+    noor = "77777777-7777-7777-7777-777777777777"
+    self_test_tool(["provision", "user:noor", File.join(directory, "noor.jwt")], isolated, StandInApi.new(provisioned.call(noor), [500, {}]))
+    code, = self_test_tool(["remove", "user:noor"], isolated, StandInApi.new([200, {}]))
+    expect.call(code == EXIT_OK && pending.call.empty?, "remove must drop a pending record")
+
+    # a pending_acl that is not a list of distinct mapped keys is refused untouched
+    pending_map = File.join(directory, "pending.json")
+    [
+      {"version" => 1, "clients" => {}, "pending_acl" => ["user:x"]},
+      {"version" => 1, "clients" => {"user:x" => SELF_TEST_CLIENT}, "pending_acl" => ["user:x", "user:x"]},
+      {"version" => 1, "clients" => {"user:x" => SELF_TEST_CLIENT}, "pending_acl" => "user:x"},
+      {"version" => 1, "clients" => {"user:x" => SELF_TEST_CLIENT}, "pending_acl" => [1]},
+    ].each do |value|
+      text = JSON.generate(value)
+      write_private_file(pending_map, text)
+      api = StandInApi.new
+      code, = self_test_tool(["provision", "user:x", jwt_path], env.merge("URNETWORK_CLIENT_MAP" => pending_map), api)
+      expect.call(code == EXIT_CONFIG && File.read(pending_map) == text && api.requests.empty?, "the map #{value} must be refused untouched")
+    end
+  end
+
+  # The unmapped-key and 404 texts.
+  def self_test_failure_texts(directory, env, expect)
+    texts = env.merge("URNETWORK_CLIENT_MAP" => File.join(directory, "texts.json"))
+    [["cap", "user:nobody", "--monthly", "1"], ["usage", "user:nobody"], ["remove", "user:nobody"], ["acl", "user:nobody", ACL_GROUP_DEFAULT]].each do |args|
+      api = StandInApi.new
+      code, _, err = self_test_tool(args, texts, api)
+      expect.call(code == EXIT_CONFIG && err.strip == UNMAPPED_MESSAGE && api.requests.empty?, "#{args.first} for an unmapped key must exit 78 with the unmapped line: #{err}")
+    end
+    olga = {"client_id" => SELF_TEST_CLIENT, "by_client_jwt" => self_test_jwt(SELF_TEST_CLIENT)}
+    self_test_tool(["provision", "user:olga", File.join(directory, "olga.jwt")], texts, StandInApi.new([200, olga]))
+    [[["cap", "user:olga", "--monthly", "1"], CAP_ROUTE], [["usage", "user:olga"], CAP_ROUTE], [["usage-all"], CAPS_ROUTE]].each do |args, route|
+      code, _, err = self_test_tool(args, texts, StandInApi.new([404, {}]))
+      expect.call(code == EXIT_FAILURE && err.strip == "#{route} answered 404: the server predates the data-cap routes", "#{args.first} on a server without the cap routes: #{err}")
     end
   end
 end

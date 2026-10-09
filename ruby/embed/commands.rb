@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
-# The embed example's commands and exit codes: run (the default), --self-test
-# and --version. Loading this file starts nothing, so the self-test and the
+# The embed example's commands and exit codes: run (the default), --self-test,
+# --licenses (the SDK's licenses and data attributions, as JSON, to publish
+# with the app) and --version. Loading this file starts nothing, so the
+# self-test and the
 # tests can call Embed.run; main.rb runs it for the command line. The
 # self-test needs only Ruby; the other commands load the urnetwork gem
 # through Bundler.
@@ -18,6 +20,7 @@
 # Exit codes, for supervisors: 0 stopped on request, 78 configuration or
 # credential problem (restarting does not help), 1 any other failure.
 
+require "rbconfig"
 require_relative "client_token"
 require_relative "state"
 require_relative "status"
@@ -29,7 +32,7 @@ module Embed
   # sysexits EX_CONFIG
   EXIT_CONFIG = 78
 
-  USAGE = "usage: main.rb [run] | --self-test | --version"
+  USAGE = "usage: main.rb [run] | --self-test | --licenses | --version"
 
   TOKEN_SERVER_URL_SETTING = "URNETWORK_TOKEN_SERVER_URL"
   DEMO_SESSION_SETTING = "URNETWORK_DEMO_SESSION"
@@ -47,12 +50,28 @@ module Embed
 
       puts sdk.version
       EXIT_STOPPED
+    when ["--licenses"]
+      sdk = load_sdk
+      return EXIT_FAILURE if sdk.nil?
+
+      print_licenses(sdk)
     when [], ["run"]
       run_embed(transport)
     else
       warn USAGE
       EXIT_CONFIG
     end
+  end
+
+  # Prints the SDK's licenses for this kind of app and returns the exit code.
+  def self.print_licenses(sdk, host_os = RbConfig::CONFIG["host_os"])
+    licenses = sdk.take_string(sdk::Raw.urnet_get_licenses(Embed.license_app(host_os)))
+    if licenses.nil?
+      warn "the sdk returned no licenses"
+      return EXIT_FAILURE
+    end
+    puts licenses
+    EXIT_STOPPED
   end
 
   # Runs the self-test and returns the exit code.
@@ -119,7 +138,7 @@ module Embed
       return EXIT_FAILURE
     end
     begin
-      puts "embed client #{client_id}, installation #{instance_id}"
+      puts Embed.start_line(client_id, instance_id)
       session.run
       EXIT_STOPPED
     rescue ConfigError => error

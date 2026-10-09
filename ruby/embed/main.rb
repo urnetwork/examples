@@ -7,8 +7,8 @@
 # and this client's own data caps. The device carries only the app's own
 # traffic: continue with the Sockets and Messages examples.
 #
-# Usage: ruby main.rb [run] | --self-test | --version. The settings, commands
-# and exit codes are in commands.rb.
+# Usage: ruby main.rb [run] | --self-test | --licenses | --version. The
+# settings, commands and exit codes are in commands.rb.
 
 require_relative "commands"
 

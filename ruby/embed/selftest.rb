@@ -47,6 +47,7 @@ module Embed
       check_token_fetch
       check_state_files
       check_config_errors
+      check_start_line
     ].freeze
 
     # A stand-in for the token server and the API: a transport callable that
@@ -148,25 +149,28 @@ module Embed
       {"client_id" => client_id, "by_client_jwt" => client_jwt, "data_cap" => data_cap}
     end
 
-    # Data amounts use decimal units, one decimal, ties to even.
+    # Data amounts use decimal units, one decimal, ties to even on the exact
+    # integer.
     def check_byte_vectors
       [
         [0, "0 B"],
         [999, "999 B"],
         [1000, "1.0 kB"],
         [999_949, "999.9 kB"],
-        # exact halves round to even, as Go's %.1f does
+        # exact halves round to even on the integer; rounding the binary value
+        # of 1.05, just above 1.05, would give 1.1
+        [1050, "1.0 kB"],
+        [1150, "1.2 kB"],
         [1250, "1.2 kB"],
         [1750, "1.8 kB"],
-        # 1.05 is just above 1.05 in binary, so Go's %.1f rounds it up; Ruby's
-        # format("%.1f") gets 1.0, which is why the rounding is exact here
-        [1050, "1.1 kB"],
-        # rounds to 1000.0 kB, so it moves to the next unit
+        # 999.95 kB ties to the even 1000.0 kB and moves to the next unit, as does 999.999 kB
+        [999_950, "1.0 MB"],
         [999_999, "1.0 MB"],
         [1_234_567_890, "1.2 GB"],
         [5_000_000_000, "5.0 GB"],
         [10_000_000_000, "10.0 GB"],
         [3_000_000_000_000, "3.0 TB"],
+        [9_223_372_036_854_775_807, "9.2 EB"],
       ].each do |byte_count, text|
         actual = Embed.format_byte_count(byte_count)
         expect(actual == text, "#{byte_count} bytes format as #{actual.inspect}, want #{text.inspect}")
@@ -515,6 +519,29 @@ module Embed
       end
       expect(run_quietly.call(["bogus"]) == EXIT_CONFIG, "an unknown command must exit 78")
       expect(run_quietly.call(%w[run extra]) == EXIT_CONFIG, "extra arguments must exit 78")
+    end
+
+    # The start line, the kind of app whose licenses --licenses prints, and
+    # --licenses against a stand-in for the urnetwork module.
+    def check_start_line
+      expect(Embed.start_line(TEST_CLIENT_ID, TEST_INSTANCE_ID) == "embed client #{TEST_CLIENT_ID}, installation #{TEST_INSTANCE_ID}",
+             "the start line must be the contract's")
+      expect(%w[darwin25 mingw32 x64-mswin64 linux-gnu freebsd14].map { |host_os| Embed.license_app(host_os) } == %w[apple windows windows linux linux],
+             "--licenses must ask for the platform's kind of app")
+      expect(USAGE.include?("--licenses"), "the usage must name --licenses")
+
+      licenses = nil
+      raw = Module.new
+      raw.define_singleton_method(:urnet_get_licenses) { |app| licenses&.call(app) }
+      sdk = Module.new
+      sdk.const_set(:Raw, raw)
+      sdk.define_singleton_method(:take_string) { |text| text }
+      licenses = ->(app) { JSON.generate([{"app" => app}]) }
+      code, output = captured { Embed.print_licenses(sdk, "darwin25") }
+      expect(code == EXIT_STOPPED && JSON.parse(output) == [{"app" => "apple"}], "--licenses must print the sdk's JSON for this kind of app")
+      licenses = ->(_app) {}
+      code, output = captured { Embed.print_licenses(sdk, "linux-gnu") }
+      expect(code == EXIT_FAILURE && output.strip == "the sdk returned no licenses", "no licenses must exit 1")
     end
   end
 end
