@@ -2,24 +2,26 @@
 // tools"): the integration allocator (../../integration/server) extended with
 // what a backend needs to embed URnetwork. It provisions one client per user
 // installation, sets and reads that client's data caps, reads every capped
-// client of the network, and removes a client. Your service authenticates its
-// user first and supplies the key internally: never take a key, a client ID or
-// a cap from a raw request field.
+// client of the network, removes a client, and sets a client's ACL group.
+// Your service authenticates its user first and supplies the key internally:
+// never take a key, a client ID or a cap from a raw request field.
 //
 //   provision <key> <client-jwt-file>
 //   cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total]
 //   usage <key>
 //   usage-all
 //   remove <key>
+//   acl <key> default|isolated
 //   --self-test
 //
 // <key> is user:<service-user-id> or user:<service-user-id>:<installation-id>.
 // Settings: URNETWORK_ROOT_JWT (an API key or a network JWT, from the
 // backend's secret store), URNETWORK_CLIENT_MAP (absolute path of this tool's
 // private map, in an existing service-owned directory; never the token
-// server's map) and optional URNETWORK_API_URL. The map lock is a <map>.lock
-// directory; a crash may leave it, so remove it only after confirming that no
-// tool still runs.
+// server's map), optional URNETWORK_API_URL and optional
+// URNETWORK_DEFAULT_ACL_GROUP (the ACL group of each new client: "isolated",
+// the default, or "default"). The map lock is a <map>.lock directory; a crash
+// may leave it, so remove it only after confirming that no tool still runs.
 //
 // Exit codes: 0 success; 78 a configuration or credential problem (missing
 // settings, an invalid key or map, the root credential refused, the client
@@ -27,6 +29,7 @@
 import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.node.ArrayNode
 import com.fasterxml.jackson.databind.node.ObjectNode
 import java.io.IOException
 import java.io.PrintStream
@@ -66,8 +69,11 @@ const val authClientPath = "/network/auth-client"
 const val capPath = "/network/client-data-cap"
 const val capsPath = "/network/client-data-caps"
 const val removePath = "/network/remove-client"
+const val aclPath = "/network/client-acl-group"
+const val unmappedMessage = "no client is mapped for that key; run provision first"
+const val aclUnsupportedMessage = "/network/client-acl-group answered 404: the server predates ACL groups"
 const val usage =
-    "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | --self-test"
+    "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test"
 
 val keys = Regex("user:[A-Za-z0-9][A-Za-z0-9_.:@-]{0,122}")
 val ids = Regex("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
@@ -99,8 +105,11 @@ class CapOptions {
     var resetTotal = false
 }
 
-/** The settings of one run: the transport and, for the commands that use it, the map file. */
-private class Settings(val transport: Transport, val mapFile: Path?)
+/**
+ * The settings of one run: the transport, for the commands that use it the map file, and the ACL
+ * group of each new client ("isolated" or "default").
+ */
+private class Settings(val transport: Transport, val mapFile: Path?, val aclGroup: String)
 
 /** The mapped client no longer exists. */
 private class ClientMissingException : Exception()
@@ -150,6 +159,10 @@ fun runCommand(
                 if (args.size != 2) throw config(usage)
                 remove(checkKey(args[1]), settings(env, transport, map = true), out)
             }
+            "acl" -> {
+                if (args.size != 3 || args[2] !in setOf("default", "isolated")) throw config(usage)
+                acl(checkKey(args[1]), args[2], settings(env, transport, map = true), out)
+            }
             else -> throw config(usage)
         }
         return exitOk
@@ -187,6 +200,7 @@ private fun provision(key: String, jwtFile: Path, settings: Settings, out: Print
                 result = authClientResult(call(settings, "POST", authClientPath, authClientBody(mapped)), mapped)
             } catch (e: ClientMissingException) {
                 clients.remove(key)
+                setAclPending(map, key, false)
                 saveMap(mapFile, map)
             }
         }
@@ -200,6 +214,19 @@ private fun provision(key: String, jwtFile: Path, settings: Settings, out: Print
                 throw ToolException(exitFailure, "the API answered a client that the map assigns to another key")
             }
             clients.put(key, result.first)
+            // the mapping and the record that the client owes its group, in one save
+            if (settings.aclGroup == "isolated") {
+                setAclPending(map, key, true)
+            }
+            saveMap(mapFile, map)
+        }
+        if (aclPending(map, key)) {
+            // a new client is "default": only an isolated default needs the request. A failure
+            // throws with the record kept, before any client JWT is written.
+            if (settings.aclGroup == "isolated") {
+                postAclGroup(settings, result.first, "isolated")
+            }
+            setAclPending(map, key, false)
             saveMap(mapFile, map)
         }
         writePrivate(jwtFile, "${result.second}\n".toByteArray(Charsets.UTF_8))
@@ -276,11 +303,59 @@ private fun remove(key: String, settings: Settings, out: PrintStream) {
             }
         }
         (map["clients"] as ObjectNode).remove(key)
+        setAclPending(map, key, false)
         saveMap(mapFile, map)
         out.println(json.writeValueAsString(json.createObjectNode().put("removed", clientId)))
     } finally {
         Files.deleteIfExists(lock)
     }
+}
+
+/**
+ * Sets the ACL group of the key's client and prints {"client_id": ..., "acl_group": ...}. An
+ * explicit group settles a pending default group, so the record is dropped.
+ */
+private fun acl(key: String, group: String, settings: Settings, out: PrintStream) {
+    val mapFile = settings.mapFile!!
+    val lock = takeLock(mapFile)
+    try {
+        val map = loadMap(mapFile)
+        val clientId = mappedClient(map, key)
+        postAclGroup(settings, clientId, group)
+        if (aclPending(map, key)) {
+            setAclPending(map, key, false)
+            saveMap(mapFile, map)
+        }
+        out.println(json.writeValueAsString(json.createObjectNode().put("client_id", clientId).put("acl_group", group)))
+    } finally {
+        Files.deleteIfExists(lock)
+    }
+}
+
+/** Posts the client's ACL group; the answer must name the client and the group. */
+private fun postAclGroup(settings: Settings, clientId: String, group: String) {
+    val answer = call(settings, "POST", aclPath, json.createObjectNode().put("client_id", clientId).put("acl_group", group))
+    checkRefusal(answer)
+    if (answer.path("client_id").textValue() != clientId || answer.path("acl_group").textValue() != group) {
+        throw ToolException(exitFailure, "the URnetwork API answered another client or ACL group")
+    }
+}
+
+/** Whether key owes its default ACL group: the map's pending_acl. */
+fun aclPending(map: ObjectNode, key: String): Boolean = map.path("pending_acl").any { it.textValue() == key }
+
+/** Records that key owes its default ACL group, or drops the record. */
+fun setAclPending(map: ObjectNode, key: String, pending: Boolean) {
+    val keys = json.createArrayNode()
+    for (entry in map.path("pending_acl")) {
+        if (entry.textValue() != key) {
+            keys.add(entry)
+        }
+    }
+    if (pending) {
+        keys.add(key)
+    }
+    map.set<ArrayNode>("pending_acl", keys)
 }
 
 /** The auth-client request: a new client without client_id, or a reissue of the mapped one. Never source_client_id. */
@@ -401,7 +476,7 @@ private fun checkRefusal(answer: ObjectNode) {
 
 /** The client mapped to key; an unmapped key is a configuration error. */
 private fun mappedClient(map: ObjectNode, key: String): String =
-    map["clients"].path(key).textValue() ?: throw config("no client is mapped for this key; provision it first")
+    map["clients"].path(key).textValue() ?: throw config(unmappedMessage)
 
 /** A valid key: user:<service-user-id>, optionally with :<installation-id>. */
 private fun checkKey(key: String): String =
@@ -438,7 +513,11 @@ private fun settings(env: (String) -> String?, transport: (URI, String) -> Trans
             throw config("set URNETWORK_CLIENT_MAP to an absolute file path in an existing private, service-owned directory")
         }
     }
-    return Settings(transport(origin, root), mapFile)
+    val aclGroup = env("URNETWORK_DEFAULT_ACL_GROUP") ?: ""
+    if (aclGroup !in setOf("", "isolated", "default")) {
+        throw config("URNETWORK_DEFAULT_ACL_GROUP must be default or isolated")
+    }
+    return Settings(transport(origin, root), mapFile, aclGroup.ifEmpty { "isolated" })
 }
 
 /** The API origin: HTTPS, or explicit loopback HTTP for local mocks. */
@@ -473,7 +552,18 @@ private fun call(settings: Settings, method: String, pathAndQuery: String, body:
     }
     when {
         response.status == 401 || response.status == 403 -> throw ToolException(exitConfig, "the URnetwork API refused the root credential")
-        response.status == 404 -> throw ToolException(exitFailure, "the URnetwork API answered HTTP 404; a server without this route answers 404")
+        // a server that predates a route (EMBED_CONTRACT.md, "Backend tools")
+        response.status == 404 -> {
+            val route = pathAndQuery.substringBefore('?')
+            throw ToolException(
+                exitFailure,
+                when {
+                    route == aclPath -> aclUnsupportedMessage
+                    route.startsWith(capPath) -> "$route answered 404: the server predates the data-cap routes"
+                    else -> "$route answered 404"
+                },
+            )
+        }
         response.status !in 200..299 -> throw ToolException(exitFailure, "the URnetwork API answered HTTP ${response.status}")
     }
     val node = try {
@@ -506,9 +596,10 @@ private fun httpTransport(origin: URI, root: String): Transport {
 }
 
 /**
- * The map in file; an empty map when the file does not exist. A map with fields this tool does not
- * write, such as the token server's pending_caps, is refused, so that two tools never rewrite each
- * other's map.
+ * The map in file; an empty map when the file does not exist. Besides version and clients it may
+ * hold pending_acl, the keys whose new clients still owe their default ACL group. A map with fields
+ * this tool does not write, such as the token server's pending_caps, is refused, so that two tools
+ * never rewrite each other's map.
  */
 fun loadMap(file: Path): ObjectNode {
     if (Files.isSymbolicLink(file)) {
@@ -532,7 +623,7 @@ fun loadMap(file: Path): ObjectNode {
     }
     val map = parsed as? ObjectNode ?: throw config("the client map is not a JSON object")
     for ((name, _) in map.properties()) {
-        if (name != "version" && name != "clients") {
+        if (name != "version" && name != "clients" && name != "pending_acl") {
             throw config("the client map has fields this tool does not write, such as the token server's pending_caps; give each tool its own map")
         }
     }
@@ -546,13 +637,29 @@ fun loadMap(file: Path): ObjectNode {
             throw config("the client map has an invalid entry")
         }
     }
+    if (map.has("pending_acl")) {
+        val pending = HashSet<String>()
+        val entries = map["pending_acl"]
+        if (!entries.isArray) {
+            throw config("the client map's pending_acl is not a list of mapped keys")
+        }
+        for (entry in entries) {
+            val key = entry.textValue()
+            if (key == null || !map["clients"].has(key) || !pending.add(key)) {
+                throw config("the client map's pending_acl is not a list of mapped keys")
+            }
+        }
+    }
     return map
 }
 
-/** Replaces the map atomically, private to its owner. */
+/** Replaces the map atomically, private to its owner; pending_acl only while it is not empty. */
 fun saveMap(file: Path, map: ObjectNode) {
     val ordered = json.createObjectNode().put("version", 1)
     ordered.set<JsonNode>("clients", map["clients"])
+    if (!map.path("pending_acl").isEmpty) {
+        ordered.set<JsonNode>("pending_acl", map["pending_acl"])
+    }
     writePrivate(file, json.writeValueAsBytes(ordered))
 }
 

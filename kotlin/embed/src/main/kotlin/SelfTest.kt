@@ -42,6 +42,7 @@ fun runSelfTest() {
     checkStateFiles()
     checkSettings()
     checkUsageExitCode()
+    checkStartLine()
 }
 
 /** Fails with reason unless condition holds. */
@@ -68,14 +69,14 @@ private inline fun <reified T : Exception> expectThrows(reason: String, block: (
 private fun readings(vararg readings: DataCap?): CapReadings =
     CapReadings().also { capReadings -> readings.forEach(capReadings::record) }
 
-/** Decimal units, one decimal, ties to even, the next unit at 1000.0. */
+/** Decimal units, one decimal, ties to even on the exact integer, the next unit at 1000.0. */
 private fun checkFormatByteCount() {
     val cases = listOf(
         0L to "0 B", 999L to "999 B", 1000L to "1.0 kB", 999949L to "999.9 kB",
-        // exact halves round to even, as Go's %.1f does
-        1250L to "1.2 kB", 1750L to "1.8 kB",
-        // 999.999 kB rounds to 1000.0 kB and moves to the next unit
-        999999L to "1.0 MB",
+        // exact halves round to even on the integer: 1.05 is not a binary fraction
+        1050L to "1.0 kB", 1150L to "1.2 kB", 1250L to "1.2 kB", 1750L to "1.8 kB",
+        // 999.95 kB ties to the even 1000.0 kB and moves to the next unit, as does 999.999 kB
+        999950L to "1.0 MB", 999999L to "1.0 MB",
         1234567890L to "1.2 GB", 5000000000L to "5.0 GB", 10000000000L to "10.0 GB",
         3000000000000L to "3.0 TB", Long.MAX_VALUE to "9.2 EB",
     )
@@ -356,6 +357,10 @@ private fun checkTokenFetch() {
             Answer(500, """{"error":{"code":"upstream","message":"upstream failed"}}""", 1, "stopped", "HTTP 500"),
             Answer(503, """{"error":{"code":"busy","message":"retry"}}""", 1, "stopped", "HTTP 503"),
             Answer(400, """{"error":{"code":"invalid_request","message":"bad"}}""", 1, "stopped", "HTTP 400"),
+            Answer(404, "404 page not found", 1, "stopped", "HTTP 404"),
+            Answer(405, """{"error":{"code":"method_not_allowed","message":"use POST"}}""", 1, "stopped", "HTTP 405"),
+            Answer(500, """{"error":{"code":"internal","message":"internal error"}}""", 1, "stopped", "HTTP 500"),
+            Answer(502, """{"error":{"code":"upstream","message":"upstream failed"}}""", 1, "stopped", "HTTP 502"),
             Answer(200, "not json", 1, "stopped", "invalid"),
             Answer(200, """{"client_id":"$testClientId","by_client_jwt":"${jwt("network_id" to testClientId)}"}""", 1, "stopped", "client_id"),
         )
@@ -467,6 +472,18 @@ private fun checkSettings() {
     } finally {
         deleteTree(stateDir)
     }
+}
+
+/** The start line and the kind of app whose licenses --licenses prints. */
+private fun checkStartLine() {
+    expect(startLine(testClientId, testInstanceId) == "embed client $testClientId, installation $testInstanceId") {
+        "the start line is not the contract's"
+    }
+    expect(
+        licenseApp("Windows 11") == "windows" && licenseApp("Mac OS X") == "apple" && licenseApp("Linux") == "linux" &&
+            licenseApp("FreeBSD") == "linux" && licenseApp(null) == "linux",
+    ) { "--licenses asks for the wrong kind of app" }
+    expect(usage.contains("--licenses")) { "the usage does not name --licenses" }
 }
 
 /** An unknown command is a usage error, exit 78. */

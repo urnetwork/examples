@@ -5,8 +5,10 @@
 // and shows the connection and the installation's data caps (EmbedStatus.kt).
 // In-app traffic only: no VPN APIs, and the device does not provide.
 //
-// Usage: urnetwork-embed [run] | --self-test | --version. Installation state
-// is in the private directory named by URNETWORK_EMBED_STATE_DIR
+// Usage: urnetwork-embed [run] | --self-test | --licenses | --version.
+// --licenses prints the SDK's licenses and data attributions, as JSON, to
+// publish with the app. Installation state is in the private directory named
+// by URNETWORK_EMBED_STATE_DIR
 // (InstallationState.kt). With URNETWORK_TOKEN_SERVER_URL and
 // URNETWORK_DEMO_SESSION set, every start fetches the client JWT from the
 // token server; otherwise the app uses the client.jwt in the state directory.
@@ -28,7 +30,7 @@ const val exitFailure = 1
 // sysexits EX_CONFIG
 const val exitConfig = 78
 
-const val usage = "usage: urnetwork-embed [run] | --self-test | --version"
+const val usage = "usage: urnetwork-embed [run] | --self-test | --licenses | --version"
 
 // how long Ctrl-C or SIGTERM waits for the device to stop before the process
 // exits anyway
@@ -53,6 +55,23 @@ fun runCommand(args: List<String>, env: Map<String, String>, out: PrintStream, e
                 return exitFailure
             }
             out.println("embed self-test passed")
+            return exitStopped
+        }
+        args == listOf("--licenses") -> {
+            val licenses = try {
+                EmbedSession.sdkLicenses(licenseApp(System.getProperty("os.name")))
+            } catch (e: LinkageError) {
+                err.println("could not load the URnetwork SDK runtime: ${describeFailure(e)}")
+                return exitFailure
+            } catch (e: RuntimeException) {
+                err.println("could not load the URnetwork SDK runtime: ${describeFailure(e)}")
+                return exitFailure
+            }
+            if (licenses == null) {
+                err.println("the sdk returned no licenses")
+                return exitFailure
+            }
+            out.println(licenses)
             return exitStopped
         }
         args == listOf("--version") -> {
@@ -144,7 +163,7 @@ private fun startAndRun(env: Map<String, String>, session: EmbedSession, out: Pr
         err.println("could not start the embedded device: ${describeFailure(e)}")
         return exitFailure
     }
-    out.println("embed client ${credential.clientId}, installation ${settings.instanceId}")
+    out.println(startLine(credential.clientId, settings.instanceId))
     return try {
         session.run()
     } catch (e: RuntimeException) {
