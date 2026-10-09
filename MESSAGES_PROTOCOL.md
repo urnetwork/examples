@@ -2,6 +2,8 @@
 
 The language [messages examples](README.md) exchange text and application acknowledgements using URnetwork subprotocol **4096** (`0x1000`). Each SDK subprotocol message carries exactly one URMS frame. The subprotocol ID belongs to the SDK envelope; it is not repeated in the application frame.
 
+A protocol of your own runs beside URMS on another application subprotocol ID. [Subprotocols](SUBPROTOCOLS.md) covers the ID rules, registration on the Device, the peer query, stats and custom protobuf messages.
+
 Both endpoints need distinct scoped clients in the same network, separate persisted instance IDs, and Devices that expose subprotocol messaging. Follow the [integration contract](INTEGRATION_CONTRACT.md) before running a two-terminal demo. JavaScript and TypeScript use Node 24 and a [native companion](javascript/integration/companion/README.md): the application processes URMS while a full native `DeviceLocal` carries network traffic through extension RPC. Hosted proxy devices remain ineligible for peer messaging.
 
 ## Wire layout

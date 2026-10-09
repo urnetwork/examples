@@ -63,3 +63,62 @@ The [companion helper](../integration/companion.mjs) shares JavaScript's transpo
 Watch the subscription's `closed` Promise. A reconnect or bounded-queue failure requires a fresh subscription and another support query; the CLI reports the error and can be restarted. Cleanup closes the native registration, waits for receive processing, removes peer listeners and closes the Device/WASM runtime. Incoming and outgoing bytes are copied, with one complete frame per callback.
 
 The companion accepts one controller at a time and authenticates it with the local token. Both app-side processes use only `URNETWORK_CLIENT_JWT`; the [service backend](../integration/README.md#backend-allocator) alone retains `URNETWORK_ROOT_JWT`.
+
+## Custom protobuf messages
+
+Your own protocol runs on its own subprotocol ID beside URMS; [Subprotocols](../../SUBPROTOCOLS.md) covers choosing the ID, the peer query, versioning and acknowledgements. The SDK's typed API is the one this example uses: `device.enableSubprotocol(id, listener)` resolves to a `SubprotocolSubscription` with `send(clientId, bytes)`, `querySubprotocols(clientId, timeoutMillis)`, `close()` and `closed`, and `@urnetwork/sdk` exports the `SubprotocolMessage` and `SubprotocolSubscription` types. There are no stats, enabled list, received count or disable-all in JS/TS; close each subscription instead.
+
+This sketch carries [notes.proto](../../go/messages/subprotocol/notes.proto) on subprotocol 4097 with Protobuf-ES. Install `@bufbuild/protobuf` and `@bufbuild/protoc-gen-es` at the same version, then generate `gen/notes_pb.ts` with `mkdir -p gen && protoc --plugin=protoc-gen-es=node_modules/.bin/protoc-gen-es --es_out=gen --es_opt=target=ts -I ../../go/messages/subprotocol notes.proto`. The schema has no enums, so the generated file runs under Node's type stripping:
+
+```ts
+import {create, fromBinary, toBinary} from "@bufbuild/protobuf";
+import type {SubprotocolMessage, SubprotocolSubscription} from "@urnetwork/sdk";
+import {AckSchema, EnvelopeSchema, NoteSchema, type Envelope} from "./gen/notes_pb.ts";
+
+const NOTES = 4097;
+const MAX_MESSAGE_BYTES = 4608;
+
+function encodeEnvelope(envelope: Envelope): Uint8Array {
+  const bytes = toBinary(EnvelopeSchema, envelope);
+  if (bytes.length > MAX_MESSAGE_BYTES) throw new RangeError("Envelope exceeds 4608 bytes");
+  return bytes;
+}
+
+// The listener gets an owned copy of each message. An exception in it closes
+// the subscription, so it drops bad input instead of throwing.
+async function receiveEnvelope(subscription: SubprotocolSubscription, {sourceClientId, bytes}: SubprotocolMessage): Promise<void> {
+  if (bytes.length > MAX_MESSAGE_BYTES) return;
+  let envelope: Envelope;
+  try {
+    envelope = fromBinary(EnvelopeSchema, bytes);
+  } catch {
+    return; // malformed: drop and count, never acknowledge
+  }
+  switch (envelope.kind.case) {
+    case "note": {
+      const note = envelope.kind.value;
+      if (note.messageId !== 0n && new TextEncoder().encode(note.text).length <= 4096) {
+        const ack = create(EnvelopeSchema, {kind: {case: "ack", value: create(AckSchema, {messageId: note.messageId})}});
+        await subscription.send(sourceClientId, encodeEnvelope(ack));
+      }
+      break;
+    }
+    case "ack":
+      // match an outstanding note on (sourceClientId, envelope.kind.value.messageId)
+      break;
+    default: // undefined: no kind this version knows
+  }
+}
+
+async function sendNote(subscription: SubprotocolSubscription, peerClientId: string, messageId: bigint, text: string): Promise<void> {
+  const protocols = await subscription.querySubprotocols(peerClientId, 10000);
+  if (protocols === null || !protocols.includes(NOTES)) throw new Error("Peer support for 4097 is unknown or absent");
+  const note = create(EnvelopeSchema, {kind: {case: "note", value: create(NoteSchema, {messageId, text})}});
+  if (!await subscription.send(peerClientId, encodeEnvelope(note))) throw new Error("SDK did not enqueue note");
+}
+
+let subscription: SubprotocolSubscription;
+subscription = await device.enableSubprotocol(NOTES, (message: SubprotocolMessage) => receiveEnvelope(subscription, message));
+```
+
+`device` is the companion Device from the [integration helper](../integration/companion.mjs); install the mirrored peer/state listeners before its initial sync and open the subscription after it, as the shared [application.mjs](../../javascript/messages/application.mjs) does. Protobuf-ES represents `uint64` as `bigint`, which keeps the full 64-bit `message_id`.

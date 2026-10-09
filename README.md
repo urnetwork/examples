@@ -30,6 +30,8 @@ Every Embed example follows the [embed contract](EMBED_CONTRACT.md): one client 
 
 The [networking research matrix](NETWORK_EXAMPLES.md) maps official HTTP and raw networking examples to each socket adapter and explains where a loopback proxy is required. The [URMS v1 protocol](MESSAGES_PROTOCOL.md) defines exact wire bytes, discovery, callback ownership and ACK semantics.
 
+[Subprotocols](SUBPROTOCOLS.md) shows how an application registers its own subprotocol ID on the Device, queries a peer for it and sends custom protobuf messages on it. Each Messages guide ends with its language's protobuf snippet, and [go/messages/subprotocol](go/messages/subprotocol/) is the compiled and tested Go form.
+
 JavaScript and TypeScript messaging runs on Node 24 through a [native companion](javascript/integration/companion/README.md). The companion owns a provider-capable `DeviceLocal`; the JS/TS application owns the codec, live peer display, targeted sends and ACK handling through typed extension RPC. Build the current SDK from sibling checkouts for this new capability. Their socket examples continue to use hosted `DeviceRemote`; hosted proxy devices remain excluded from visible peers and reject subprotocol messaging.
 
 Some package coordinates are awaiting their first publication. Each installation guide explains the package target and local build path. Use a matching SDK release with the required socket, peer, subprotocol and provider APIs; installation of an older release does not add them. Live checks require provisioned clients and a working URnetwork connection; codec self-tests need no credentials.
