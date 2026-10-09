@@ -7,7 +7,7 @@
 // the Electron parts; the unit tests pass fakes. It runs on the main process's
 // event loop, so its state needs no lock.
 
-import {defaultApiUrl, readDataCap} from "./caps.mjs";
+import {EmbedNotEnabledError, defaultApiUrl, readDataCap} from "./caps.mjs";
 import {
   companionEnvironment,
   companionExitAction,
@@ -379,7 +379,8 @@ export class EmbedController {
 
   // Reads this client's caps with the client JWT that the companion keeps
   // refreshed in client.jwt. A failure keeps the last good reading; only a
-  // first failure shows "unavailable".
+  // first failure shows "unavailable". The Embed-not-enabled refusal clears
+  // the last reading.
   syncCaps(run) {
     if (this.run !== run) {
       return Promise.resolve();
@@ -388,8 +389,12 @@ export class EmbedController {
       try {
         const {clientJwt} = loadClientJwt(this.stateDir);
         this.capReadings.succeeded(await this.readCaps({apiUrl: this.apiUrl, clientJwt}));
-      } catch {
-        this.capReadings.failed();
+      } catch (error) {
+        if (error instanceof EmbedNotEnabledError) {
+          this.capReadings.notEnabled();
+        } else {
+          this.capReadings.failed();
+        }
       } finally {
         this.capSync = null;
       }

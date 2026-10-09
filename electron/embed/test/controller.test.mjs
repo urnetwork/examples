@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {EmbedNotEnabledError} from "../caps.mjs";
 import {EmbedController, capSyncIntervalMillis, statusPollIntervalMillis} from "../controller.mjs";
 import {clientJwtFileName, loadTokenServerConfig, tokenServerFileName, writePrivateFile} from "../state.mjs";
 import {parseCapObject} from "../status.mjs";
@@ -237,6 +238,13 @@ test("Start fetches the client JWT, starts the companion in embed mode and shows
   assert.equal(fixture.capReads.length, 2);
   // a later failure keeps the last reading
   assert.equal(controller.payload().fields.dataThisMonth, "0 B of 0 B");
+  // the Embed-not-enabled refusal clears it
+  fixture.capAnswer = new EmbedNotEnabledError("Embed isn't enabled for this network.");
+  await timers.fire(capSyncIntervalMillis);
+  await settle();
+  assert.equal(fixture.capReads.length, 3);
+  assert.deepEqual([controller.payload().fields.status, controller.payload().fields.dataThisMonth, controller.payload().fields.dataTotal],
+    ["connected", "unavailable", "unavailable"]);
 
   // Stop closes the device
   const stopping = controller.stop();

@@ -4,7 +4,7 @@
 
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {CapReadings, clientLimitText, dataFields, formatDataAmount, parseCapObject, resetText, statusText} from "../status.mjs";
+import {CapReadings, clientLimitText, dataFields, formatDataAmount, isEmbedNotEnabled, parseCapObject, resetText, statusText} from "../status.mjs";
 
 // A cap object over no caps and no usage.
 const cap = fields => parseCapObject({monthly_period_end: "2026-11-01T00:00:00Z", capped: false, capped_reason: "", ...fields});
@@ -55,4 +55,19 @@ test("the data fields: checking, unavailable, the last value kept, no cap, used 
   readings.succeeded(cap({monthly_byte_limit: 5000000000, monthly_used_byte_count: 1234567890, total_used_byte_count: 7}));
   readings.failed();
   assert.deepEqual(dataFields(readings), {dataThisMonth: "1.2 GB of 5.0 GB", dataTotal: "no cap"});
+});
+
+test("the Embed-not-enabled refusal clears the last reading, and no other answer is the refusal", () => {
+  const readings = new CapReadings();
+  readings.succeeded(cap({monthly_byte_limit: 5000000000, monthly_used_byte_count: 5000000000, capped: true, capped_reason: "monthly"}));
+  readings.notEnabled();
+  assert.equal(readings.cap, null);
+  assert.deepEqual(dataFields(readings), {dataThisMonth: "unavailable", dataTotal: "unavailable"});
+  assert.equal(statusText({started: true, signedOut: false, cap: readings.cap, providerStateAdded: 3}), "connected");
+  const refusal = {error: {message: "Embed isn't enabled for this network."}};
+  assert.ok(isEmbedNotEnabled(refusal));
+  assert.throws(() => parseCapObject(refusal));
+  for (const body of [null, {}, {error: null}, {error: {message: "no"}}, {error: "Embed isn't enabled for this network."}]) {
+    assert.ok(!isEmbedNotEnabled(body), JSON.stringify(body));
+  }
 });
