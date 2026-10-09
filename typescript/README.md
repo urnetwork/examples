@@ -30,6 +30,7 @@ The new messaging RPC capability requires the current SDK source in the [sibling
 - [Sockets](socket/README.md): TCP/UDP, TLS/DTLS and HTTP client adapters.
 - [Messages](messages/README.md): live peers, targeted URMS text/ACK messages and offline codec tests through a native companion.
 - [Provider](provider/README.md): a provider client of your network through the native companion, with the consent disclaimer, status, payout wallet display and background run.
+- [Embed](embed/README.md): URnetwork inside your own app, for its own traffic: your backend provisions one client per installation, puts it in its ACL group and sets its data caps; the app runs a local Device and shows its status.
 
 Apps use `URNETWORK_CLIENT_JWT` and a persisted `URNETWORK_INSTANCE_ID`; only the service backend holds `URNETWORK_ROOT_JWT`. See the [shared contract](../INTEGRATION_CONTRACT.md) and [official networking research](../NETWORK_EXAMPLES.md).
 

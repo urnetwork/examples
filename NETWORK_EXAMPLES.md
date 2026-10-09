@@ -25,4 +25,6 @@ A UR connection handle is not a kernel descriptor. Do not pass it to `select`, `
 
 The SDK's browser-shaped Direct Sockets surface is an implementation profile over a UR Device. It is distinct from Chrome's [native Direct Sockets implementation for Isolated Web Apps](https://developer.chrome.com/docs/iwa/direct-sockets). Peer [URMS messaging](MESSAGES_PROTOCOL.md) uses the Device subprotocol API. The JS/TS message programs use Node 24 and a full native `DeviceLocal` reached through extension RPC, with one copied frame per message. The current WASM platform transport cannot run a connected provider by itself, so the [companion guide](javascript/integration/companion/README.md) specifies the native boundary and current SDK build. Hosted proxy isolation remains unchanged.
 
+The [embed examples](EMBED_CONTRACT.md) run the same local Device for an installation's own traffic, so every adapter here applies to an embed Device unchanged; the JavaScript and TypeScript embed apps run their Device in the [native companion](javascript/integration/companion/README.md#embed-mode).
+
 These links establish available extension points as of the checked date; they do not claim that every upstream version or optional feature was run here. Local build manifests retain the versions and the individual guides state verification and runtime requirements.

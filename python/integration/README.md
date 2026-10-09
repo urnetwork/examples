@@ -1,6 +1,6 @@
 # Python service integration
 
-[Installation](../README.md) · [Integration](README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md)
+[Installation](../README.md) · [Integration](README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Embed](../embed/README.md)
 
 The app receives a scoped client JWT from its authenticated service backend. Only the backend holds `URNETWORK_ROOT_JWT` and provisions clients through `POST /network/auth-client`. The [shared integration contract](../../INTEGRATION_CONTRACT.md) defines new-client allocation, authorized reissue and the credential boundary.
 
@@ -16,7 +16,7 @@ python3 -m pip install -r requirements.txt
 python3 main.py --version
 ```
 
-The version check needs no client credentials. In that same messages directory, configure the app and print its assigned client identity:
+The version check needs no client credentials. A native library older than the urnetwork package exits 78 with an `SDK version mismatch` line naming the missing function, instead of a traceback; [sdk_load.py](sdk_load.py) does that for the socket and messages programs, and `python3 -m unittest test_sdk_load` in this directory tests it. In that same messages directory, configure the app and print its assigned client identity:
 
 ```sh
 export URNETWORK_CLIENT_JWT='scoped-client-jwt-from-your-service'

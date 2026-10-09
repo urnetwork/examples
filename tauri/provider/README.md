@@ -1,6 +1,6 @@
 # Tauri provider
 
-[Rust installation](../../rust/README.md) · [Rust provider](../../rust/provider/README.md) · [Provider](README.md)
+[Rust installation](../../rust/README.md) · [Rust provider](../../rust/provider/README.md) · [Provider](README.md) · [Embed](../embed/README.md)
 
 This desktop app runs a URnetwork provider on Windows, macOS and Linux inside a Tauri 2 app: the provider runs in the app's Rust core, in process, through the SDK's C ABI with the `urnetwork-sdk` crate, with no sidecar. It provides publicly as a provider client of your network and shows the providing status, clients served, data provided and the payout wallet, read only. The window shows the consent disclaimer next to the start control; closing it keeps providing in the system tray, and start at login uses the official autostart plugin. The provider core (status rules, state files and the provider session) is the library of the [Rust provider](../../rust/provider/README.md), so the console app and this app share one tested core. Both follow the [provider contract](../../PROVIDER_CONTRACT.md#tauri).
 

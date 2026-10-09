@@ -1,30 +1,32 @@
 # URnetwork language examples
 
-Start with **Integration** to provision a scoped client identity and create a Device. **Sockets** routes TCP, UDP and HTTP clients through that Device. **Messages** discovers live peers and exchanges the same text/ACK protocol across languages. **Provider** runs a URnetwork provider inside your app as a provider client of your network, with its payouts going to your fixed payout wallet.
+Start with **Integration** to provision a scoped client identity and create a Device. **Sockets** routes TCP, UDP and HTTP clients through that Device. **Messages** discovers live peers and exchanges the same text/ACK protocol across languages. **Provider** runs a URnetwork provider inside your app as a provider client of your network, with its payouts going to your fixed payout wallet. **Embed** puts a URnetwork Device inside your own app for its own traffic: your backend provisions one client per installation, and the app shows its status and data caps.
 
-| Language and installation | Integration | Sockets | Messages | Provider |
-| --- | --- | --- | --- | --- |
-| [C](c/README.md) | [Integration](c/integration/README.md) | [Sockets](c/socket/README.md) | [Messages](c/messages/README.md) | [Provider](c/provider/README.md) |
-| [C++](cpp/README.md) | [Integration](cpp/integration/README.md) | [Sockets](cpp/socket/README.md) | [Messages](cpp/messages/README.md) | [Provider](cpp/provider/README.md) |
-| [C#](csharp/README.md) | [Integration](csharp/integration/README.md) | [Sockets](csharp/socket/README.md) | [Messages](csharp/messages/README.md) | [Provider](csharp/provider/README.md) |
-| [Go](go/README.md) | [Integration](go/integration/README.md) | [Sockets](go/socket/README.md) | [Messages](go/messages/README.md) | [Provider](go/provider/README.md) |
-| [Java](java/README.md) | [Integration](java/integration/README.md) | [Sockets](java/socket/README.md) | [Messages](java/messages/README.md) | [Provider](java/provider/README.md) |
-| [JavaScript](javascript/README.md) | [Integration](javascript/integration/README.md) | [Sockets](javascript/socket/README.md) | [Messages: native companion](javascript/messages/README.md) | [Provider: native companion](javascript/provider/README.md) |
-| [Kotlin](kotlin/README.md) | [Integration](kotlin/integration/README.md) | [Sockets](kotlin/socket/README.md) | [Messages](kotlin/messages/README.md) | [Provider](kotlin/provider/README.md) |
-| [Python](python/README.md) | [Integration](python/integration/README.md) | [Sockets](python/socket/README.md) | [Messages](python/messages/README.md) | [Provider](python/provider/README.md) |
-| [Ruby](ruby/README.md) | [Integration](ruby/integration/README.md) | [Sockets](ruby/socket/README.md) | [Messages](ruby/messages/README.md) | [Provider](ruby/provider/README.md) |
-| [Rust](rust/README.md) | [Integration](rust/integration/README.md) | [Sockets](rust/socket/README.md) | [Messages](rust/messages/README.md) | [Provider](rust/provider/README.md) |
-| [Swift](swift/README.md) | [Integration](swift/integration/README.md) | [Sockets](swift/socket/README.md) | [Messages](swift/messages/README.md) | [Provider](swift/provider/README.md) |
-| [TypeScript](typescript/README.md) | [Integration](typescript/integration/README.md) | [Sockets](typescript/socket/README.md) | [Messages: native companion](typescript/messages/README.md) | [Provider: native companion](typescript/provider/README.md) |
-| Electron | — | — | — | [Provider app](electron/provider/README.md) |
-| Tauri | — | — | — | [Provider app](tauri/provider/README.md) |
-| [Android](android/README.md) | — | — | — | [Provider app](android/provider/README.md) |
+| Language and installation | Integration | Sockets | Messages | Provider | Embed |
+| --- | --- | --- | --- | --- | --- |
+| [C](c/README.md) | [Integration](c/integration/README.md) | [Sockets](c/socket/README.md) | [Messages](c/messages/README.md) | [Provider](c/provider/README.md) | [Embed](c/embed/README.md) |
+| [C++](cpp/README.md) | [Integration](cpp/integration/README.md) | [Sockets](cpp/socket/README.md) | [Messages](cpp/messages/README.md) | [Provider](cpp/provider/README.md) | [Embed](cpp/embed/README.md) |
+| [C#](csharp/README.md) | [Integration](csharp/integration/README.md) | [Sockets](csharp/socket/README.md) | [Messages](csharp/messages/README.md) | [Provider](csharp/provider/README.md) | [Embed](csharp/embed/README.md) |
+| [Go](go/README.md) | [Integration](go/integration/README.md) | [Sockets](go/socket/README.md) | [Messages](go/messages/README.md) | [Provider](go/provider/README.md) | [Embed](go/embed/README.md) |
+| [Java](java/README.md) | [Integration](java/integration/README.md) | [Sockets](java/socket/README.md) | [Messages](java/messages/README.md) | [Provider](java/provider/README.md) | [Embed](java/embed/README.md) |
+| [JavaScript](javascript/README.md) | [Integration](javascript/integration/README.md) | [Sockets](javascript/socket/README.md) | [Messages: native companion](javascript/messages/README.md) | [Provider: native companion](javascript/provider/README.md) | [Embed](javascript/embed/README.md) |
+| [Kotlin](kotlin/README.md) | [Integration](kotlin/integration/README.md) | [Sockets](kotlin/socket/README.md) | [Messages](kotlin/messages/README.md) | [Provider](kotlin/provider/README.md) | [Embed](kotlin/embed/README.md) |
+| [Python](python/README.md) | [Integration](python/integration/README.md) | [Sockets](python/socket/README.md) | [Messages](python/messages/README.md) | [Provider](python/provider/README.md) | [Embed](python/embed/README.md) |
+| [Ruby](ruby/README.md) | [Integration](ruby/integration/README.md) | [Sockets](ruby/socket/README.md) | [Messages](ruby/messages/README.md) | [Provider](ruby/provider/README.md) | [Embed](ruby/embed/README.md) |
+| [Rust](rust/README.md) | [Integration](rust/integration/README.md) | [Sockets](rust/socket/README.md) | [Messages](rust/messages/README.md) | [Provider](rust/provider/README.md) | [Embed](rust/embed/README.md) |
+| [Swift](swift/README.md) | [Integration](swift/integration/README.md) | [Sockets](swift/socket/README.md) | [Messages](swift/messages/README.md) | [Provider](swift/provider/README.md) | [Embed](swift/embed/README.md) |
+| [TypeScript](typescript/README.md) | [Integration](typescript/integration/README.md) | [Sockets](typescript/socket/README.md) | [Messages: native companion](typescript/messages/README.md) | [Provider: native companion](typescript/provider/README.md) | [Embed](typescript/embed/README.md) |
+| Electron | — | — | — | [Provider app](electron/provider/README.md) | [Embed app](electron/embed/README.md) |
+| Tauri | — | — | — | [Provider app](tauri/provider/README.md) | [Embed app](tauri/embed/README.md) |
+| [Android](android/README.md) | — | — | — | [Provider app](android/provider/README.md) | [Embed app](android/embed/README.md) |
 
 The [integration contract](INTEGRATION_CONTRACT.md) defines the service backend and client credential boundary. Apps receive `URNETWORK_CLIENT_JWT`; only the backend holds `URNETWORK_ROOT_JWT`. A client JWT identifies a client, while `URNETWORK_INSTANCE_ID` identifies an installation. Two messaging terminals need two distinct client identities and two persisted instance IDs.
 
 Every Integration guide includes a runnable allocator in `integration/server`, with exact build, credential-free self-test and backend run commands. The authenticated backend supplies a `user:<service-user-id>` key; the allocator owns the private user-to-client mapping and returns the scoped credential. The client helpers and Messages guides include their matching build and live commands.
 
 Every Provider example follows the [provider contract](PROVIDER_CONTRACT.md): the consent disclaimer your app shows, provider installs that your backend provisions with `"provide_intent": true`, the payout wallet mapped to your Bittensor coldkey through a signed consent, the status fields and the exit codes. The console examples run on Windows, macOS and Linux and keep running in the background with the shared [background templates](background/README.md): a systemd user service, a launchd agent or a scheduled task. Electron and Tauri are desktop provider apps that keep providing from the system tray, and Android runs its provider in a foreground service.
+
+Every Embed example follows the [embed contract](EMBED_CONTRACT.md): one client per running installation, provisioned by your backend with the root credential (an API key in production) and delivered to the app as its client JWT; the installation's ACL group (`isolated` by default, so your users stay out of each other's peer list); optional per-user data caps; and the status, console commands and exit codes every app shows. The [Go token server](go/embed/server/README.md) is the reference backend, and each language has a backend tool. A network can have 100 active top-level clients by default; an Embed plan raises the limit ([Services](https://ur.io/services)).
 
 The [networking research matrix](NETWORK_EXAMPLES.md) maps official HTTP and raw networking examples to each socket adapter and explains where a loopback proxy is required. The [URMS v1 protocol](MESSAGES_PROTOCOL.md) defines exact wire bytes, discovery, callback ownership and ACK semantics.
 

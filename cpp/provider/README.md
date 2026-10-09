@@ -1,6 +1,6 @@
 # C++ provider
 
-[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](README.md)
+[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](README.md) · [Embed](../embed/README.md)
 
 This console app runs a URnetwork provider inside your application on Windows, macOS and Linux, on the SDK's C++ header `urnetwork_sdk.hpp`: a header-only C++17 layer over the C ABI with handle-owning classes, `std::function` listeners and nlohmann/json data types. It provides publicly as a provider client of your network and shows the provider status: providing state, clients served, data provided and the payout wallet, read only. It follows the [provider contract](../../PROVIDER_CONTRACT.md) and the [Go reference](../../go/provider/README.md).
 

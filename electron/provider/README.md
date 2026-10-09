@@ -1,6 +1,6 @@
 # Electron provider
 
-[Native companion](../../javascript/integration/companion/README.md#provider-mode) · [JavaScript provider](../../javascript/provider/README.md) · [Provider](README.md)
+[Native companion](../../javascript/integration/companion/README.md#provider-mode) · [JavaScript provider](../../javascript/provider/README.md) · [Provider](README.md) · [Embed](../embed/README.md)
 
 This Electron app runs a URnetwork provider inside your application on Windows, macOS and Linux. It provides publicly as a provider client of your network and shows the provider status in its window and its tray: providing state, clients served, data provided and the payout wallet, read only. Electron cannot provide in its renderer or with the JavaScript SDK's WebAssembly alone, so the main process runs the JavaScript examples' [native companion](../../javascript/integration/companion/README.md#provider-mode) in provider mode as a child process, which owns the provider device and the installation state, and reads the whole provider status from the companion's loopback `/provider-status` route. The app follows the [provider contract](../../PROVIDER_CONTRACT.md) and its [Electron notes](../../PROVIDER_CONTRACT.md#electron).
 

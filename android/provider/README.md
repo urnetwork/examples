@@ -1,6 +1,6 @@
 # Android provider
 
-[Installation](../README.md) · [Provider](README.md)
+[Installation](../README.md) · [Provider](README.md) · [Embed](../embed/README.md)
 
 This Android app runs a URnetwork provider inside your application. A foreground service provides publicly as a provider client of your network while the user has started providing, and the app shows the provider status: providing state, clients served, data provided and the payout wallet, read only. It follows the [provider contract](../../PROVIDER_CONTRACT.md) and its [Android notes](../../PROVIDER_CONTRACT.md#android); the [Go provider](../../go/provider/README.md) is the reference.
 

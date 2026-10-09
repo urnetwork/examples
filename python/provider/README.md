@@ -1,6 +1,6 @@
 # Python provider
 
-[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](README.md)
+[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](README.md) · [Embed](../embed/README.md)
 
 This console app runs a URnetwork provider inside your application on Windows, macOS and Linux, through the SDK's C ABI with the `urnetwork` package (ctypes). It provides publicly as a provider client of your network and shows the provider status: providing state, clients served, data provided and the payout wallet, read only. It follows the [provider contract](../../PROVIDER_CONTRACT.md); the [Go provider](../../go/provider/README.md) is the reference.
 
@@ -145,7 +145,7 @@ The SDK copies its log lines to stderr, and the C ABI has no switch to lower tha
 
 While providing, the SDK also runs the provider extender role, on by default: it listens on TCP 443, which the role needs, and UDP 443 and 4053 when it can bind them, so that clients that cannot reach the platform directly can connect through this provider, and it prints those listeners on stderr. Windows and macOS may ask to allow incoming connections for Python the first time; on Linux, without the privilege to bind TCP 443, providing continues with the role off, and the SDK tries TCP 443 again every few minutes. Only the subnet's command-line provider also listens on UDP 53; clients of the role try both UDP 53 and 4053. The app creates its device with `urnet_new_device_local_with_provide_extender` and both extender settings on; setting `DEFAULT_PROVIDE_EXTENDER = False` in [session.py](session.py) turns the default off (see the [contract](../../PROVIDER_CONTRACT.md#app-lifecycle)).
 
-Ctrl-C or SIGTERM stops providing and exits with code 0. Exit code 78 means a configuration or credential problem that a restart does not fix, such as a missing `client.jwt` or a credential the server rejected; issue a new scoped JWT from your backend. Exit code 1 is any other failure.
+Ctrl-C or SIGTERM stops providing and exits with code 0. Exit code 78 means a configuration or credential problem that a restart does not fix, such as a missing `client.jwt` or a credential the server rejected; A native library older than the urnetwork package exits 78 with an `SDK version mismatch` line naming the missing function, instead of a traceback; install the native library of the package's SDK release. issue a new scoped JWT from your backend. Exit code 1 is any other failure.
 
 ## Run in the background
 

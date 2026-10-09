@@ -1,6 +1,6 @@
 # JavaScript sockets: Node and browser
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Embed](../embed/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 This directory contains **two runnable programs**, both using `@urnetwork/sdk` and an initialized hosted `DeviceRemote`. [Node](node/main.mjs) demonstrates UR sockets in Undici and Axios. [Browser](browser/main.mjs) demonstrates an Axios request adapter. Both include Direct Sockets TCP/UDP echo through the Device.
 

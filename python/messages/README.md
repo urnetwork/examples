@@ -1,6 +1,6 @@
 # Python peer messages
 
-[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](README.md) · [Provider](../provider/README.md)
+[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](README.md) · [Provider](../provider/README.md) · [Embed](../embed/README.md)
 
 This local Device example discovers real-time peers and exchanges text over subprotocol **4096** using the shared [URMS v1 TEXT/ACK format](../../MESSAGES_PROTOCOL.md). Its files are [main.py](main.py), [codec.py](codec.py) and [requirements.txt](requirements.txt); the Device bootstrap is described in [Integration](../integration/README.md).
 
@@ -14,7 +14,7 @@ python3 -m pip install -r requirements.txt
 python3 main.py --version
 ```
 
-`--self-test` checks the golden vectors and malformed-frame rejection without client credentials or live networking. `--version` reports the SDK version; bindings with native runtime assets also check that they load. Dependency/build steps may download packages.
+`--self-test` checks the golden vectors and malformed-frame rejection without client credentials or live networking. `--version` reports the SDK version; bindings with native runtime assets also check that they load. A native library older than the urnetwork package exits 78 with an `SDK version mismatch` line naming the missing function, instead of a traceback; install the native library of the package's SDK release. Dependency/build steps may download packages.
 
 ## Live two-terminal demo
 

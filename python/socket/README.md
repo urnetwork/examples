@@ -1,6 +1,6 @@
 # Python sockets, HTTPX and Requests
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Embed](../embed/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [main.py](main.py) is a complete local-Device program. [ur_http.py](ur_http.py) implements a synchronous HTTPcore network backend and adapters for HTTPX and Requests over `urnetwork.Conn`.
 
@@ -18,6 +18,8 @@ python main.py --mode tls --url https://example.com/
 python main.py --mode udp --target echo.example:9000
 python main.py --mode dtls --target dtls.example:9001
 ```
+
+The program loads the urnetwork package first: a native library older than the package exits 78 with an `SDK version mismatch` line naming the missing function, instead of a traceback ([sdk_load.py](../integration/sdk_load.py), tested by `python3 -m unittest test_sdk_load` in `python/integration`).
 
 Set the Device environment variables below before live modes. The native package is `pip install urnetwork-sdk`. Before the socket package's first publication, build `make -C sdk/python package check-package`, then install its matching wheel before the remaining requirements. Python 3.10+ and a platform wheel for your OS/CPU are required. This example pins HTTPX 0.28.1 and HTTPcore 1.0.9 because their transport contracts are versioned independently.
 

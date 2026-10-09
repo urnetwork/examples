@@ -1,6 +1,6 @@
 # Ruby sockets, Net::HTTP and Faraday
 
-[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
+[Integration](../integration/README.md) · [Sockets](README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Embed](../embed/README.md) · [Official networking research](../../NETWORK_EXAMPLES.md)
 
 [main.rb](main.rb) is a complete program using the `urnetwork-sdk` gem's FFI wrapper. Direct modes create a local Device and use its Conn for TLS, UDP or DTLS.
 

@@ -1,6 +1,6 @@
 # TypeScript provider
 
-[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](README.md)
+[Installation](../README.md) · [Integration](../integration/README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](README.md) · [Embed](../embed/README.md)
 
 This typed Node 24 console app runs a URnetwork provider inside your application on Windows, macOS and Linux. It provides publicly as a provider client of your network and shows the provider status: providing state, clients served, data provided and the payout wallet, read only. The JavaScript SDK cannot provide by itself, so the app starts the [native companion](../../javascript/integration/companion/README.md#provider-mode) in provider mode as its child process: the companion owns the provider device and the installation state, reads the status with the full SDK, and serves it to the app on its status route. It follows the [provider contract](../../PROVIDER_CONTRACT.md), mirrors the [Go provider](../../go/provider/README.md), and behaves like the [JavaScript provider](../../javascript/provider/README.md). Node 24 runs the `.ts` files directly with type stripping.
 

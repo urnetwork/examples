@@ -1,6 +1,6 @@
 # JavaScript service integration
 
-[Installation](../README.md) · [Integration](README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md)
+[Installation](../README.md) · [Integration](README.md) · [Sockets](../socket/README.md) · [Messages](../messages/README.md) · [Provider](../provider/README.md) · [Embed](../embed/README.md)
 
 Only the authenticated service backend holds `URNETWORK_ROOT_JWT`. The app receives a scoped JWT with an assigned `client_id`. Hosted sockets and native-companion messaging use that same credential boundary; the companion is an app-side process and never holds the root JWT. Follow the [shared integration contract](../../INTEGRATION_CONTRACT.md) for provisioning and ownership checks.
 
