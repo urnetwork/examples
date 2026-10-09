@@ -15,6 +15,7 @@ This contract applies to every embed example: the twelve [language folders](READ
 | `client.jwt` | The installation's private state | The scoped client JWT the backend delivered. The SDK refreshes it and the app saves the refreshed token. A bearer secret. |
 | `instance-id` | The installation's private state | One UUID created on first run and kept for the life of the installation. It is also the installation ID the app sends to the backend. |
 | Data caps | URnetwork, set by the backend | Optional monthly and running-total byte caps per client. The app reads its own with its client JWT. |
+| ACL group | URnetwork, set by the backend | `default` or `isolated`. The examples put each new client in `isolated`, so your users stay out of each other's peer list; an app that uses Messages keeps `default`. |
 | Demo session token | The app (examples only) | Stands in for the developer's real sign-in when the app calls the token server. |
 
 No key ships in an app. The app never holds the root credential, never sets data caps and never provisions or removes clients.
@@ -43,13 +44,13 @@ Treat the root credential like a production database password: keep it in the ba
 
 The backend provisions with `POST /network/auth-client` and the root credential, as the [integration contract](INTEGRATION_CONTRACT.md#backend-provisioning) describes for a top-level client:
 
-- **New client:** send `description` and `device_spec`, and neither `client_id` nor `source_client_id`. The answer carries the new `client_id` and its scoped `by_client_jwt`.
+- **New client:** send `description` and `device_spec`, and neither `client_id` nor `source_client_id`. The answer carries the new `client_id` and its scoped `by_client_jwt`. A new client is in the `default` [ACL group](#backend-acl-groups); the examples then move it to their default group, `isolated` unless configured otherwise, before they deliver its client JWT.
 - **Reissue:** send the stored `client_id` with a `description` and a `device_spec`. The server does not require the values the client was created with: every request relabels the client with the `description` and `device_spec` it sends, and an empty `device_spec` clears the stored one. Send the same values each time to keep the labels stable. The answer carries a fresh `by_client_jwt` for the same client; check that its `client_id` matches the map.
-- **Deactivated client:** a client that has not connected for 30 days is deactivated, and its reissue answers `Client does not exist.` Remove that mapping, provision a new client, and apply the installation's caps to the new client.
+- **Deactivated client:** a client that has not connected for 30 days is deactivated, and its reissue answers `Client does not exist.` Remove that mapping, provision a new client, and apply the installation's ACL group and caps to the new client.
 
 Check the HTTP result, the API error and both success fields, check that the JWT's `client_id` claim equals the answer's `client_id`, and refuse a new `client_id` that the map already assigns to another key. A refusal answers 200 with `error.message`. The description is visible to URnetwork, so do not put your users' identifiers in it; the map already links each client to its user.
 
-**The client limit.** A network can have 100 top-level clients by default. The limit counts the network's active clients that have no `source_client_id` and are not provider installs; child clients and provider installs never count. Creating a client past the limit is refused with `error.client_limit_exceeded` and the message `Client limit exceeded.` A client stops counting when it is removed or when it is deactivated after 30 days without connecting. An **Embed plan** raises the network's limit: [request one on the Services page](https://ur.io/services). A refusal with `error.upgrade_required` is a different limit: the network's plan limit for concurrently connected top-level clients, which an upgrade lifts.
+**The client limit.** A network can have 100 top-level clients by default. The limit counts the network's active clients that have no `source_client_id` and are not provider installs; child clients and provider installs never count. Creating a client past the limit is refused with `error.client_limit_exceeded` and the message `Client limit exceeded.` A client stops counting when it is removed or when it is deactivated after 30 days without connecting; an `isolated` client counts like any other. An **Embed plan** raises the network's limit: [request one on the Services page](https://ur.io/services). A refusal with `error.upgrade_required` is a different limit: the network's plan limit for concurrently connected top-level clients, which an upgrade lifts.
 
 With curl and jq:
 
@@ -124,6 +125,25 @@ curl -fsS "$API/network/client-data-cap?client_id=$CLIENT_ID" -H "Authorization:
 curl -fsS "$API/network/client-data-caps?limit=1000" -H "Authorization: Bearer $URNETWORK_ROOT_JWT"
 ```
 
+## Backend: ACL groups
+
+Each client has an ACL group, `default` or `isolated`, and a new client is `default`.
+
+- A **`default`** client is a peer of the network: it appears in the network's peer list (`GET /network/peers` and the peer change stream) and receives it, which the Messages examples need.
+- An **`isolated`** client never appears in the peer list, receives no peer list itself, and does not count toward the 100 recently active top-level clients that keep the peer list on. It still counts toward the [client limit](#backend-provision-clients) and the network's concurrent connection limit, and it cannot use Messages, which find their peers in that list.
+
+`POST /network/client-acl-group` with the root credential sets a client's group; a client JWT is refused, and the `client_id` must belong to the caller's network. The body is `{"client_id": C, "acl_group": "default"}` or `"isolated"`, and the answer is `{"client_id": C, "acl_group": "..."}`; a refusal answers 200 with `error.message`. `GET /network/client-acl-group?client_id=C` reads a client's group with the root credential, or with the client's own JWT, where `client_id` may be omitted and must match the JWT when given.
+
+```sh
+curl -fsS -X POST "$API/network/client-acl-group" \
+  -H "Authorization: Bearer $URNETWORK_ROOT_JWT" -H 'Content-Type: application/json' \
+  --data "{\"client_id\": \"$CLIENT_ID\", \"acl_group\": \"isolated\"}"
+```
+
+**The examples' default group.** The token server and every backend tool put each new client in `URNETWORK_DEFAULT_ACL_GROUP`: `isolated` when it is unset, so a whitelabel app's users never see each other, or `default` for an app that uses Messages. Other values are a configuration error. Since a new client is already `default`, a default of `default` sends no request. For `isolated`, the new client's mapping and a `pending_acl` record are saved together, then the group is applied, then the record is dropped; an issue for a key still in `pending_acl` applies the current default group before it returns a client JWT. A crash between the calls leaves the record, so a client is never in the wrong group without one.
+
+**A server without ACL groups** answers their route with 404. A backend tool then exits 1 with `/network/client-acl-group answered 404: the server predates ACL groups`, keeps the key in `pending_acl`, and writes no client JWT for a new client; set `URNETWORK_DEFAULT_ACL_GROUP=default` to provision on such a server. The token server reports it once in its log and still answers the token: the client stays `default`, the key stays in `pending_acl`, and a later request applies the group once the server has it.
+
 ## Backend: pause, remove and delete users
 
 - **Pause** a user's installation by setting a cap to `0`: it gets no new transfer contracts from then on, and its data stops within the life of the contracts already open. Set the cap back to resume.
@@ -134,11 +154,11 @@ curl -fsS "$API/network/client-data-caps?limit=1000" -H "Authorization: Bearer $
 
 | Event | What happens | Backend action |
 | --- | --- | --- |
-| First sign-in on an installation | No mapping yet | Provision a new client, map it, apply caps, deliver the client JWT. |
+| First sign-in on an installation | No mapping yet | Provision a new client, map it, apply its ACL group and caps, deliver the client JWT. |
 | Later sign-in or app start | The mapping exists | Reissue with the stored `client_id` and deliver the new client JWT. |
 | The client JWT nears expiry | The SDK refreshes it; the app saves the new token | None. |
 | The credential is rejected | The SDK reports an auth logout; the app stops | On the next sign-in, reissue, or provision if the reissue answers `Client does not exist.` |
-| 30 days without connecting | The client is deactivated and stops counting toward the limit | The next reissue answers `Client does not exist.`: drop the mapping, provision a new client, re-apply caps. |
+| 30 days without connecting | The client is deactivated and stops counting toward the limit | The next reissue answers `Client does not exist.`: drop the mapping, provision a new client, re-apply its ACL group and caps. |
 | Monthly cap reached | `capped` with `monthly` until 00:00 UTC on the first | Raise or clear the monthly cap, or wait for the month. |
 | Running total reached | `capped` with `total`; no automatic reset | Raise or clear the cap, or send `reset_total`. |
 | Pause | A cap of `0` | Set the cap back. |
@@ -147,7 +167,7 @@ curl -fsS "$API/network/client-data-caps?limit=1000" -H "Authorization: Bearer $
 
 ## The token server
 
-The Go token server in `go/embed/server/` is a minimal backend the embed apps call over HTTP to obtain their client JWT: the shape of a real service's sign-in endpoint. It uses only the Go standard library and no URnetwork SDK. It authenticates the app's demo session, provisions or reissues the installation's client, applies default caps to new clients and returns the client JWT. The same binary also runs the [backend commands](#backend-tools) against its own map; its `provision` command issues a key exactly as the HTTP route does, default caps and `pending_caps` included, so every client in its map is capped or recorded as owing its caps.
+The Go token server in `go/embed/server/` is a minimal backend the embed apps call over HTTP to obtain their client JWT: the shape of a real service's sign-in endpoint. It uses only the Go standard library and no URnetwork SDK. It authenticates the app's demo session, provisions or reissues the installation's client, puts new clients in the default ACL group and applies their default caps, and returns the client JWT. The same binary also runs the [backend commands](#backend-tools) against its own map; its `provision` command issues a key exactly as the HTTP route does, default ACL group, default caps and their pending records included, so every client in its map is in its group and capped, or recorded as owing them. On a server without ACL groups the command exits 1, as every backend tool does.
 
 ### Configuration
 
@@ -159,6 +179,7 @@ The Go token server in `go/embed/server/` is a minimal backend the embed apps ca
 | `URNETWORK_API_URL` | Optional HTTPS origin, default `https://api.bringyour.com`, with the [allocators'](INTEGRATION_CONTRACT.md#runnable-backend-allocators) rules: no credentials, path, query or fragment; explicit loopback HTTP only for local mocks. |
 | `URNETWORK_TOKEN_SERVER_ADDRESS` | Optional bind address, default `127.0.0.1:8790`. Serve the internet through your own HTTPS front end, never this listener directly. |
 | `URNETWORK_MAX_INSTALLATIONS_PER_USER` | Optional, default 5. |
+| `URNETWORK_DEFAULT_ACL_GROUP` | Optional, `isolated` (the default) or `default`: the [ACL group](#backend-acl-groups) of each new client. |
 | `URNETWORK_DEFAULT_MONTHLY_BYTE_LIMIT`, `URNETWORK_DEFAULT_TOTAL_BYTE_LIMIT` | Optional integers, 0 or more, applied once to each **new** client. Unset means no default. A reissue never re-applies them, so a cap the backend changed later stays changed. |
 
 The demo session file stands in for your service's real authentication; your service maps its own session (a cookie, an OAuth access token) to its service user ID instead. It is one JSON object, private like the map (0600 in a 0700 directory on POSIX):
@@ -203,7 +224,7 @@ A success answers 200 with:
 | 409 | `installation_limit` | The user already has the maximum number of installations. |
 | 409 | `client_limit` | URnetwork refused a new client with `error.client_limit_exceeded` or `error.upgrade_required`. The message points to the [Services page](https://ur.io/services). |
 | 500 | `internal` | The token server itself failed, such as an unreadable or invalid map or a disk error. |
-| 502 | `upstream` | The URnetwork API failed, answered something invalid, or the default caps could not be applied. |
+| 502 | `upstream` | The URnetwork API failed, answered something invalid, or the default ACL group or caps could not be applied. |
 | 503 | `busy` | Another process holds the map lock; retry. |
 
 Other methods answer 405 and other paths 404, in the same error shape. There is no browser CORS support: the callers are native apps.
@@ -214,16 +235,18 @@ Other methods answer 405 and other paths 404, in the same error shape. There is 
 2. Take the map lock: an in-process mutex and the [allocators'](INTEGRATION_CONTRACT.md#runnable-backend-allocators) exclusive `<map>.lock` directory, held through the remote calls and the map update.
 3. A mapped key is reissued. If the reissue answers `Client does not exist.`, remove the mapping and continue as a new key.
 4. A new key first checks the installation limit: the number of mapped keys beginning `user:<service-user-id>:`. Then it provisions a new client (`"description": "embed installation"`, `"device_spec": "urnetwork-examples/embed-token-server"`), validates the answer, and saves the mapping. A reissue sends the same labels. The `provision` command labels its clients `embed client` and `urnetwork-examples/go-embed-server`; since a reissue relabels a client, a key reissued by the other path just takes the newer labels.
-5. When default caps are configured, a new client's key is saved in the map's `pending_caps` together with the mapping, then the caps are applied with `POST /network/client-data-cap` (only the configured fields), and the key leaves `pending_caps` once that succeeds. If applying fails, the answer is 502 and no token is returned. A later request for a key that is still in `pending_caps` applies the default caps before it returns a token. A key never stays uncapped without a record.
-6. Read the cap object, release the lock and answer.
+5. When the default ACL group is `isolated`, a new client's key is saved in the map's `pending_acl` together with the mapping, the group is applied with `POST /network/client-acl-group`, and the key leaves `pending_acl` once that succeeds. If applying fails, the answer is 502 and no token is returned; on a server without ACL groups (404) it is reported once and the request continues with the key still in `pending_acl`. A later request for a key that is still in `pending_acl` applies the group before it returns a token.
+6. When default caps are configured, a new client's key is saved in the map's `pending_caps` together with the mapping, then the caps are applied with `POST /network/client-data-cap` (only the configured fields), and the key leaves `pending_caps` once that succeeds. If applying fails, the answer is 502 and no token is returned. A later request for a key that is still in `pending_caps` applies the default caps before it returns a token. A key never stays uncapped without a record.
+7. Read the cap object, release the lock and answer.
 
-The token server's map is the allocators' map with one more optional field:
+The token server's map is the allocators' map with two more fields:
 
 ```json
 {
   "version": 1,
   "clients": {"user:alice:22222222-2222-2222-2222-222222222222": "11111111-1111-1111-1111-111111111111"},
-  "pending_caps": []
+  "pending_caps": [],
+  "pending_acl": []
 }
 ```
 
@@ -231,7 +254,7 @@ It never answers with, prints or logs the root credential, a session token or a 
 
 ### Self-test
 
-`token-server --self-test` needs no credentials and no network. Against a mock API it checks: session authentication (an unknown token is 401, a short token or a bad user ID is a configuration error); the installation ID and body rules; a new key versus a reissue, with the right wire fields (`client_id` only on a reissue, never `source_client_id`); the `Client does not exist.` re-provision; the installation limit; `client_limit` for both refusal flags; default caps applied once to a new client and never on a reissue, `pending_caps` set before and cleared after, and retried on the next request when applying failed; `data_cap` as `null` when the cap read fails; `Cache-Control: no-store`; the 404, 405 and 503 answers; private map and session file permissions; and that no answer or output contains the root credential.
+`token-server --self-test` needs no credentials and no network. Against a mock API it checks: session authentication (an unknown token is 401, a short token or a bad user ID is a configuration error); the installation ID and body rules; a new key versus a reissue, with the right wire fields (`client_id` only on a reissue, never `source_client_id`); the `Client does not exist.` re-provision; the installation limit; `client_limit` for both refusal flags; the default ACL group applied once to a new client and never on a reissue, `pending_acl` set before and cleared after, retried on the next request when applying failed, reported once and the token still answered on a server without ACL groups, and no request for a default of `default`; default caps applied once to a new client and never on a reissue, `pending_caps` set before and cleared after, and retried on the next request when applying failed; `data_cap` as `null` when the cap read fails; `Cache-Control: no-store`; the 404, 405 and 503 answers; private map and session file permissions; and that no answer or output contains the root credential.
 
 ## Backend tools
 
@@ -239,22 +262,23 @@ Every console language has a backend tool in `<language>/embed/server/`, and the
 
 | Command | Does |
 | --- | --- |
-| `provision <key> <client-jwt-file>` | Reissues the key's client, or provisions a new one; on `Client does not exist.` it drops the mapping and provisions a new client. It writes the client JWT to the named file (owner-only, replaced atomically), never prints it, and prints `{"client_id": "..."}`. |
+| `provision <key> <client-jwt-file>` | Reissues the key's client, or provisions a new one; on `Client does not exist.` it drops the mapping and provisions a new client. A new client goes into `URNETWORK_DEFAULT_ACL_GROUP` (default `isolated`) with the [`pending_acl` record](#backend-acl-groups) before any client JWT is written. It writes the client JWT to the named file (owner-only, replaced atomically), never prints it, and prints `{"client_id": "..."}`. |
 | `cap <key> [--monthly <bytes>\|--monthly null] [--total <bytes>\|--total null] [--reset-total]` | Posts only the given fields to `POST /network/client-data-cap` and prints the cap object. At least one option; byte counts are decimal integers from 0 to 9223372036854775807, with no units. |
 | `usage <key>` | Prints the key's cap object, read with the root credential. |
 | `usage-all` | Pages through `GET /network/client-data-caps` with `limit=1000` and prints one cap object per line, stopping at a `null` cursor or a repeated one. |
 | `remove <key>` | Removes the key's client with `POST /network/remove-client`, then the mapping (also when the answer is `Client does not exist.`), and prints `{"removed": "<client_id>"}`. |
+| `acl <key> default\|isolated` | Sets the [ACL group](#backend-acl-groups) of the key's client with `POST /network/client-acl-group` and prints the answer, `{"client_id": "...", "acl_group": "..."}`. Any other group is a usage error. |
 | `--self-test` | The credential-free self-test below. |
 
-`<key>` matches the allocator pattern, so `user:alice` and `user:alice:22222222-2222-2222-2222-222222222222` both work. The language tools accept a map with only `version` and `clients` and refuse one with other fields, such as the token server's `pending_caps`, so that two tools never rewrite each other's map. The description they send is `embed client` and the device spec `urnetwork-examples/<language>-embed-server`, on a new client and on every reissue.
+`<key>` matches the allocator pattern, so `user:alice` and `user:alice:22222222-2222-2222-2222-222222222222` both work. The language tools accept a map with `version`, `clients` and an optional `pending_acl` array, which they write only while it is not empty, and refuse one with other fields, such as the token server's `pending_caps`, so that two tools never rewrite each other's map. Besides the allocator's settings they read `URNETWORK_DEFAULT_ACL_GROUP`. The description they send is `embed client` and the device spec `urnetwork-examples/<language>-embed-server`, on a new client and on every reissue.
 
 A refusal for either client limit flag prints `client limit reached: your network is at its client limit; see https://ur.io/services` on stderr. The tools exit **0** on success, **78** for a configuration or credential problem (missing settings, an invalid key or map, the root credential refused, the client limit), and **1** for any other failure, with one stderr line that never contains a secret. Three failures have fixed rules:
 
-- `cap`, `usage` or `remove` for a key with no mapped client exits **78** with `no client is mapped for that key; run provision first`.
+- `cap`, `usage`, `remove` or `acl` for a key with no mapped client exits **78** with `no client is mapped for that key; run provision first`.
 - A `<map>.lock` that another process holds exits **1**, a retryable failure, with a line that names the lock and says to retry.
-- A cap route (`/network/client-data-cap` or `/network/client-data-caps`) that answers 404 exits **1** with `<path> answered 404: the server predates the data-cap routes`, where `<path>` is the route's path without its query.
+- A cap route (`/network/client-data-cap` or `/network/client-data-caps`) that answers 404 exits **1** with `<path> answered 404: the server predates the data-cap routes`, where `<path>` is the route's path without its query. The ACL route answering 404 exits **1** with `/network/client-acl-group answered 404: the server predates ACL groups`, from `acl` and from a `provision` that owes an `isolated` group.
 
-The self-test needs no credentials and no network. It checks the allocator rules (new versus reissue, key and argument rejection, private map round trip, response and claim checks), the `Client does not exist.` re-provision, the client JWT file's private permissions and that the token never reaches stdout or stderr, the merge request bodies (an omitted option is absent from the JSON, `null` is JSON `null`, byte counts are integers, `reset_total` appears only when given), the cap object parsing, the `usage-all` paging and its stop on a repeated cursor, `remove` dropping the mapping for both answers, the refusal of a map with unknown fields, the unmapped-key and cap-route 404 texts, and the exit codes.
+The self-test needs no credentials and no network. It checks the allocator rules (new versus reissue, key and argument rejection, private map round trip, response and claim checks), the `Client does not exist.` re-provision, the client JWT file's private permissions and that the token never reaches stdout or stderr, the merge request bodies (an omitted option is absent from the JSON, `null` is JSON `null`, byte counts are integers, `reset_total` appears only when given), the cap object parsing, the `usage-all` paging and its stop on a repeated cursor, `remove` dropping the mapping for both answers, the refusal of a map with unknown fields, the `acl` request body and printed answer, the default ACL group on a new client only (with `pending_acl` set before and cleared after, kept and retried after a failure, and no request for a default of `default`), a `provision` that owes a group on a server without ACL groups (exit 1, the key kept in `pending_acl`, no client JWT written), the unmapped-key and 404 texts, and the exit codes.
 
 ## Packaging and embedding the SDK
 
@@ -434,7 +458,7 @@ The embed example ends where the app's own traffic begins.
 - **Sockets** route TCP, UDP and HTTP clients through the embed Device. Libraries that need an operating system socket use the loopback proxy; the [networking matrix](NETWORK_EXAMPLES.md) maps each language's HTTP stack to its adapter.
 - **Messages** exchange the [URMS](MESSAGES_PROTOCOL.md) text and ACK protocol with other clients of your network, but not on the embed Device. Subprotocol messages attach to a Device's provider client, and the embed Device does not provide. A Messages program, or the companion in messaging mode, starts its own provider-capable Device for the installation, and that Device provides to your network: your network's other clients can route traffic through that installation. Ask your users before you turn that on.
 
-Every embed client is a top-level client, so it appears in your network's peer list (`GET /network/peers` and the peer change stream) while the network has 100 or fewer recently active top-level clients; the Messages examples depend on that list, and your app decides what of it to show.
+An embed client in the `default` [ACL group](#backend-acl-groups) is a peer of your network: it appears in the peer list (`GET /network/peers` and the peer change stream) while the network has 100 or fewer recently active top-level clients that are not isolated, and your app decides what of it to show. An `isolated` client, the examples' default, never appears there and cannot use Messages: an app that uses Messages provisions with `URNETWORK_DEFAULT_ACL_GROUP=default`, or moves a client with `acl <key> default`, and needs its users' consent for the provider-capable Device as above.
 
 ## README template
 
@@ -444,11 +468,11 @@ Each `<platform>/embed/README.md` follows the [Go embed README](go/embed/README.
 2. One paragraph on what the app does, linking this contract; in-app traffic only.
 3. Files: a table of the example's files and their roles, including the backend tool.
 4. Build and self-test: exact commands for Windows (PowerShell), macOS and Linux, and the SDK version or local build it needs.
-5. Backend: the [root credential](#the-root-credential) (an API key for production), provisioning and caps with the [token server](#the-token-server) or the language's [backend tool](#backend-tools), with curl equivalents; pausing and removing a client; the [client limit](#backend-provision-clients) and the Embed plan.
+5. Backend: the [root credential](#the-root-credential) (an API key for production), provisioning, the [ACL group](#backend-acl-groups) and caps with the [token server](#the-token-server) or the language's [backend tool](#backend-tools), with curl equivalents; pausing and removing a client; the [client limit](#backend-provision-clients) and the Embed plan.
 6. Package: how the SDK and its native runtime ship with the app on each OS, the license and `GetLicenses`, and where `client.jwt` lives.
 7. Configure the installation: the state directory on each OS and the token server settings, or a `client.jwt` from `provision`.
 8. Run: per-OS commands, a sample status line, the field table, the `client limit` and data cap states in a sentence each, the [console commands](#console-commands) or the GUI's controls, and the exit codes.
-9. Next: the language's [Sockets](README.md) guide, with the state directory exported as `URNETWORK_CLIENT_JWT` and `URNETWORK_INSTANCE_ID`; and the Messages guide, with the note that Messages run on their own provider-capable Device, which provides to the network and needs the user's consent.
+9. Next: the language's [Sockets](README.md) guide, with the state directory exported as `URNETWORK_CLIENT_JWT` and `URNETWORK_INSTANCE_ID`; and the Messages guide, with the note that Messages run on their own provider-capable Device, which provides to the network and needs the user's consent, and need the client in the `default` ACL group.
 
 ## Platform notes
 
@@ -485,6 +509,6 @@ The cross-platform Swift embed app uses the C ABI header and library through a S
 
 The embed apps need no SDK API beyond what ships today; they read the caps over HTTP. They need an SDK release from the first release after sdk `c638dfa8`, which adds the client limit status. The companion's embed mode and `/embed-status` route are example code in this repository, built against that SDK. Where a published package is older than that release, each README gives the local build path, such as the Swift example's `URNETWORK_SDK_INCLUDE` and `URNETWORK_SDK_LIBDIR` or a fresh `make -C sdk/rust` before using the staged Rust crate.
 
-The data-cap routes (`POST` and `GET /network/client-data-cap`, `GET /network/client-data-caps`) and the per-network client limit that an Embed plan raises ship with the server release that adds them; they follow the API in connect's `api/bringyour.yml`. On an older server the cap routes answer 404: the apps show `unavailable` for the data fields, and the backend tools report the failure.
+The data-cap routes (`POST` and `GET /network/client-data-cap`, `GET /network/client-data-caps`), the ACL group routes (`POST` and `GET /network/client-acl-group`) and the per-network client limit that an Embed plan raises ship with the server releases that add them; they follow the API in connect's `api/bringyour.yml`. On an older server the cap routes answer 404: the apps show `unavailable` for the data fields, and the backend tools report the failure. Without the ACL routes, provision with `URNETWORK_DEFAULT_ACL_GROUP=default`, as [ACL groups](#backend-acl-groups) describes.
 
 These details were checked on 2026-10-08 against the workspace sources of the SDK (device creation, the window, contract and client limit status, the licenses and the C ABI exports), the server (API-key sessions, client removal, the active-client check on connect, the resident per client and the top-level client cap) and the examples' integration and provider contracts.
