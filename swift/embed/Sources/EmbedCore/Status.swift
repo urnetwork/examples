@@ -346,6 +346,16 @@ public struct Caps: Equatable {
     state = .unavailable
   }
 
+  /// Applies the outcome of a cap read: its reading, the Embed-not-enabled refusal, which clears
+  /// the last reading, or another failure, which keeps it.
+  public mutating func record(_ reading: Cap?, notEnabled: Bool) {
+    if notEnabled {
+      clear()
+    } else {
+      apply(reading)
+    }
+  }
+
   /// The latest reading, if any.
   public var cap: Cap? {
     if case .read(let cap) = state {

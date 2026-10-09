@@ -253,11 +253,7 @@ class EmbedSession(private val out: PrintStream, private val err: PrintStream) {
                 CapRead(null)
             }
             // the Embed-not-enabled refusal clears the last reading; another failure keeps it
-            if (read.embedNotEnabled) {
-                capReadings.recordEmbedNotEnabled()
-            } else {
-                capReadings.record(read.cap)
-            }
+            capReadings.recordRead(read)
             capRead = null
         }
         if (capRead == null && 0 <= now - nextCapReadTime) {

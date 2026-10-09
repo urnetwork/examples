@@ -354,6 +354,14 @@ public func checkDataFields() throws {
   try expect(
     dataField(caps, monthly: true) == "unavailable" && dataField(caps, monthly: false) == "unavailable",
     "the Embed-not-enabled refusal did not clear the last reading")
+  // the outcome of a cap read: a reading replaces, another failure keeps it, and the
+  // Embed-not-enabled refusal clears it
+  var recorded = Caps()
+  recorded.record(cap, notEnabled: false)
+  recorded.record(nil, notEnabled: false)
+  try expect(recorded.cap == cap, "a failed cap read did not keep the reading")
+  recorded.record(nil, notEnabled: true)
+  try expect(recorded.state == .unavailable, "the Embed-not-enabled cap read did not clear the reading")
 }
 
 /// The cap object: null or absent limits, capped and its reason, an unknown

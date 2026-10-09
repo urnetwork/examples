@@ -247,6 +247,14 @@ internal static class SelfTest {
     Expect(cleared.Latest == null && StatusRules.DataField(cleared, monthly: true) == "unavailable" &&
            StatusRules.DataField(cleared, monthly: false) == "unavailable",
            "the Embed-not-enabled refusal does not clear the last reading");
+    // the outcome of a cap read: a reading replaces, another failure keeps it,
+    // and the Embed-not-enabled refusal clears it
+    var recorded = new CapReadings();
+    recorded.RecordRead(new CapRead(good));
+    recorded.RecordRead(new CapRead(null));
+    Expect(recorded.Latest == good, "a failed cap read does not keep the reading");
+    recorded.RecordRead(new CapRead(null, EmbedNotEnabled: true));
+    Expect(recorded.Latest == null && recorded.Attempted, "the Embed-not-enabled cap read does not clear the reading");
   }
 
   /// The cap object parsing.

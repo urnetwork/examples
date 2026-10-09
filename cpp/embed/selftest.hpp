@@ -310,6 +310,14 @@ inline void checkDataFields() {
     caps.clear();
     expect(dataField(caps, true) == "unavailable" && dataField(caps, false) == "unavailable",
         "the Embed-not-enabled refusal did not clear the last reading");
+    // the outcome of a cap read: a reading replaces, another failure keeps it, and the
+    // Embed-not-enabled refusal clears it
+    Caps recorded;
+    recorded.record(cap, false);
+    recorded.record(std::nullopt, false);
+    expect(recorded.state == CapsState::read, "a failed cap read did not keep the reading");
+    recorded.record(std::nullopt, true);
+    expect(recorded.state == CapsState::unavailable, "the Embed-not-enabled cap read did not clear the reading");
 }
 
 // The cap object: null or absent limits, capped and its reason, an unknown

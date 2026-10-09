@@ -193,14 +193,9 @@ internal sealed class EmbedSession : IDisposable {
       nextCapReadTime = now + CapReadAfterContractChange;
     }
     if (capRead is { IsCompleted: true } finished) {
-      CapRead read = finished.IsCompletedSuccessfully ? finished.Result : new CapRead(null);
       // the Embed-not-enabled refusal clears the last reading; another failure
       // keeps it
-      if (read.EmbedNotEnabled) {
-        capReadings.RecordEmbedNotEnabled();
-      } else {
-        capReadings.Record(read.Cap);
-      }
+      capReadings.RecordRead(finished.IsCompletedSuccessfully ? finished.Result : new CapRead(null));
       capRead = null;
     }
     if (capRead == null && nextCapReadTime <= now) {

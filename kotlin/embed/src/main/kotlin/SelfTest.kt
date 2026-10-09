@@ -237,6 +237,14 @@ private fun checkDataFields() {
     expect(cleared.latest == null && dataField(cleared, monthly = true) == "unavailable" && dataField(cleared, monthly = false) == "unavailable") {
         "the Embed-not-enabled refusal does not clear the last reading"
     }
+    // the outcome of a cap read: a reading replaces, another failure keeps it, and the
+    // Embed-not-enabled refusal clears it
+    val recorded = CapReadings()
+    recorded.recordRead(CapRead(good))
+    recorded.recordRead(CapRead(null))
+    expect(recorded.latest == good) { "a failed cap read does not keep the reading" }
+    recorded.recordRead(CapRead(null, embedNotEnabled = true))
+    expect(recorded.latest == null && recorded.attempted) { "the Embed-not-enabled cap read does not clear the reading" }
 }
 
 /** The cap object parsing. */

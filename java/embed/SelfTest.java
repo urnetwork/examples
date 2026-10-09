@@ -242,6 +242,14 @@ final class SelfTest {
     expect(cleared.latest() == null && EmbedStatus.dataField(cleared, true).equals("unavailable") &&
            EmbedStatus.dataField(cleared, false).equals("unavailable"),
            "the Embed-not-enabled refusal does not clear the last reading");
+    // the outcome of a cap read: a reading replaces, another failure keeps it, and the
+    // Embed-not-enabled refusal clears it
+    Caps.CapReadings recorded = new Caps.CapReadings();
+    recorded.recordRead(new Caps.CapRead(good, false));
+    recorded.recordRead(new Caps.CapRead(null, false));
+    expect(good.equals(recorded.latest()), "a failed cap read does not keep the reading");
+    recorded.recordRead(new Caps.CapRead(null, true));
+    expect(recorded.latest() == null && recorded.attempted(), "the Embed-not-enabled cap read does not clear the reading");
   }
 
   /** The cap object parsing. */

@@ -388,10 +388,8 @@ int ur_embed_session_run(ur_embed_session *session) {
       bool read = work.cap_read_result == UR_EMBED_CAP_READ_OK;
       /* the Embed-not-enabled refusal clears the last reading; another
        * failure keeps it */
-      if (work.cap_read_result == UR_EMBED_CAP_READ_NOT_ENABLED)
-        ur_embed_caps_clear(&session->caps);
-      else
-        ur_embed_caps_apply(&session->caps, read ? &work.cap_reading : NULL);
+      ur_embed_caps_record(&session->caps, work.cap_read_result,
+                           &work.cap_reading);
       if (!read && !cap_read_failing)
         fprintf(stderr, "could not read the data caps: %s\n",
                 work.cap_read_error);

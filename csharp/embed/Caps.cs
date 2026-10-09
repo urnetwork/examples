@@ -163,6 +163,16 @@ internal sealed class CapReadings {
     Attempted = true;
     Latest = null;
   }
+
+  /// Records one finished cap read: the Embed-not-enabled refusal clears the
+  /// last reading; another failure keeps it.
+  public void RecordRead(CapRead read) {
+    if (read.EmbedNotEnabled) {
+      RecordEmbedNotEnabled();
+    } else {
+      Record(read.Cap);
+    }
+  }
 }
 
 /// Reads the installation's own caps with its client JWT.

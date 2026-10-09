@@ -123,6 +123,18 @@ final class Caps {
       latest = null;
     }
 
+    /**
+     * Records one finished cap read: the Embed-not-enabled refusal clears the last reading; another
+     * failure keeps it.
+     */
+    void recordRead(CapRead read) {
+      if (read.embedNotEnabled()) {
+        recordEmbedNotEnabled();
+      } else {
+        record(read.cap());
+      }
+    }
+
     /** The latest successful reading; null before one. */
     DataCap latest() { return latest; }
 

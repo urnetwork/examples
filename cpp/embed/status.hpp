@@ -372,6 +372,16 @@ struct Caps {
         state = CapsState::unavailable;
         cap = Cap{};
     }
+
+    // Applies the outcome of a cap read: its reading, the Embed-not-enabled
+    // refusal, which clears the last reading, or another failure, which keeps it.
+    void record(const std::optional<Cap>& reading, bool notEnabled) {
+        if (notEnabled) {
+            clear();
+        } else {
+            apply(reading);
+        }
+    }
 };
 
 // One data field: checking, unavailable, no cap for an empty limit (never a

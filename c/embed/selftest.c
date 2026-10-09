@@ -468,6 +468,18 @@ static bool check_data_fields(char *failure, size_t capacity) {
     return fail(failure, capacity,
                 "the Embed-not-enabled refusal: \"%s\", \"%s\"",
                 monthly_text, text);
+  /* the outcome of a cap read: a reading replaces, another failure keeps it,
+   * and the Embed-not-enabled refusal clears it */
+  ur_embed_caps recorded;
+  ur_embed_caps_init(&recorded);
+  ur_embed_caps_record(&recorded, UR_EMBED_CAP_READ_OK, &cap);
+  ur_embed_caps_record(&recorded, UR_EMBED_CAP_READ_FAILED, &cap);
+  if (recorded.state != UR_EMBED_CAPS_READ)
+    return fail(failure, capacity, "a failed cap read did not keep the reading");
+  ur_embed_caps_record(&recorded, UR_EMBED_CAP_READ_NOT_ENABLED, &cap);
+  if (recorded.state != UR_EMBED_CAPS_UNAVAILABLE)
+    return fail(failure, capacity,
+                "the Embed-not-enabled cap read did not clear the reading");
   return true;
 }
 

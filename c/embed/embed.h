@@ -388,6 +388,8 @@ ur_embed_cap_read_result ur_embed_read_caps(ur_embed_http_fn http,
                                             const char *client_jwt,
                                             ur_embed_cap *cap, char *error,
                                             size_t capacity);
+void ur_embed_caps_record(ur_embed_caps *caps, ur_embed_cap_read_result result,
+                          const ur_embed_cap *reading);
 
 /* ----- configuration (fetch.c) ----- */
 

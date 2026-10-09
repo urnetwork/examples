@@ -199,11 +199,7 @@ public:
                 capReadRunning = false;
                 // the Embed-not-enabled refusal clears the last reading; another
                 // failure keeps it
-                if (work.capReadNotEnabled) {
-                    caps.clear();
-                } else {
-                    caps.apply(work.capReading);
-                }
+                caps.record(work.capReading, work.capReadNotEnabled);
                 if (!work.capReading && !capReadFailing) {
                     std::cerr << "could not read the data caps: " << work.capReadError << std::endl;
                 }

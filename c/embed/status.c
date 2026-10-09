@@ -305,6 +305,17 @@ void ur_embed_caps_clear(ur_embed_caps *caps) {
   caps->state = UR_EMBED_CAPS_UNAVAILABLE;
 }
 
+/* Applies the outcome of a cap read: its reading, the Embed-not-enabled
+ * refusal, which clears the last reading, or another failure, which keeps
+ * it. */
+void ur_embed_caps_record(ur_embed_caps *caps, ur_embed_cap_read_result result,
+                          const ur_embed_cap *reading) {
+  if (result == UR_EMBED_CAP_READ_NOT_ENABLED)
+    ur_embed_caps_clear(caps);
+  else
+    ur_embed_caps_apply(caps, result == UR_EMBED_CAP_READ_OK ? reading : NULL);
+}
+
 /* One data field: checking, unavailable, no cap for a null limit (never a used
  * count), or "<used> of <limit>". */
 void ur_embed_data_field(const ur_embed_caps *caps, bool monthly, char *text,

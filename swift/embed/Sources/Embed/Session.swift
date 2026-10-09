@@ -202,11 +202,7 @@ final class EmbedSession {
         capReadRunning = false
         // the Embed-not-enabled refusal clears the last reading; another
         // failure keeps it
-        if capRead.notEnabled {
-          caps.clear()
-        } else {
-          caps.apply(capRead.cap)
-        }
+        caps.record(capRead.cap, notEnabled: capRead.notEnabled)
         if capRead.cap == nil && !capReadFailing {
           writeError("could not read the data caps: \(capRead.error)")
         }

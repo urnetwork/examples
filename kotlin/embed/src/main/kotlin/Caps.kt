@@ -118,6 +118,18 @@ class CapReadings {
         attempted = true
         latest = null
     }
+
+    /**
+     * Records one finished cap read: the Embed-not-enabled refusal clears the last reading; another
+     * failure keeps it.
+     */
+    fun recordRead(read: CapRead) {
+        if (read.embedNotEnabled) {
+            recordEmbedNotEnabled()
+        } else {
+            record(read.cap)
+        }
+    }
 }
 
 /**

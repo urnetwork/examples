@@ -251,11 +251,7 @@ final class EmbedSession {
         read = new Caps.CapRead(null, false);
       }
       // the Embed-not-enabled refusal clears the last reading; another failure keeps it
-      if (read.embedNotEnabled()) {
-        capReadings.recordEmbedNotEnabled();
-      } else {
-        capReadings.record(read.cap());
-      }
+      capReadings.recordRead(read);
       capRead = null;
     }
     if (capRead == null && 0 <= now - nextCapReadTime) {
