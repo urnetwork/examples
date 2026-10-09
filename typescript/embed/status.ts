@@ -193,6 +193,20 @@ function byteCountValue(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && 0 <= value;
 }
 
+// The server refuses the cap read with this message while the team has not
+// enabled Embed for the network (EMBED_CONTRACT.md, "Embed enablement").
+export const embedNotEnabledMessage = "Embed isn't enabled for this network.";
+
+// Whether an answer is the Embed-not-enabled refusal,
+// {"error": {"message": "Embed isn't enabled for this network."}}.
+export function isEmbedNotEnabled(input: unknown): boolean {
+  if (input === null || typeof input !== "object") {
+    return false;
+  }
+  const error = (input as Record<string, unknown>).error;
+  return error !== null && typeof error === "object" && (error as Record<string, unknown>).message === embedNotEnabledMessage;
+}
+
 // The cap object (EMBED_CONTRACT.md, "The cap object") checked and reduced to
 // what the status needs. Limits are null when absent or null; a used count
 // that is absent reads as 0, since a server need not report usage for an
@@ -259,6 +273,13 @@ export class CapReadings {
     if (this.#cap === null) {
       this.#firstFailed = true;
     }
+  }
+
+  // Records the Embed-not-enabled refusal: it clears the last reading, so both
+  // data fields read "unavailable" and the status rules see no cap reading.
+  notEnabled(): void {
+    this.#cap = null;
+    this.#firstFailed = true;
   }
 
   // The latest good cap object, or null.

@@ -1,6 +1,7 @@
 // The credential-free self-test (EMBED_CONTRACT.md, "Self-test"). It checks
 // the byte, reset time, client limit and status line vectors, the status rules
-// and their order, the data fields, the cap object parsing, the JWT client_id
+// and their order, the data fields, the cap object parsing, the cap read and
+// the Embed-not-enabled refusal, the JWT client_id
 // claim, the token fetch against a stand-in token server on loopback, the
 // state directory, the configuration errors and the exit codes. It needs no
 // credentials and no network, and starts no companion and no device.
@@ -11,6 +12,7 @@ import {type IncomingMessage, createServer} from "node:http";
 import type {AddressInfo} from "node:net";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
+import {EmbedNotEnabledError, readDataCap} from "./caps.ts";
 import {parseCommand} from "./command.ts";
 import {type CompanionExit, companionEnvironment} from "./companion.ts";
 import {companionExitCode, exitConfig, exitFailure, exitStopped, loadEmbedSettings, obtainInstallation} from "./session.ts";
@@ -32,6 +34,7 @@ import {
   clientLimitText,
   dataFields,
   formatDataAmount,
+  isEmbedNotEnabled,
   parseCapObject,
   parseEmbedStatus,
   resetText,
@@ -128,17 +131,21 @@ interface ConsoleLineInput {
   clientLimitRetryTime?: number;
   cap?: CapObject | null;
   firstReadingFailed?: boolean;
+  embedNotEnabled?: boolean;
   providerStateAdded?: number;
 }
 
 // The status line for a console app (started, not signed out) with a cap
 // reading.
-function consoleLine({clientLimitStatus = "", clientLimitRetryTime = 0, cap = null, firstReadingFailed = false, providerStateAdded = 0}: ConsoleLineInput): string {
+function consoleLine({clientLimitStatus = "", clientLimitRetryTime = 0, cap = null, firstReadingFailed = false, embedNotEnabled = false, providerStateAdded = 0}: ConsoleLineInput): string {
   const capReadings = new CapReadings();
   if (cap !== null) {
     capReadings.succeeded(cap);
   } else if (firstReadingFailed) {
     capReadings.failed();
+  }
+  if (embedNotEnabled) {
+    capReadings.notEnabled();
   }
   return statusLine({
     status: statusText({clientLimitStatus, clientLimitRetryTime, cap: capReadings.cap, providerStateAdded}),
@@ -201,6 +208,9 @@ export function checkStatusLines(): void {
     [{providerStateAdded: 2, cap: capObject({monthly_byte_limit: 5000000000, monthly_used_byte_count: 1234567890})},
       "status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap"],
     [{providerStateAdded: 2, firstReadingFailed: true}, "status: connected | data this month: unavailable | data total: unavailable"],
+    [{providerStateAdded: 2, embedNotEnabled: true}, "status: connected | data this month: unavailable | data total: unavailable"],
+    [{providerStateAdded: 2, cap: capObject({monthly_byte_limit: 5000000000, monthly_used_byte_count: 5000000000, capped: true, capped_reason: "monthly"}), embedNotEnabled: true},
+      "status: connected | data this month: unavailable | data total: unavailable"],
     [{providerStateAdded: 2, cap: capObject({monthly_byte_limit: 5000000000, monthly_used_byte_count: 5000000000, capped: true, capped_reason: "monthly"})},
       "status: data cap reached, resets 2026-11-01 00:00 UTC | data this month: 5.0 GB of 5.0 GB | data total: no cap"],
     [{providerStateAdded: 2, cap: capObject({total_byte_limit: 10000000000, total_used_byte_count: 10000000000, capped: true, capped_reason: "total"})},
@@ -256,6 +266,10 @@ export function checkDataFields(): void {
   fields = dataFields(capReadings);
   check(fields.dataThisMonth === "1.0 kB of 5.0 GB", `a later failure did not keep the last value: ${fields.dataThisMonth}`);
   check(fields.dataTotal === "no cap", `a null limit with a used count shows ${fields.dataTotal}`);
+  capReadings.notEnabled();
+  fields = dataFields(capReadings);
+  check(capReadings.cap === null && fields.dataThisMonth === "unavailable" && fields.dataTotal === "unavailable",
+    "the Embed-not-enabled refusal did not clear the last reading");
 }
 
 // The cap object: null or absent limits, capped and capped_reason, an unknown
@@ -276,7 +290,46 @@ export function checkCapObject(): void {
     } catch {
       refused = true;
     }
-    check(refused, `cap object ${JSON.stringify(body)} was accepted`);
+    check(refused && !isEmbedNotEnabled(body), `cap object ${JSON.stringify(body)} was accepted`);
+  }
+  // the Embed-not-enabled refusal is no cap object, and is recognized
+  const refusal = {error: {message: "Embed isn't enabled for this network."}};
+  let refusalAccepted = true;
+  try {
+    parseCapObject(refusal);
+  } catch {
+    refusalAccepted = false;
+  }
+  check(!refusalAccepted && isEmbedNotEnabled(refusal), "the Embed-not-enabled refusal was misread");
+}
+
+// The cap read: the client JWT as the bearer; a failure rejects, and the
+// Embed-not-enabled refusal rejects with EmbedNotEnabledError.
+export async function checkCapRead(): Promise<void> {
+  const requests: {url: string; authorization: string | undefined}[] = [];
+  const answering = (status: number, body: unknown): typeof globalThis.fetch => async (input, init) => {
+    requests.push({url: String(input), authorization: (init?.headers as Record<string, string> | undefined)?.Authorization});
+    return new Response(JSON.stringify(body), {status, headers: {"content-type": "application/json"}});
+  };
+  const cap = await readDataCap({apiUrl: "http://127.0.0.1:1", clientJwt: "client.jwt.token",
+    fetchFunction: answering(200, {client_id: clientA, monthly_byte_limit: 7, capped: false})});
+  check(cap.monthlyByteLimit === 7, "a cap answer was not read");
+  check(requests[0].url === "http://127.0.0.1:1/network/client-data-cap" && requests[0].authorization === "Bearer client.jwt.token",
+    `the cap read is ${JSON.stringify(requests[0])}`);
+  const failures: [number, unknown, boolean][] = [
+    [404, {error: {message: "not found"}}, false],
+    [200, {error: {message: "no permission"}}, false],
+    [200, {error: {message: "Embed isn't enabled for this network."}}, true],
+  ];
+  for (const [status, body, embedNotEnabled] of failures) {
+    let failure: unknown = null;
+    try {
+      await readDataCap({apiUrl: "http://127.0.0.1:1", clientJwt: "client.jwt.token", fetchFunction: answering(status, body)});
+    } catch (error) {
+      failure = error;
+    }
+    check(failure !== null && (failure instanceof EmbedNotEnabledError) === embedNotEnabled,
+      `the cap answer ${status} ${JSON.stringify(body)} read as ${String(failure)}`);
   }
 }
 
@@ -550,6 +603,7 @@ export const selfTestChecks: (() => void | Promise<void>)[] = [
   checkStatusRules,
   checkDataFields,
   checkCapObject,
+  checkCapRead,
   checkClientJwtClaims,
   checkEmbedStatus,
   checkTokenFetch,

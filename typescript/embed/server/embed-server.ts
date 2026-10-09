@@ -12,6 +12,7 @@
 //   usage-all                           every capped client's cap object, one per line
 //   remove <key>                        remove the key's client and its mapping
 //   acl <key> default|isolated          set the ACL group of the key's client
+//   status                              the network's Embed state
 //   --self-test                         credential-free, no network
 //
 // Settings: URNETWORK_ROOT_JWT (an API key or a network JWT; never in an app),
@@ -53,7 +54,18 @@ const clientLimitMessage = "client limit reached: your network is at its client 
 const clientDoesNotExist = "Client does not exist.";
 const unmappedMessage = "no client is mapped for that key; run provision first";
 const aclUnsupportedMessage = "/network/client-acl-group answered 404: the server predates ACL groups";
+// The server refuses the data-cap and ACL-group routes with this message while
+// the team has not enabled Embed for the network (EMBED_CONTRACT.md, "Embed
+// enablement"); caps and groups set earlier stay enforced.
+const embedNotEnabledMessage = "Embed isn't enabled for this network.";
+// cap, usage, usage-all and acl print this for the refusal and exit 78
+const embedNotEnabledLine = "embed not enabled: Embed isn't enabled for this network; see https://ur.io/services";
+// provision prints this on stderr when the client's default ACL group stays
+// pending because Embed isn't enabled, and exits 0
+const embedPendingLine = "embed not enabled: the client's defaults stay pending until Embed is enabled; see https://ur.io/services";
+const embedUnsupportedMessage = "/network/embed answered 404: the server predates Embed enablement";
 const aclPath = "/network/client-acl-group";
+const embedPath = "/network/embed";
 const capPath = "/network/client-data-cap";
 const capsPath = "/network/client-data-caps";
 const aclGroupDefault = "default";
@@ -91,6 +103,7 @@ interface CommandContext {
   file: string;
   call: ApiCall;
   out: LineWriter;
+  err: LineWriter;
   aclGroup: string;
 }
 
@@ -118,6 +131,7 @@ function notFoundError(apiPath: string): Error {
   const route = apiPath.split("?")[0];
   if (route === aclPath) return new ExactError(aclUnsupportedMessage);
   if (route === capPath || route === capsPath) return new ExactError(`${route} answered 404: the server predates the data-cap routes`);
+  if (route === embedPath) return new ExactError(embedUnsupportedMessage);
   return new Error(`${route} answered 404`);
 }
 
@@ -158,6 +172,16 @@ function isObject(value: JsonValue | undefined): value is JsonObject {
 function answerError(answer: JsonObject): JsonObject | null {
   const error = answer.error;
   return error === undefined || error === null ? null : isObject(error) ? error : {};
+}
+
+// Whether an answer is the Embed-not-enabled refusal.
+function isEmbedNotEnabled(answer: JsonValue): boolean {
+  return isObject(answer) && answerError(answer)?.message === embedNotEnabledMessage;
+}
+
+// The Embed-not-enabled refusal is a configuration error with the exact line.
+function checkEmbedEnabled(answer: JsonValue): void {
+  if (isEmbedNotEnabled(answer)) throw new ExactConfigError(embedNotEnabledLine);
 }
 
 // The key, checked against the allocator's pattern.
@@ -334,6 +358,7 @@ function capOptions(args: readonly string[]): CapOptions {
 // Checks a cap object answer for the client.
 function checkCapObject(answer: JsonValue, client?: string): JsonObject {
   if (!isObject(answer)) throw new Error("invalid cap answer");
+  checkEmbedEnabled(answer);
   const error = answerError(answer);
   if (error !== null) throw new Error(typeof error.message === "string" ? `the cap request was refused: ${error.message}` : "the cap request was refused");
   if (client !== undefined && answer.client_id !== client) throw new Error("the cap answer is for another client");
@@ -372,8 +397,9 @@ function apiCaller(origin: string, root: string | undefined): ApiCall {
 // not exist." drop the mapping and provision a new client. A new client goes
 // into aclGroup, with a pending_acl record until the group is applied, before
 // any client JWT is written. Writes the client JWT to the file, never to the
-// output.
-async function provision(key: string, clientJwtFile: string, {file, call, out, aclGroup}: CommandContext): Promise<void> {
+// output. While Embed isn't enabled the record stays, with a line on err, and
+// a provision after the team enables Embed applies it.
+async function provision(key: string, clientJwtFile: string, {file, call, out, err, aclGroup}: CommandContext): Promise<void> {
   checkKey(key);
   if (clientJwtFile === "") throw new ConfigError("expected provision <key> <client-jwt-file>");
   const target = path.resolve(clientJwtFile);
@@ -399,26 +425,36 @@ async function provision(key: string, clientJwtFile: string, {file, call, out, a
       setAclPending(map, key, aclGroup === aclGroupIsolated);
       saveMap(file, map);
     }
+    let embedEnabled = true;
     if (map.pending_acl.includes(key)) {
       // a new client is "default": only an isolated default needs the request.
       // A failure throws with the record kept, before any client JWT is written.
-      if (aclGroup === aclGroupIsolated) await postAclGroup(call, result.client_id, aclGroupIsolated);
-      setAclPending(map, key, false);
-      saveMap(file, map);
+      if (aclGroup === aclGroupIsolated) embedEnabled = await postAclGroup(call, result.client_id, aclGroupIsolated, true);
+      // while Embed isn't enabled the record stays and the client works
+      if (embedEnabled) {
+        setAclPending(map, key, false);
+        saveMap(file, map);
+      }
     }
     writePrivate(target, result.by_client_jwt + "\n");
     out(printJson({client_id: result.client_id}));
+    if (!embedEnabled) err(embedPendingLine);
   });
 }
 
 // Sets the client's ACL group; the answer must name the client and the group.
-async function postAclGroup(call: ApiCall, client: string, group: string): Promise<void> {
+// The Embed-not-enabled refusal exits 78, or resolves false when
+// allowNotEnabled is set.
+async function postAclGroup(call: ApiCall, client: string, group: string, allowNotEnabled = false): Promise<boolean> {
   const answer = await call("POST", aclPath, JSON.stringify({client_id: client, acl_group: group}));
   if (!isObject(answer)) throw new Error("invalid ACL group answer");
+  if (allowNotEnabled && isEmbedNotEnabled(answer)) return false;
+  checkEmbedEnabled(answer);
   const error = answerError(answer);
   if (error !== null)
     throw new Error(typeof error.message === "string" ? `the ACL group request was refused: ${error.message}` : "the ACL group request was refused");
   if (answer.client_id !== client || answer.acl_group !== group) throw new Error("the API answered another client or ACL group");
+  return true;
 }
 
 // acl: set the ACL group of the key's client; prints {"client_id": ...,
@@ -461,6 +497,7 @@ async function usageAll({call, out}: CommandContext): Promise<void> {
   let cursor: string | null = null;
   while (true) {
     const page = await call("GET", `/network/client-data-caps?limit=1000${cursor === null ? "" : `&cursor=${encodeURIComponent(cursor)}`}`);
+    checkEmbedEnabled(page);
     if (!isObject(page) || answerError(page) !== null || !Array.isArray(page.clients) ||
         !(page.next_cursor === null || page.next_cursor === undefined || typeof page.next_cursor === "string")) throw new Error("invalid cap list answer");
     for (const item of page.clients) out(printJson(checkCapObject(item)));
@@ -468,6 +505,25 @@ async function usageAll({call, out}: CommandContext): Promise<void> {
     if (cursor === null || seen.has(cursor)) return;
     seen.add(cursor);
   }
+}
+
+// Whether a value is a byte count or a client count: a non-negative integer.
+function isCount(value: JsonValue | undefined): boolean {
+  return (typeof value === "number" && Number.isSafeInteger(value) && 0 <= value) || (typeof value === "bigint" && 0n <= value);
+}
+
+// status: the network's Embed state from GET /network/embed as one line,
+// "embed enabled: yes | client limit: 5000 | active clients: 1234". A refusal,
+// such as for a client JWT, is a configuration error.
+async function status({call, out}: CommandContext): Promise<void> {
+  const answer = await call("GET", embedPath);
+  if (!isObject(answer)) throw new Error("invalid Embed state answer");
+  const error = answerError(answer);
+  if (error !== null)
+    throw new ConfigError(typeof error.message === "string" ? `the Embed state request was refused: ${error.message}` : "the Embed state request was refused");
+  if (typeof answer.enabled !== "boolean" || !isCount(answer.client_limit) || !isCount(answer.active_client_count))
+    throw new Error("invalid Embed state answer");
+  out(`embed enabled: ${answer.enabled ? "yes" : "no"} | client limit: ${String(answer.client_limit)} | active clients: ${String(answer.active_client_count)}`);
 }
 
 // remove: remove the key's client, then its mapping (also when the client is
@@ -506,15 +562,16 @@ export async function runCommand(args: readonly string[], {environment = process
       "usage-all": rest.length === 0 ? context => usageAll(context) : null,
       remove: rest.length === 1 ? context => remove(rest[0], context) : null,
       acl: rest.length === 2 && aclGroups.includes(rest[1]) ? context => acl(rest[0], rest[1], context) : null,
+      status: rest.length === 0 ? context => status(context) : null,
     };
     const handler = command !== undefined && Object.hasOwn(handlers, command) ? handlers[command] : null;
-    if (!handler) throw new ConfigError("usage: embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test");
+    if (!handler) throw new ConfigError("usage: embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | status | --self-test");
     const file = environment.URNETWORK_CLIENT_MAP;
     if (!file) throw new ConfigError("set URNETWORK_CLIENT_MAP to the absolute path of this tool's private client map");
     const aclGroup = environment.URNETWORK_DEFAULT_ACL_GROUP || aclGroupIsolated;
     if (!aclGroups.includes(aclGroup)) throw new ConfigError("URNETWORK_DEFAULT_ACL_GROUP must be default or isolated");
     const apiCall = call ?? apiCaller(apiOrigin(environment.URNETWORK_API_URL || "https://api.bringyour.com"), environment.URNETWORK_ROOT_JWT);
-    await handler({file, call: apiCall, out, aclGroup});
+    await handler({file, call: apiCall, out, err, aclGroup});
     return exitSuccess;
   } catch (error) {
     // one line, never a token: messages here never include the root credential or a JWT
@@ -739,6 +796,66 @@ async function selfTest(): Promise<void> {
     assert.equal(await isolated(["remove", "user:noor"]), exitSuccess);
     assert.deepEqual(loadMap(aclFile).pending_acl, []);
 
+    // Embed not enabled: cap, usage, usage-all and acl exit 78 with the exact
+    // line; provision still provisions and writes the client JWT, keeps the
+    // default group pending with the exact stderr line, and a provision after
+    // the team enables Embed applies it
+    const embedFile = path.join(directory, "embed.json");
+    const embedRun = async (args: string[]): Promise<{code: number; out: string[]; err: string[]}> => {
+      const lines: {out: string[]; err: string[]} = {out: [], err: []};
+      const code = await runCommand(args, {environment: {URNETWORK_CLIENT_MAP: embedFile, URNETWORK_ROOT_JWT: root}, call,
+        out: line => lines.out.push(line), err: line => lines.err.push(line)});
+      return {code, ...lines};
+    };
+    const refusal = JSON.stringify({error: {message: embedNotEnabledMessage}});
+    const pia = "88888888-8888-8888-8888-888888888888";
+    answers = [JSON.stringify({client_id: pia, by_client_jwt: jwt(pia)}), JSON.stringify({client_id: pia, acl_group: aclGroupIsolated})];
+    assert.equal((await embedRun(["provision", "user:pia", path.join(directory, "pia.jwt")])).code, exitSuccess);
+    for (const args of [["cap", "user:pia", "--monthly", "1"], ["usage", "user:pia"], ["usage-all"], ["acl", "user:pia", aclGroupIsolated]]) {
+      answers = [refusal];
+      assert.deepEqual(await embedRun(args), {code: exitConfig, out: [], err: [embedNotEnabledLine]}, args.join(" "));
+    }
+    const quinn = "99999999-9999-9999-9999-999999999999";
+    const quinnJwt = path.join(directory, "quinn.jwt");
+    answers = [JSON.stringify({client_id: quinn, by_client_jwt: jwt(quinn)}), refusal];
+    assert.deepEqual(await embedRun(["provision", "user:quinn", quinnJwt]), {code: exitSuccess, out: [`{"client_id":"${quinn}"}`], err: [embedPendingLine]});
+    assert.equal(lastCall().apiPath, aclPath);
+    assert.equal(fs.readFileSync(quinnJwt, "utf8"), jwt(quinn) + "\n");
+    assert.deepEqual(loadMap(embedFile).pending_acl, ["user:quinn"]);
+    answers = [JSON.stringify({client_id: quinn, by_client_jwt: jwt(quinn)}), JSON.stringify({client_id: quinn, acl_group: aclGroupIsolated})];
+    assert.deepEqual(await embedRun(["provision", "user:quinn", quinnJwt]), {code: exitSuccess, out: [`{"client_id":"${quinn}"}`], err: []});
+    assert.deepEqual(JSON.parse(lastCall().body ?? "null"), {client_id: quinn, acl_group: aclGroupIsolated});
+    assert.deepEqual(loadMap(embedFile).pending_acl, []);
+
+    // status: GET /network/embed printed as one line for an enabled and a not
+    // enabled network; a refusal is 78; a server without the route and an
+    // invalid answer are 1
+    const states: [JsonObject, string][] = [
+      [{enabled: true, client_limit: 5000, active_client_count: 1234}, "embed enabled: yes | client limit: 5000 | active clients: 1234"],
+      [{enabled: false, client_limit: 100, active_client_count: 0}, "embed enabled: no | client limit: 100 | active clients: 0"],
+    ];
+    for (const [answer, line] of states) {
+      answers = [JSON.stringify(answer)];
+      assert.deepEqual(await embedRun(["status"]), {code: exitSuccess, out: [line], err: []});
+      assert.deepEqual(lastCall(), {method: "GET", apiPath: embedPath, body: undefined});
+    }
+    answers = [JSON.stringify({error: {message: "Invalid credential."}})];
+    const refusedStatus = await embedRun(["status"]);
+    assert.ok(refusedStatus.code === exitConfig && refusedStatus.out.length === 0 && refusedStatus.err.length === 1 &&
+      refusedStatus.err[0].includes("Invalid credential."), JSON.stringify(refusedStatus));
+    answers = [new ConfigError("the URnetwork API refused the root credential")];
+    assert.equal((await embedRun(["status"])).code, exitConfig);
+    answers = [notFoundError(embedPath)];
+    assert.deepEqual(await embedRun(["status"]), {code: exitFailure, out: [], err: [embedUnsupportedMessage]});
+    const invalidStates: JsonObject[] = [{enabled: true}, {enabled: "yes", client_limit: 1, active_client_count: 1}, {enabled: true, client_limit: -1, active_client_count: 0},
+      {enabled: true, client_limit: 1.5, active_client_count: 0}, {enabled: 1, client_limit: 1, active_client_count: 1}, {enabled: true, client_limit: "1", active_client_count: 1}];
+    for (const answer of invalidStates) {
+      answers = [JSON.stringify(answer)];
+      const result = await embedRun(["status"]);
+      assert.ok(result.code === exitFailure && result.out.length === 0, JSON.stringify(answer));
+    }
+    assert.equal((await embedRun(["status", "extra"])).code, exitConfig);
+
     // a pending_acl that is not a list of distinct mapped keys is refused untouched
     const pendingFile = path.join(directory, "pending.json");
     for (const map of [
@@ -808,6 +925,7 @@ async function selfTest(): Promise<void> {
         [["usage", "user:ivan"], `${capPath} answered 404: the server predates the data-cap routes`],
         [["usage-all"], `${capsPath} answered 404: the server predates the data-cap routes`],
         [["acl", "user:ivan", "isolated"], aclUnsupportedMessage],
+        [["status"], embedUnsupportedMessage],
       ];
       for (const [args, line] of olderCases) {
         const lines: string[] = [];

@@ -122,14 +122,21 @@ interface StandInBackend {
 // A stand-in backend on loopback: the token server's POST
 // /urnetwork/client-token and the API's GET /network/client-data-cap, which
 // answer the given replies. Records the requests.
-async function standInBackend({tokenReply, capReply}: {tokenReply: StandInReply; capReply: StandInReply}): Promise<StandInBackend> {
+async function standInBackend({tokenReply, capReply, capReplies = capReply === undefined ? [] : [capReply]}:
+  {tokenReply: StandInReply; capReply?: StandInReply; capReplies?: StandInReply[]}): Promise<StandInBackend> {
   const requests: BackendRequest[] = [];
+  // the k-th cap read answers the k-th of capReplies, then the last one
+  let capReadCount = 0;
   const server = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
       requests.push({method: request.method, url: request.url, authorization: request.headers.authorization, body: Buffer.concat(chunks).toString("utf8")});
-      const reply = request.url === "/urnetwork/client-token" ? tokenReply : capReply;
+      let reply = tokenReply;
+      if (request.url !== "/urnetwork/client-token") {
+        reply = capReplies[Math.min(capReadCount, capReplies.length - 1)];
+        capReadCount += 1;
+      }
       response.statusCode = reply.status;
       response.setHeader("Content-Type", "application/json");
       response.end(reply.body);
@@ -324,6 +331,42 @@ test("a run with the token server fetches the client JWT, shows the caps and exi
     // the token server's data_cap is the first reading: no cap read at start
     assert.equal(backend.requests.filter(request => request.url === "/network/client-data-cap").length, 0);
     assert.ok(!output.includes(demoSession));
+  } finally {
+    await backend.close();
+    await installation.remove();
+  }
+});
+
+test("the Embed-not-enabled refusal clears the cap reading of a run", {skip: process.platform === "win32"}, async () => {
+  const installation = await fakeInstallation();
+  const backend = await standInBackend({
+    tokenReply: {status: 500, body: "{}"},
+    capReplies: [
+      {status: 200, body: JSON.stringify({client_id: clientA, monthly_byte_limit: 5000000000, monthly_used_byte_count: 5000000000, capped: true, capped_reason: "monthly"})},
+      {status: 200, body: JSON.stringify({error: {message: "Embed isn't enabled for this network."}})},
+    ],
+  });
+  try {
+    const {lines, log} = collector();
+    const environment = {
+      ...process.env,
+      URNETWORK_EMBED_STATE_DIR: installation.stateDir,
+      URNETWORK_COMPANION_PATH: installation.companionPath,
+      URNETWORK_API_URL: backend.url,
+      // the contract status changes at the second read, which reads the caps again
+      FAKE_EMBED_STATUSES: JSON.stringify([
+        embedStatus({providerStateAdded: 3}),
+        embedStatus({providerStateAdded: 3, contractStatus: {InsufficientBalance: false, NoPermission: true, Premium: false}}),
+      ]),
+      FAKE_EXIT_CODE: "1",
+      FAKE_EXIT_AFTER: "5",
+    };
+    assert.equal(await run([], {environment, log, error: log}), 1);
+    // the reading shows until the refusal clears it, unlike a failed read
+    const capped = lines.indexOf("status: data cap reached | data this month: 5.0 GB of 5.0 GB | data total: no cap");
+    const cleared = lines.indexOf("status: connected | data this month: unavailable | data total: unavailable");
+    assert.ok(0 <= capped && capped < cleared, lines.join("\n"));
+    assert.equal(backend.requests.filter(request => request.url === "/network/client-data-cap").length, 2);
   } finally {
     await backend.close();
     await installation.remove();

@@ -2,9 +2,10 @@
 // /network/client-data-cap with the client JWT reads this client's cap object.
 // The app reads it at start, every 5 minutes and within 5 seconds of a change
 // in the device's contract status. A server without the cap routes answers
-// 404, which counts as a failed reading.
+// 404, which counts as a failed reading. The Embed-not-enabled refusal clears
+// the last reading.
 
-import {type CapObject, parseCapObject} from "./status.ts";
+import {type CapObject, isEmbedNotEnabled, parseCapObject} from "./status.ts";
 import {ConfigurationError} from "./state.ts";
 import type {FetchFunction} from "./token.ts";
 
@@ -38,9 +39,14 @@ export function apiOrigin(url: string = defaultApiUrl): string {
   return parsed.origin;
 }
 
+// The cap read answered the Embed-not-enabled refusal (EMBED_CONTRACT.md,
+// "Embed enablement"), which clears the last reading.
+export class EmbedNotEnabledError extends Error {}
+
 // Reads this client's cap object with its client JWT. Resolves with the parsed
 // cap object; rejects for any failure, including a 404 from a server without
-// the cap routes.
+// the cap routes, and with EmbedNotEnabledError for the Embed-not-enabled
+// refusal.
 export async function readDataCap({apiUrl, clientJwt, fetchFunction = globalThis.fetch}: ReadDataCapOptions): Promise<CapObject> {
   const response = await fetchFunction(`${apiOrigin(apiUrl)}/network/client-data-cap`, {
     headers: {Authorization: `Bearer ${clientJwt}`},
@@ -51,5 +57,9 @@ export async function readDataCap({apiUrl, clientJwt, fetchFunction = globalThis
   if (!response.ok) {
     throw new Error(`the cap read answered HTTP ${response.status}`);
   }
-  return parseCapObject(await response.json());
+  const body: unknown = await response.json();
+  if (isEmbedNotEnabled(body)) {
+    throw new EmbedNotEnabledError("Embed isn't enabled for this network.");
+  }
+  return parseCapObject(body);
 }

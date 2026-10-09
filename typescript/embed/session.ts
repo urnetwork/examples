@@ -6,7 +6,7 @@
 
 import {randomBytes} from "node:crypto";
 import {setTimeout as sleep} from "node:timers/promises";
-import {apiOrigin, defaultApiUrl, readDataCap} from "./caps.ts";
+import {EmbedNotEnabledError, apiOrigin, defaultApiUrl, readDataCap} from "./caps.ts";
 import {type CompanionExit, CompanionProcess, type Environment, companionEnvironment, freeLoopbackAddress, readEmbedStatus} from "./companion.ts";
 import {checkStateDir, loadClientJwt, loadOrCreateInstanceId} from "./state.ts";
 import {type CapObject, CapReadings, type EmbedStatus, type StatusFields, dataChecking, dataFields, statusLine, statusText} from "./status.ts";
@@ -171,8 +171,14 @@ export class EmbedSession {
       try {
         const {clientJwt} = await loadClientJwt(this.#stateDir);
         this.#capReadings.succeeded(await readDataCap({apiUrl: this.#apiUrl, clientJwt, fetchFunction: this.#fetchFunction}));
-      } catch {
-        this.#capReadings.failed();
+      } catch (error) {
+        // the Embed-not-enabled refusal clears the last reading; another
+        // failure keeps it
+        if (error instanceof EmbedNotEnabledError) {
+          this.#capReadings.notEnabled();
+        } else {
+          this.#capReadings.failed();
+        }
       } finally {
         this.#capSync = null;
       }
