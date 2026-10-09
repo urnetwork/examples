@@ -90,6 +90,13 @@ final class SelfTest {
     return capReadings;
   }
 
+  /** Cap readings after the given readings, then the Embed-not-enabled refusal. */
+  private static Caps.CapReadings notEnabled(Caps.DataCap... readings) {
+    Caps.CapReadings capReadings = readings(readings);
+    capReadings.recordEmbedNotEnabled();
+    return capReadings;
+  }
+
   /** Decimal units, one decimal, ties to even on the exact integer, the next unit at 1000.0. */
   private static void checkFormatByteCount() {
     Object[][] cases = {
@@ -161,6 +168,11 @@ final class SelfTest {
          "status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap"},
         {line(none, 0, readings((Caps.DataCap)null), 1),
          "status: connected | data this month: unavailable | data total: unavailable"},
+        {line(none, 0, notEnabled(), 1),
+         "status: connected | data this month: unavailable | data total: unavailable"},
+        {line(none, 0,
+              notEnabled(cap(5000000000L, 5000000000L, null, 0, true, "monthly", "2026-11-01T00:00:00Z")), 1),
+         "status: connected | data this month: unavailable | data total: unavailable"},
         {line(none, 0,
               readings(cap(5000000000L, 5000000000L, null, 0, true, "monthly", "2026-11-01T00:00:00Z")), 3),
          "status: data cap reached, resets 2026-11-01 00:00 UTC | data this month: 5.0 GB of 5.0 GB | data total: no cap"},
@@ -225,6 +237,11 @@ final class SelfTest {
     expect(EmbedStatus.dataField(readings(cap(null, 0, 10000000000L, 1000, false, "", "")), false)
                .equals("1.0 kB of 10.0 GB"),
            "the total field is wrong");
+    // the Embed-not-enabled refusal clears the last reading
+    Caps.CapReadings cleared = notEnabled(good);
+    expect(cleared.latest() == null && EmbedStatus.dataField(cleared, true).equals("unavailable") &&
+           EmbedStatus.dataField(cleared, false).equals("unavailable"),
+           "the Embed-not-enabled refusal does not clear the last reading");
   }
 
   /** The cap object parsing. */
@@ -257,8 +274,12 @@ final class SelfTest {
         "{\"capped_reason\":7}",
     };
     for (String text : invalid) {
-      expect(Caps.DataCap.parse(text) == null, "invalid cap object " + text + " parsed");
+      expect(Caps.DataCap.parse(text) == null && !Caps.isEmbedNotEnabled(text), "invalid cap object " + text + " parsed");
     }
+    // the Embed-not-enabled refusal is no cap object, and is recognized
+    String refusal = "{\"error\":{\"message\":\"Embed isn't enabled for this network.\"}}";
+    expect(Caps.DataCap.parse(refusal) == null && Caps.isEmbedNotEnabled(refusal),
+           "the Embed-not-enabled refusal is misread");
   }
 
   /** An unsigned JWT with the given claims: the app checks the shape and the client_id claim. */
@@ -415,21 +436,30 @@ final class SelfTest {
     return Token.fetchClientJwt(TOKEN_SERVER, DEMO_SESSION, INSTANCE_ID, stateDir, standIn);
   }
 
-  /** The cap read presents the client JWT and treats any failure as no reading. */
+  /**
+   * The cap read presents the client JWT and treats any failure as no reading; the
+   * Embed-not-enabled refusal is marked.
+   */
   private static void checkCapRead() {
     String token = jwt(Map.of("client_id", CLIENT_ID));
     StandIn ok = new StandIn(200, "{\"monthly_byte_limit\":5,\"capped\":false,\"capped_reason\":\"\"}");
-    Caps.DataCap read = Caps.read(API_ORIGIN, token, ok);
-    expect(read != null && read.monthlyByteLimit() == 5, "a cap answer is not read");
+    Caps.CapRead read = Caps.read(API_ORIGIN, token, ok);
+    expect(read.cap() != null && read.cap().monthlyByteLimit() == 5 && !read.embedNotEnabled(),
+           "a cap answer is not read");
     expect(ok.method.equals("GET") && ok.uri.equals("https://api.bringyour.com/network/client-data-cap") &&
            ok.bearer.equals(token) && ok.jsonBody == null,
            "the cap read is " + ok.method + " " + ok.uri);
-    expect(Caps.read(API_ORIGIN, token, new StandIn(404, "404 page not found")) == null,
+    Caps.CapRead failed = new Caps.CapRead(null, false);
+    expect(Caps.read(API_ORIGIN, token, new StandIn(404, "404 page not found")).equals(failed),
            "a server without the cap routes is a reading");
-    expect(Caps.read(API_ORIGIN, token, new StandIn(200, "{\"error\":{\"message\":\"denied\"}}")) == null,
+    expect(Caps.read(API_ORIGIN, token, new StandIn(200, "{\"error\":{\"message\":\"denied\"}}")).equals(failed),
            "an error answer is a reading");
-    expect(Caps.read(API_ORIGIN, token, new StandIn(200, "", true)) == null,
+    expect(Caps.read(API_ORIGIN, token, new StandIn(200, "", true)).equals(failed),
            "an unreachable API is a reading");
+    expect(Caps.read(API_ORIGIN, token,
+                     new StandIn(200, "{\"error\":{\"message\":\"Embed isn't enabled for this network.\"}}"))
+               .equals(new Caps.CapRead(null, true)),
+           "the Embed-not-enabled refusal is not marked");
   }
 
   /** The state directory: private files, atomic replacement, one instance id, no symlinks. */

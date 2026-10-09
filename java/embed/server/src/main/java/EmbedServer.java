@@ -2,7 +2,8 @@
 // tools"): the integration allocator (../../integration/server) extended with
 // what a backend needs to embed URnetwork. It provisions one client per user
 // installation, sets and reads that client's data caps, reads every capped
-// client of the network, removes a client, and sets a client's ACL group.
+// client of the network, removes a client, sets a client's ACL group, and
+// reads the network's Embed state.
 // Your service authenticates its user first and supplies the key internally:
 // never take a key, a client ID or a cap from a raw request field.
 //
@@ -12,6 +13,7 @@
 //   usage-all
 //   remove <key>
 //   acl <key> default|isolated
+//   status
 //   --self-test
 //
 // <key> is user:<service-user-id> or user:<service-user-id>:<installation-id>.
@@ -80,10 +82,23 @@ public final class EmbedServer {
   static final String CAPS_PATH = "/network/client-data-caps";
   static final String REMOVE_PATH = "/network/remove-client";
   static final String ACL_PATH = "/network/client-acl-group";
+  static final String EMBED_PATH = "/network/embed";
   static final String UNMAPPED_MESSAGE = "no client is mapped for that key; run provision first";
   static final String ACL_UNSUPPORTED_MESSAGE = "/network/client-acl-group answered 404: the server predates ACL groups";
+  // The server refuses the data-cap and ACL-group routes with this message while the team has not
+  // enabled Embed for the network (EMBED_CONTRACT.md, "Embed enablement"); caps and groups set
+  // earlier stay enforced.
+  static final String EMBED_NOT_ENABLED_MESSAGE = "Embed isn't enabled for this network.";
+  // cap, usage, usage-all and acl print this for the refusal and exit 78
+  static final String EMBED_NOT_ENABLED_LINE =
+      "embed not enabled: Embed isn't enabled for this network; see https://ur.io/services";
+  // provision prints this on stderr when the client's default ACL group stays pending because
+  // Embed isn't enabled, and exits 0
+  static final String EMBED_PENDING_LINE =
+      "embed not enabled: the client's defaults stay pending until Embed is enabled; see https://ur.io/services";
+  static final String EMBED_UNSUPPORTED_MESSAGE = "/network/embed answered 404: the server predates Embed enablement";
   static final String USAGE =
-      "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test";
+      "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | status | --self-test";
 
   static final Pattern KEY = Pattern.compile("user:[A-Za-z0-9][A-Za-z0-9_.:@-]{0,122}");
   static final Pattern ID = Pattern.compile("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}");
@@ -175,7 +190,7 @@ public final class EmbedServer {
           if (args.length != 3) {
             throw config(USAGE);
           }
-          provision(checkKey(args[1]), checkJwtFile(args[2]), settings(env, transport, true), out);
+          provision(checkKey(args[1]), checkJwtFile(args[2]), settings(env, transport, true), out, err);
         }
         case "cap" -> {
           if (args.length < 2) {
@@ -208,6 +223,12 @@ public final class EmbedServer {
           }
           acl(checkKey(args[1]), args[2], settings(env, transport, true), out);
         }
+        case "status" -> {
+          if (args.length != 1) {
+            throw config(USAGE);
+          }
+          status(settings(env, transport, false), out);
+        }
         default -> throw config(USAGE);
       }
       return EXIT_OK;
@@ -234,9 +255,10 @@ public final class EmbedServer {
    * Reissues the key's client, or provisions a new one, and writes the client JWT to jwtFile. A
    * reissue that answers "Client does not exist." (a client deactivated after 30 days without
    * connecting) drops the mapping and provisions a new client. Prints {"client_id": ...}, never the
-   * token.
+   * token. While Embed isn't enabled the default ACL group stays pending, with a line on err, and a
+   * provision after the team enables Embed applies it.
    */
-  private static void provision(String key, Path jwtFile, Settings settings, PrintStream out)
+  private static void provision(String key, Path jwtFile, Settings settings, PrintStream out, PrintStream err)
       throws ToolException, IOException {
     Path mapFile = settings.mapFile();
     Path lock = takeLock(mapFile);
@@ -272,17 +294,24 @@ public final class EmbedServer {
         }
         saveMap(mapFile, map);
       }
+      boolean embedEnabled = true;
       if (aclPending(map, key)) {
         // a new client is "default": only an isolated default needs the request. A failure throws
         // with the record kept, before any client JWT is written.
         if (settings.aclGroup().equals("isolated")) {
-          postAclGroup(settings, result[0], "isolated");
+          embedEnabled = postAclGroup(settings, result[0], "isolated", true);
         }
-        setAclPending(map, key, false);
-        saveMap(mapFile, map);
+        // while Embed isn't enabled the record stays and the client works
+        if (embedEnabled) {
+          setAclPending(map, key, false);
+          saveMap(mapFile, map);
+        }
       }
       writePrivate(jwtFile, (result[1] + "\n").getBytes(StandardCharsets.UTF_8));
       out.println(JSON.writeValueAsString(JSON.createObjectNode().put("client_id", result[0])));
+      if (!embedEnabled) {
+        err.println(EMBED_PENDING_LINE);
+      }
     } finally {
       Files.deleteIfExists(lock);
     }
@@ -376,7 +405,7 @@ public final class EmbedServer {
     try {
       ObjectNode map = loadMap(mapFile);
       String clientId = mappedClient(map, key);
-      postAclGroup(settings, clientId, group);
+      postAclGroup(settings, clientId, group, false);
       if (aclPending(map, key)) {
         setAclPending(map, key, false);
         saveMap(mapFile, map);
@@ -387,14 +416,48 @@ public final class EmbedServer {
     }
   }
 
-  /** Posts the client's ACL group; the answer must name the client and the group. */
-  private static void postAclGroup(Settings settings, String clientId, String group) throws ToolException, IOException {
+  /**
+   * Posts the client's ACL group; the answer must name the client and the group. The
+   * Embed-not-enabled refusal exits 78, or returns false when allowNotEnabled is set.
+   */
+  private static boolean postAclGroup(Settings settings, String clientId, String group, boolean allowNotEnabled)
+      throws ToolException, IOException {
     ObjectNode answer = call(settings, "POST", ACL_PATH,
                              JSON.createObjectNode().put("client_id", clientId).put("acl_group", group));
+    if (allowNotEnabled && embedNotEnabled(answer)) {
+      return false;
+    }
     checkRefusal(answer);
     if (!clientId.equals(answer.path("client_id").textValue()) || !group.equals(answer.path("acl_group").textValue())) {
       throw new ToolException(EXIT_FAILURE, "the URnetwork API answered another client or ACL group");
     }
+    return true;
+  }
+
+  /**
+   * Prints the network's Embed state from GET /network/embed as one line, "embed enabled: yes |
+   * client limit: 5000 | active clients: 1234". A refusal, such as for a client JWT, is a
+   * configuration error (78).
+   */
+  private static void status(Settings settings, PrintStream out) throws ToolException, IOException {
+    ObjectNode answer = call(settings, "GET", EMBED_PATH, null);
+    JsonNode error = answer.get("error");
+    if (error != null && !error.isNull()) {
+      throw config("the URnetwork API refused the request: " + printable(Objects.toString(error.path("message").textValue(), "")));
+    }
+    JsonNode enabled = answer.path("enabled");
+    long clientLimit = count(answer.path("client_limit"));
+    long activeClientCount = count(answer.path("active_client_count"));
+    if (!enabled.isBoolean() || clientLimit < 0 || activeClientCount < 0) {
+      throw new ToolException(EXIT_FAILURE, "the URnetwork API answered network/embed with something invalid");
+    }
+    out.println("embed enabled: " + (enabled.booleanValue() ? "yes" : "no") + " | client limit: " + clientLimit +
+                " | active clients: " + activeClientCount);
+  }
+
+  /** A non-negative JSON integer that fits a long, or -1. */
+  private static long count(JsonNode node) {
+    return node.isIntegralNumber() && node.canConvertToLong() && 0 <= node.longValue() ? node.longValue() : -1;
   }
 
   /** Whether key owes its default ACL group: the map's pending_acl. */
@@ -548,12 +611,23 @@ public final class EmbedServer {
     return JSON.writeValueAsString(answer);
   }
 
-  /** Fails when an answer carries a refusal. */
+  /**
+   * Fails when an answer carries a refusal: the Embed-not-enabled refusal is a configuration error
+   * (78) with the fixed line, another one fails (1).
+   */
   private static void checkRefusal(ObjectNode answer) throws ToolException {
+    if (embedNotEnabled(answer)) {
+      throw config(EMBED_NOT_ENABLED_LINE);
+    }
     JsonNode error = answer.get("error");
     if (error != null && !error.isNull()) {
       throw refused(Objects.toString(error.path("message").textValue(), ""));
     }
+  }
+
+  /** Whether an answer is the Embed-not-enabled refusal. */
+  private static boolean embedNotEnabled(ObjectNode answer) {
+    return EMBED_NOT_ENABLED_MESSAGE.equals(answer.path("error").path("message").textValue());
   }
 
   /** The client mapped to key; an unmapped key is a configuration error. */
@@ -660,6 +734,7 @@ public final class EmbedServer {
       // a server that predates a route (EMBED_CONTRACT.md, "Backend tools")
       String route = pathAndQuery.split("\\?", 2)[0];
       throw new ToolException(EXIT_FAILURE, route.equals(ACL_PATH) ? ACL_UNSUPPORTED_MESSAGE
+                                            : route.equals(EMBED_PATH) ? EMBED_UNSUPPORTED_MESSAGE
                                             : route.startsWith(CAP_PATH) ? route + " answered 404: the server predates the data-cap routes"
                                                                          : route + " answered 404");
     }

@@ -97,7 +97,7 @@ final class EmbedSession {
   // the cap readings so far, and the cap read in flight
   private String clientJwt;
   private final Caps.CapReadings capReadings = new Caps.CapReadings();
-  private Future<Caps.DataCap> capRead;
+  private Future<Caps.CapRead> capRead;
   private long nextCapReadTime;
 
   /** A session that has not opened anything yet. */
@@ -241,16 +241,21 @@ final class EmbedSession {
   private void syncCaps() {
     long now = System.nanoTime();
     if (capRead != null && capRead.isDone()) {
-      Caps.DataCap reading;
+      Caps.CapRead read;
       try {
-        reading = capRead.get();
+        read = capRead.get();
       } catch (ExecutionException e) {
-        reading = null;
+        read = new Caps.CapRead(null, false);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
-        reading = null;
+        read = new Caps.CapRead(null, false);
       }
-      capReadings.record(reading);
+      // the Embed-not-enabled refusal clears the last reading; another failure keeps it
+      if (read.embedNotEnabled()) {
+        capReadings.recordEmbedNotEnabled();
+      } else {
+        capReadings.record(read.cap());
+      }
       capRead = null;
     }
     if (capRead == null && 0 <= now - nextCapReadTime) {

@@ -64,6 +64,11 @@ final class SelfTest {
     boolean aclUnsupported;
     // when set, the ACL route answers the other group
     boolean aclMismatch;
+    // when set, Embed isn't enabled for the network: the data-cap and ACL-group routes answer the
+    // refusal and GET /network/embed answers enabled false
+    boolean embedDisabled;
+    // when set, GET /network/embed answers this body
+    String embedAnswer;
     private int nextClient = 1;
     private int generation;
 
@@ -107,6 +112,15 @@ final class SelfTest {
         }
         String id = id(nextClient++);
         return issue(id, claimOverride != null ? claimOverride : id);
+      }
+      if (embedDisabled && (path.startsWith(EmbedServer.CAP_PATH) || path.equals(EmbedServer.ACL_PATH))) {
+        return new EmbedServer.ApiResponse(200, "{\"error\":{\"message\":\"Embed isn't enabled for this network.\"}}");
+      }
+      if (request.method().equals("GET") && path.equals(EmbedServer.EMBED_PATH)) {
+        return new EmbedServer.ApiResponse(200, embedAnswer != null ? embedAnswer
+                                                                    : EmbedServer.JSON.createObjectNode()
+                                                                          .put("enabled", !embedDisabled).put("client_limit", 100)
+                                                                          .put("active_client_count", nextClient - 1).toString());
       }
       if (request.method().equals("POST") && path.equals(EmbedServer.CAP_PATH)) {
         return new EmbedServer.ApiResponse(200, capAnswer != null ? capAnswer : cap(body.path("client_id").asText()));
@@ -178,6 +192,8 @@ final class SelfTest {
       checkRemove(dir);
       checkMap(dir);
       checkAclGroups(dir);
+      checkEmbedNotEnabled(dir);
+      checkEmbedStatus(dir);
       checkFailureTexts(dir);
       checkNothingSecretPrinted();
     } finally {
@@ -311,7 +327,7 @@ final class SelfTest {
         {"cap", "user:a", "--monthly", "9223372036854775808"}, {"cap", "user:a", "--monthly", "1", "--monthly", "2"},
         {"cap", "user:a", "--foo"}, {"cap", "user:a", "--monthly"}, {"cap", "user:a", "--reset-total", "--reset-total"},
         {"acl"}, {"acl", "user:a"}, {"acl", "user:a", "other"}, {"acl", "user:a", "Default"},
-        {"acl", "user:a", "default", "extra"}, {"acl", "alice", "default"},
+        {"acl", "user:a", "default", "extra"}, {"acl", "alice", "default"}, {"status", "extra"},
     };
     for (String[] args : usage) {
       expect(exec(api, env, args).exit() == 78, "the arguments " + String.join(" ", args) + " do not exit 78");
@@ -559,6 +575,92 @@ final class SelfTest {
       expect(exec(refused, env(dir, "pending.json"), "provision", "user:x", dir.resolve("x.jwt").toString()).exit() == 78 &&
              Files.readString(map).equals(text) && refused.requests.isEmpty(),
              "the map " + text + " is accepted");
+    }
+  }
+
+  /**
+   * The Embed-not-enabled refusal: cap, usage, usage-all and acl exit 78 with the fixed line;
+   * provision still provisions and writes the client JWT, keeps the default group pending with the
+   * fixed stderr line, and a provision after the team enables Embed applies it.
+   */
+  private static void checkEmbedNotEnabled(Path dir) throws IOException, EmbedServer.ToolException {
+    StandInApi api = new StandInApi();
+    Function<String, String> isolated = env(dir, "embed.json", null);
+    expect(exec(api, isolated, "provision", "user:pia", dir.resolve("pia.jwt").toString()).exit() == 0,
+           "provision before the refusal failed");
+    api.embedDisabled = true;
+    String[][] refusedCommands = {
+        {"cap", "user:pia", "--monthly", "1"}, {"usage", "user:pia"}, {"usage-all"}, {"acl", "user:pia", "isolated"},
+    };
+    for (String[] args : refusedCommands) {
+      Run refused = exec(api, isolated, args);
+      expect(refused.exit() == 78 && refused.out().isEmpty() &&
+                 refused.err().equals(EmbedServer.EMBED_NOT_ENABLED_LINE + System.lineSeparator()),
+             args[0] + " while Embed isn't enabled answers " + refused.exit() + ": " + refused.err());
+    }
+    Path quinnJwt = dir.resolve("quinn.jwt");
+    Run run = exec(api, isolated, "provision", "user:quinn", quinnJwt.toString());
+    String quinn = EmbedServer.loadMap(dir.resolve("embed.json")).path("clients").path("user:quinn").asText();
+    expect(run.exit() == 0 && run.out().trim().equals("{\"client_id\":\"" + quinn + "\"}") &&
+               run.err().equals(EmbedServer.EMBED_PENDING_LINE + System.lineSeparator()),
+           "provision while Embed isn't enabled answers " + run.exit() + ": " + run.out() + run.err());
+    expect(Files.readString(quinnJwt).equals(api.issuedJwts.get(api.issuedJwts.size() - 1) + "\n") &&
+               pendingAcl(dir, "embed.json").equals(List.of("user:quinn")),
+           "provision while Embed isn't enabled wrote no client JWT or dropped the record");
+    api.embedDisabled = false;
+    run = exec(api, isolated, "provision", "user:quinn", quinnJwt.toString());
+    expect(run.exit() == 0 && run.err().isEmpty() && pendingAcl(dir, "embed.json").isEmpty() &&
+               "isolated".equals(api.aclGroups.get(quinn)),
+           "provision after Embed was enabled does not apply the group: " + run.err());
+  }
+
+  /**
+   * The status command: GET /network/embed with the root credential, printed as the fixed line for
+   * an enabled and a not enabled network; a refusal exits 78; a server without the route and an
+   * invalid answer exit 1.
+   */
+  private static void checkEmbedStatus(Path dir) {
+    Function<String, String> env = env(dir, "status.json");
+    StandInApi api = new StandInApi();
+    api.embedAnswer = "{\"enabled\":true,\"client_limit\":5000,\"active_client_count\":1234}";
+    Run run = exec(api, env, "status");
+    expect(run.exit() == 0 &&
+               run.out().equals("embed enabled: yes | client limit: 5000 | active clients: 1234" + System.lineSeparator()) &&
+               run.err().isEmpty(),
+           "status printed " + run.out() + run.err());
+    expect(api.requests.size() == 1 && api.requests.get(0).method().equals("GET") &&
+               api.requests.get(0).pathAndQuery().equals(EmbedServer.EMBED_PATH) && api.requests.get(0).body() == null,
+           "the status request is not GET /network/embed");
+    StandInApi disabled = new StandInApi();
+    disabled.embedDisabled = true;
+    run = exec(disabled, env, "status");
+    expect(run.exit() == 0 &&
+               run.out().equals("embed enabled: no | client limit: 100 | active clients: 0" + System.lineSeparator()),
+           "status while Embed isn't enabled printed " + run.out() + run.err());
+    StandInApi refusing = new StandInApi();
+    refusing.embedAnswer = "{\"error\":{\"message\":\"Invalid credential.\"}}";
+    run = exec(refusing, env, "status");
+    expect(run.exit() == 78 && run.out().isEmpty() && run.err().contains("Invalid credential.") &&
+               run.err().chars().filter(c -> c == '\n').count() == 1,
+           "status on a refusal answers " + run.exit() + ": " + run.err());
+    StandInApi unauthorized = new StandInApi();
+    unauthorized.status = 401;
+    expect(exec(unauthorized, env, "status").exit() == 78, "status with a refused root credential");
+    StandInApi older = new StandInApi();
+    older.status = 404;
+    run = exec(older, env, "status");
+    expect(run.exit() == 1 && run.err().trim().equals(EmbedServer.EMBED_UNSUPPORTED_MESSAGE),
+           "status on a server without Embed enablement answers " + run.exit() + ": " + run.err());
+    for (String invalid : List.of(
+             "{\"enabled\":true}", "{\"enabled\":\"yes\",\"client_limit\":1,\"active_client_count\":1}",
+             "{\"enabled\":true,\"client_limit\":-1,\"active_client_count\":0}",
+             "{\"enabled\":true,\"client_limit\":1.5,\"active_client_count\":0}",
+             "{\"enabled\":1,\"client_limit\":1,\"active_client_count\":1}",
+             "{\"enabled\":true,\"client_limit\":\"1\",\"active_client_count\":1}")) {
+      StandInApi answering = new StandInApi();
+      answering.embedAnswer = invalid;
+      run = exec(answering, env, "status");
+      expect(run.exit() == 1 && run.out().isEmpty(), "status accepted " + invalid);
     }
   }
 

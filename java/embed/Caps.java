@@ -11,6 +11,9 @@ import java.util.Map;
 /** The cap object, the readings so far and the cap read. */
 final class Caps {
   static final String CAP_PATH = "/network/client-data-cap";
+  // The server refuses the cap read with this message while the team has not enabled Embed for
+  // the network (EMBED_CONTRACT.md, "Embed enablement"). The refusal clears the last reading.
+  static final String EMBED_NOT_ENABLED_MESSAGE = "Embed isn't enabled for this network.";
 
   /** Static members only. */
   private Caps() {}
@@ -73,8 +76,29 @@ final class Caps {
   }
 
   /**
+   * Whether a JSON text is the Embed-not-enabled refusal,
+   * {"error": {"message": "Embed isn't enabled for this network."}}.
+   */
+  static boolean isEmbedNotEnabled(String json) {
+    try {
+      Map<String, Object> members = Json.parseNullableObject(json);
+      return members != null && members.get("error") instanceof Map<?, ?> error &&
+          EMBED_NOT_ENABLED_MESSAGE.equals(error.get("message"));
+    } catch (Json.ParseException e) {
+      return false;
+    }
+  }
+
+  /**
+   * One finished cap read: the cap object, or null for a failure. embedNotEnabled marks the
+   * Embed-not-enabled refusal, which clears the last reading.
+   */
+  record CapRead(DataCap cap, boolean embedNotEnabled) {}
+
+  /**
    * The cap readings so far. A failed reading keeps the last successful one; before any success,
-   * a failure shows "unavailable". Owned by the status loop's thread.
+   * a failure shows "unavailable". The Embed-not-enabled refusal clears the last reading. Owned by
+   * the status loop's thread.
    */
   static final class CapReadings {
     // the latest successful reading; null until one succeeds
@@ -90,6 +114,15 @@ final class Caps {
       }
     }
 
+    /**
+     * Records the Embed-not-enabled refusal: it clears the last reading, so both data fields read
+     * "unavailable" and the status rules see no cap reading.
+     */
+    void recordEmbedNotEnabled() {
+      attempted = true;
+      latest = null;
+    }
+
     /** The latest successful reading; null before one. */
     DataCap latest() { return latest; }
 
@@ -99,22 +132,26 @@ final class Caps {
 
   /**
    * GET /network/client-data-cap with the client JWT; the client is the JWT's own, so no
-   * client_id is sent. Null for any failure: unreachable, a status other than 2xx (a server without
-   * the cap routes answers 404), or an answer that is not a cap object. Never throws.
+   * client_id is sent. No cap for any failure: unreachable, a status other than 2xx (a server
+   * without the cap routes answers 404), or an answer that is not a cap object; the
+   * Embed-not-enabled refusal is marked. Never throws.
    */
-  static DataCap read(URI apiOrigin, String clientJwt, Token.HttpTransport transport) {
+  static CapRead read(URI apiOrigin, String clientJwt, Token.HttpTransport transport) {
     try {
       Token.HttpTransport.HttpAnswer answer =
           transport.send("GET", apiOrigin.resolve(CAP_PATH), clientJwt, null);
       if (answer.status() < 200 || 299 < answer.status()) {
-        return null;
+        return new CapRead(null, false);
       }
-      return DataCap.parse(answer.body());
+      if (isEmbedNotEnabled(answer.body())) {
+        return new CapRead(null, true);
+      }
+      return new CapRead(DataCap.parse(answer.body()), false);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      return null;
+      return new CapRead(null, false);
     } catch (IOException | RuntimeException e) {
-      return null;
+      return new CapRead(null, false);
     }
   }
 }
