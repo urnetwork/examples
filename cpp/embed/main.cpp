@@ -39,15 +39,6 @@
 
 namespace {
 
-// The kind of app whose licenses --licenses prints.
-#if defined(_WIN32)
-const char* const licenseApp = urnet::LicenseAppWindows;
-#elif defined(__APPLE__)
-const char* const licenseApp = urnet::LicenseAppApple;
-#else
-const char* const licenseApp = urnet::LicenseAppLinux;
-#endif
-
 #ifdef _WIN32
 // Ctrl-C and Ctrl-Break stop the app. The handler runs on its own thread;
 // returning TRUE keeps the process alive until the run loop stops.
@@ -130,7 +121,7 @@ int runEmbed() {
         std::cerr << "could not start the device: " << e.what() << std::endl;
         return embed::exitFailure;
     }
-    embed::printLine("embed client " + config.clientId + ", installation " + config.instanceId);
+    embed::printLine(embed::startLine(config.clientId, config.instanceId));
     try {
         int runExitCode = session->run();
         session->close();
@@ -145,7 +136,7 @@ int runEmbed() {
 // Prints the sdk's licenses and data attributions for this kind of app, as
 // json. Publish them with the app.
 int printLicenses() {
-    auto licenses = urnet::getLicenses(licenseApp);
+    auto licenses = urnet::getLicenses(embed::licenseApp());
     if (!licenses) {
         std::cerr << "the sdk returned no licenses" << std::endl;
         return embed::exitFailure;

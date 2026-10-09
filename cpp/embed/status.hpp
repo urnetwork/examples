@@ -49,6 +49,23 @@ inline void printLine(std::string_view line) {
 // plans and the Embed plan's monthly data budget are sold in these units. A
 // value that rounds to 1000.0 moves to the next unit. The arithmetic is exact
 // integer arithmetic; a tie rounds to even, as Go's %.1f does.
+// "embed client <client_id>, installation <instance_id>", printed at start.
+inline std::string startLine(const std::string& clientId, const std::string& instanceId) {
+    return "embed client " + clientId + ", installation " + instanceId;
+}
+
+// The GetLicenses app kind that --licenses prints: "apple" on Apple platforms,
+// "windows" on Windows, "linux" elsewhere.
+inline const char* licenseApp() {
+#if defined(_WIN32)
+    return "windows";
+#elif defined(__APPLE__)
+    return "apple";
+#else
+    return "linux";
+#endif
+}
+
 inline std::string formatByteCount(int64_t byteCount) {
     static constexpr const char* units[] = {"kB", "MB", "GB", "TB", "PB", "EB"};
     if (byteCount < 1000) {

@@ -6,13 +6,15 @@
 //   embed-server usage <key>
 //   embed-server usage-all
 //   embed-server remove <key>
+//   embed-server acl <key> default|isolated
 //   embed-server --self-test
 //
 // It extends the C++ integration allocator (../../integration/server): the
 // same settings (URNETWORK_ROOT_JWT, an API key or a network JWT;
 // URNETWORK_CLIENT_MAP, an absolute path in an existing private,
 // service-owned directory; optional URNETWORK_API_URL), map format, key
-// pattern, lock and response checks. Your service authenticates its user
+// pattern, lock and response checks, and reads URNETWORK_DEFAULT_ACL_GROUP,
+// the ACL group of each new client: isolated (the default) or default. Your service authenticates its user
 // first and supplies the key internally, as
 // user:<service-user-id>:<installation-id>, never a raw request field or a
 // URnetwork client ID. Exit codes: 0 success, 78 configuration or credential
@@ -47,7 +49,10 @@ const char* const description = "embed client";
 const char* const deviceSpec = "urnetwork-examples/cpp-embed-server";
 const char* const usageText =
     "usage: embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] "
-    "[--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | --self-test";
+    "[--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | "
+    "acl <key> default|isolated | --self-test";
+const char* const unmappedText = "no client is mapped for that key; run provision first";
+const char* const aclUnsupportedText = "/network/client-acl-group answered 404: the server predates ACL groups";
 const char* const clientLimitText =
     "client limit reached: your network is at its client limit; see https://ur.io/services";
 const std::regex keys("user:[A-Za-z0-9][A-Za-z0-9_.:@-]{0,122}");
@@ -75,6 +80,8 @@ struct Tool {
     fs::path mapPath;
     Call call;
     std::ostream& out;
+    // the ACL group of each new client: "isolated" or "default"
+    std::string aclGroup = "isolated";
 };
 
 std::string urlPart(CURLU* u, CURLUPart part) {
@@ -153,14 +160,23 @@ Json loadMap(const fs::path& file) {
         throw Failure(exitConfig, "the client map is not a valid private map");
     std::ifstream input(file);
     Json map = Json::parse(input, nullptr, false);
-    bool valid = map.is_object() && map.size() == 2 && map.contains("version") && map["version"].is_number_integer() &&
-        map["version"] == 1 && map.contains("clients") && map["clients"].is_object();
+    bool valid = map.is_object() && map.size() == (map.contains("pending_acl") ? 3u : 2u) &&
+        map.contains("version") && map["version"].is_number_integer() && map["version"] == 1 &&
+        map.contains("clients") && map["clients"].is_object();
     std::set<std::string> seen;
     if (valid) {
         for (auto& [key, value] : map["clients"].items()) {
             valid = valid && std::regex_match(key, keys) && value.is_string() &&
                 std::regex_match(value.get<std::string>(), ids) && seen.insert(value.get<std::string>()).second;
         }
+    }
+    // pending_acl: distinct mapped keys that still owe their default ACL group
+    if (valid && map.contains("pending_acl")) {
+        std::set<std::string> pending;
+        valid = map["pending_acl"].is_array();
+        for (const auto& entry : valid ? map["pending_acl"] : Json::array())
+            valid = valid && entry.is_string() && map["clients"].contains(entry.get<std::string>()) &&
+                pending.insert(entry.get<std::string>()).second;
     }
     if (!valid)
         throw Failure(exitConfig, "the client map is not a valid private map");
@@ -205,6 +221,36 @@ struct Lock {
     }
     ~Lock() { rmdir(path.c_str()); }
 };
+
+// Saves the map atomically with private permissions. pending_acl is written
+// only while it is not empty, so the map stays the allocators' map.
+void saveMap(const fs::path& file, Json map) {
+    if (map.contains("pending_acl") && map["pending_acl"].empty())
+        map.erase("pending_acl");
+    writePrivate(file, map.dump());
+}
+
+// Whether key still owes its default ACL group.
+bool aclPending(const Json& map, const std::string& key) {
+    if (!map.contains("pending_acl"))
+        return false;
+    for (const auto& entry : map["pending_acl"])
+        if (entry == key)
+            return true;
+    return false;
+}
+
+// Records or clears that key owes its default ACL group.
+void setAclPending(Json& map, const std::string& key, bool owes) {
+    Json kept = Json::array();
+    if (map.contains("pending_acl"))
+        for (const auto& entry : map["pending_acl"])
+            if (entry != key)
+                kept.push_back(entry);
+    if (owes)
+        kept.push_back(key);
+    map["pending_acl"] = kept;
+}
 
 // The client mapped to key, or empty.
 std::string mappedClient(const Json& map, const std::string& key) {
@@ -254,8 +300,29 @@ bool clientLimitRefusal(const Json& answer) {
 std::string requireClient(const Json& map, const std::string& key) {
     auto client = mappedClient(map, key);
     if (client.empty())
-        throw Failure(exitConfig, "no client is mapped for " + key);
+        throw Failure(exitConfig, unmappedText);
     return client;
+}
+
+// Posts client's ACL group and checks that the answer names the client and the
+// group; prints {"client_id": "...", "acl_group": "..."} when print is set.
+void postAclGroup(const Tool& tool, const std::string& client, const std::string& group, bool print) {
+    Json answer;
+    long status = 0;
+    Kind kind = callApi(tool, "POST", "/network/client-acl-group", Json{{"client_id", client}, {"acl_group", group}},
+        answer, status);
+    if (kind == Kind::unauthorized)
+        throw Failure(exitConfig, "the API refused the root credential");
+    if (kind == Kind::failed && status == 404)
+        throw Failure(exitFailure, aclUnsupportedText);
+    if (kind == Kind::refused)
+        throw Failure(exitFailure, "the API refused: " + refusalMessage(answer));
+    if (kind != Kind::ok || answer.value("client_id", std::string{}) != client ||
+        answer.value("acl_group", std::string{}) != group)
+        throw Failure(exitFailure, "setting the ACL group failed: no valid answer (HTTP " + std::to_string(status) + ")");
+    if (print) {
+        tool.out << "{\"client_id\":" << Json(client).dump() << ",\"acl_group\":" << Json(group).dump() << "}\n";
+    }
 }
 
 void requireKey(const std::string& key, const std::string& command) {
@@ -289,7 +356,8 @@ int provision(const Tool& tool, const std::string& key, const std::string& jwtFi
             if (!old.empty() && refusalMessage(answer) == "Client does not exist.") {
                 // deactivated after 30 days without connecting: provision anew
                 map["clients"].erase(key);
-                writePrivate(tool.mapPath, map.dump());
+                setAclPending(map, key, false);
+                saveMap(tool.mapPath, map);
                 old.clear();
                 continue;
             }
@@ -308,7 +376,18 @@ int provision(const Tool& tool, const std::string& key, const std::string& jwtFi
             if (value == id)
                 throw Failure(exitFailure, "provisioning answered a client mapped to another key");
         map["clients"][key] = id;
-        writePrivate(tool.mapPath, map.dump());
+        // the mapping and the record that the client owes its group, in one save
+        if (tool.aclGroup == "isolated")
+            setAclPending(map, key, true);
+        saveMap(tool.mapPath, map);
+    }
+    if (aclPending(map, key)) {
+        // a new client is "default": only an isolated default needs the request.
+        // A failure throws with the record kept, before any client JWT is written.
+        if (tool.aclGroup == "isolated")
+            postAclGroup(tool, id, "isolated", false);
+        setAclPending(map, key, false);
+        saveMap(tool.mapPath, map);
     }
     std::string line = jwt + "\n";
     try {
@@ -367,14 +446,15 @@ std::optional<Json> capRequest(const std::string& client, const std::vector<std:
 }
 
 // Prints a cap object answer, or throws the failure.
-int printCap(const Tool& tool, Kind kind, const Json& answer, long status) {
+int printCap(const Tool& tool, const std::string& route, Kind kind, const Json& answer, long status) {
     if (kind == Kind::unauthorized)
         throw Failure(exitConfig, "the API refused the root credential");
+    if (kind == Kind::failed && status == 404)
+        throw Failure(exitFailure, route + " answered 404: the server predates the data-cap routes");
     if (kind == Kind::refused)
         throw Failure(exitFailure, "the API refused: " + refusalMessage(answer));
     if (kind == Kind::failed || !answer.contains("client_id"))
-        throw Failure(exitFailure, "no cap object in the answer (HTTP " + std::to_string(status) +
-                "; a server without the cap routes answers 404)");
+        throw Failure(exitFailure, "no cap object in the answer (HTTP " + std::to_string(status) + ")");
     tool.out << answer.dump() << '\n';
     return exitOk;
 }
@@ -389,7 +469,7 @@ int cap(const Tool& tool, const std::string& key, const std::vector<std::string>
     Json answer;
     long status = 0;
     Kind kind = callApi(tool, "POST", "/network/client-data-cap", body, answer, status);
-    return printCap(tool, kind, answer, status);
+    return printCap(tool, "/network/client-data-cap", kind, answer, status);
 }
 
 // usage <key>: the key's cap object, read with the root credential.
@@ -399,7 +479,7 @@ int usage(const Tool& tool, const std::string& key) {
     Json answer;
     long status = 0;
     Kind kind = callApi(tool, "GET", "/network/client-data-cap?client_id=" + client, std::nullopt, answer, status);
-    return printCap(tool, kind, answer, status);
+    return printCap(tool, "/network/client-data-cap", kind, answer, status);
 }
 
 // Percent-encodes all but the unreserved characters.
@@ -431,6 +511,8 @@ int usageAll(const Tool& tool) {
         Kind kind = callApi(tool, "GET", path, std::nullopt, answer, status);
         if (kind == Kind::unauthorized)
             throw Failure(exitConfig, "the API refused the root credential");
+        if (kind == Kind::failed && status == 404)
+            throw Failure(exitFailure, "/network/client-data-caps answered 404: the server predates the data-cap routes");
         if (kind != Kind::ok || !answer.contains("clients") || !answer["clients"].is_array())
             throw Failure(exitFailure, "no page of cap objects in the answer (HTTP " + std::to_string(status) + ")");
         for (const auto& client : answer["clients"])
@@ -460,8 +542,26 @@ int removeClient(const Tool& tool, const std::string& key) {
         throw Failure(exitFailure,
             "removing the client failed" + (kind == Kind::refused ? ": " + refusalMessage(answer) : ""));
     map["clients"].erase(key);
-    writePrivate(tool.mapPath, map.dump());
+    setAclPending(map, key, false);
+    saveMap(tool.mapPath, map);
     tool.out << Json{{"removed", client}}.dump() << '\n';
+    return exitOk;
+}
+
+// acl <key> default|isolated: sets the ACL group of the key's client and prints
+// {"client_id": "...", "acl_group": "..."}. An explicit group settles a pending
+// default group, so the record is dropped.
+int acl(const Tool& tool, const std::string& key, const std::string& group) {
+    if (!std::regex_match(key, keys) || (group != "default" && group != "isolated"))
+        throw Failure(exitConfig, usageText);
+    Lock lock(tool.mapPath);
+    Json map = loadMap(tool.mapPath);
+    std::string client = requireClient(map, key);
+    postAclGroup(tool, client, group, true);
+    if (aclPending(map, key)) {
+        setAclPending(map, key, false);
+        saveMap(tool.mapPath, map);
+    }
     return exitOk;
 }
 
@@ -479,6 +579,8 @@ int run(const Tool& tool, std::ostream& err, const std::vector<std::string>& arg
             return usageAll(tool);
         if (args.size() == 2 && args[0] == "remove")
             return removeClient(tool, args[1]);
+        if (args.size() == 3 && args[0] == "acl")
+            return acl(tool, args[1], args[2]);
         throw Failure(exitConfig, usageText);
     } catch (const Failure& failure) {
         err << failure.what() << '\n';
@@ -558,11 +660,15 @@ struct Mock {
     }
 };
 
+// The default ACL group of the self-test's runs: "default" sends no ACL request,
+// so the checks that predate ACL groups keep their answer order.
+std::string testAclGroup = "default";
+
 // Runs a command line against the mock; out and err receive the output.
 int runWith(Mock& mock, const fs::path& mapPath, std::string& out, std::string& err,
     const std::vector<std::string>& args) {
     std::ostringstream outStream, errStream;
-    Tool tool{mapPath, mock.call(), outStream};
+    Tool tool{mapPath, mock.call(), outStream, testAclGroup};
     int code = run(tool, errStream, args);
     out = outStream.str();
     err = errStream.str();
@@ -696,6 +802,106 @@ void selfTest() {
         CHECK(runWith(refused, mapPath, out, err, {"provision", key, jwtPath.string()}) == exitConfig);
         CHECK(refused.methods.empty());
         fs::remove(mapPath);
+        // fixed texts: a key with no mapped client
+        for (const auto& args : std::vector<std::vector<std::string>>{{"cap", "user:nobody", "--monthly", "1"},
+                 {"usage", "user:nobody"}, {"remove", "user:nobody"}, {"acl", "user:nobody", "isolated"}}) {
+            Mock unused;
+            CHECK(runWith(unused, mapPath, out, err, args) == exitConfig && unused.methods.empty());
+            CHECK(err == std::string(unmappedText) + "\n");
+        }
+        // ACL groups: a new client goes into the isolated group before its
+        // client JWT is written, with the pending_acl record saved first and then
+        // dropped
+        testAclGroup = "isolated";
+        std::string id3 = "33333333-3333-3333-3333-333333333333", id4 = "44444444-4444-4444-4444-444444444444";
+        std::string jwt3 = "e30.eyJjbGllbnRfaWQiOiIzMzMzMzMzMy0zMzMzLTMzMzMtMzMzMy0zMzMzMzMzMzMzMzMifQ.test";
+        std::string jwt4 = "e30.eyJjbGllbnRfaWQiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtNDQ0NC00NDQ0NDQ0NDQ0NDQifQ.test";
+        std::string answer3 = Json{{"client_id", id3}, {"by_client_jwt", jwt3}}.dump(),
+                    answer4 = Json{{"client_id", id4}, {"by_client_jwt", jwt4}}.dump();
+        auto aclAnswer = [](const std::string& client, const std::string& group) {
+            return Json{{"client_id", client}, {"acl_group", group}}.dump();
+        };
+        std::string key3 = "user:carol:33333333-3333-3333-3333-333333333333",
+                    key4 = "user:carol:44444444-4444-4444-4444-444444444444",
+                    key5 = "user:carol:55555555-5555-5555-5555-555555555555";
+        fs::path jwt3Path = dir / "c3.jwt", jwt4Path = dir / "c4.jwt", jwt5Path = dir / "c5.jwt";
+        Mock isolate{{{200, answer3}, {200, aclAnswer(id3, "isolated")}}};
+        CHECK(runWith(isolate, mapPath, out, err, {"provision", key3, jwt3Path.string()}) == exitOk);
+        CHECK(isolate.methods.size() == 2 && isolate.methods[1] == "POST" &&
+              isolate.paths[1] == "/network/client-acl-group");
+        CHECK((*isolate.bodies[1])["client_id"] == id3 && (*isolate.bodies[1])["acl_group"] == "isolated" &&
+              isolate.bodies[1]->size() == 2);
+        CHECK(!aclPending(loadMap(mapPath), key3) && !loadMap(mapPath).contains("pending_acl"));
+        Mock reissue3{{{200, answer3}}};
+        CHECK(runWith(reissue3, mapPath, out, err, {"provision", key3, jwt3Path.string()}) == exitOk &&
+              reissue3.methods.size() == 1);
+        // the ACL request fails: no client JWT, the record kept; the next
+        // provision reissues and applies it
+        Mock failing{{{200, answer4}, {500, "{}"}}};
+        CHECK(runWith(failing, mapPath, out, err, {"provision", key4, jwt4Path.string()}) == exitFailure);
+        CHECK(!fs::exists(jwt4Path) && mappedClient(loadMap(mapPath), key4) == id4 && aclPending(loadMap(mapPath), key4));
+        Mock retried{{{200, answer4}, {200, aclAnswer(id4, "isolated")}}};
+        CHECK(runWith(retried, mapPath, out, err, {"provision", key4, jwt4Path.string()}) == exitOk);
+        CHECK((*retried.bodies[0])["client_id"] == id4 && retried.paths[1] == "/network/client-acl-group");
+        CHECK(fs::exists(jwt4Path) && !aclPending(loadMap(mapPath), key4));
+        // a server without ACL groups: exit 1 with the fixed text, the record kept
+        // and no client JWT; a default of "default" then provisions with no ACL
+        // request and drops the record
+        Mock oldServer{{{200, answer2}, {404, "404 page not found"}}};
+        CHECK(runWith(oldServer, mapPath, out, err, {"provision", key5, jwt5Path.string()}) == exitFailure);
+        CHECK(err == std::string(aclUnsupportedText) + "\n" && !fs::exists(jwt5Path) && aclPending(loadMap(mapPath), key5));
+        testAclGroup = "default";
+        Mock asDefault{{{200, answer2}}};
+        CHECK(runWith(asDefault, mapPath, out, err, {"provision", key5, jwt5Path.string()}) == exitOk &&
+              asDefault.methods.size() == 1);
+        CHECK(fs::exists(jwt5Path) && !aclPending(loadMap(mapPath), key5));
+        // acl: the request and its printed answer; an invalid group reaches no
+        // API; an answer for another group and a server without ACL groups fail
+        Mock setDefault{{{200, aclAnswer(id3, "default")}}};
+        CHECK(runWith(setDefault, mapPath, out, err, {"acl", key3, "default"}) == exitOk);
+        CHECK(out == "{\"client_id\":\"" + id3 + "\",\"acl_group\":\"default\"}\n");
+        CHECK(setDefault.paths[0] == "/network/client-acl-group" && (*setDefault.bodies[0])["acl_group"] == "default" &&
+              (*setDefault.bodies[0])["client_id"] == id3);
+        Mock unusedAcl;
+        CHECK(runWith(unusedAcl, mapPath, out, err, {"acl", key3, "private"}) == exitConfig && unusedAcl.methods.empty());
+        Mock wrongGroup{{{200, aclAnswer(id3, "isolated")}}};
+        CHECK(runWith(wrongGroup, mapPath, out, err, {"acl", key3, "default"}) == exitFailure);
+        Mock oldAcl{{{404, "404 page not found"}}};
+        CHECK(runWith(oldAcl, mapPath, out, err, {"acl", key3, "default"}) == exitFailure &&
+              err == std::string(aclUnsupportedText) + "\n");
+        // an explicit group settles a pending default group, and a map with a
+        // valid pending_acl is accepted
+        {
+            std::ofstream file(mapPath, std::ios::trunc);
+            file << Json{{"version", 1}, {"clients", {{key3, id3}}}, {"pending_acl", {key3}}}.dump();
+        }
+        chmod(mapPath.c_str(), 0600);
+        Mock settle{{{200, aclAnswer(id3, "default")}}};
+        CHECK(runWith(settle, mapPath, out, err, {"acl", key3, "default"}) == exitOk);
+        CHECK(!aclPending(loadMap(mapPath), key3) && mappedClient(loadMap(mapPath), key3) == id3);
+        // a server without the cap routes: exit 1 with the fixed text
+        std::vector<std::pair<std::vector<std::string>, std::string>> oldCaps{
+            {{"cap", key3, "--monthly", "1"}, "/network/client-data-cap"},
+            {{"usage", key3}, "/network/client-data-cap"},
+            {{"usage-all"}, "/network/client-data-caps"}};
+        for (const auto& [args, route] : oldCaps) {
+            Mock old{{{404, "404 page not found"}}};
+            CHECK(runWith(old, mapPath, out, err, args) == exitFailure &&
+                  err == route + " answered 404: the server predates the data-cap routes\n");
+        }
+        // a pending_acl entry that is not a mapped key, or not an array, is refused
+        for (const auto& raw : {std::string(R"({"version":1,"clients":{},"pending_acl":["user:nobody"]})"),
+                 std::string(R"({"version":1,"clients":{},"pending_acl":{}})")}) {
+            {
+                std::ofstream file(mapPath, std::ios::trunc);
+                file << raw;
+            }
+            chmod(mapPath.c_str(), 0600);
+            Mock unusedMap{{{200, answer}}};
+            CHECK(runWith(unusedMap, mapPath, out, err, {"provision", key, jwtPath.string()}) == exitConfig &&
+                  unusedMap.methods.empty());
+        }
+        fs::remove(mapPath);
         // keys and command lines
         CHECK(std::regex_match("user:alice", keys) && std::regex_match(key, keys) &&
               !std::regex_match("user:../a", keys) && !std::regex_match(id, keys) &&
@@ -740,11 +946,14 @@ int main(int argc, char** argv) {
         return exitOk;
     }
     std::string root = setting("URNETWORK_ROOT_JWT"), mapPath = setting("URNETWORK_CLIENT_MAP"),
-                base = setting("URNETWORK_API_URL");
+                base = setting("URNETWORK_API_URL"), aclGroup = setting("URNETWORK_DEFAULT_ACL_GROUP");
     std::string apiOrigin = origin(base.empty() ? "https://api.bringyour.com" : base);
     int code;
     if (args.empty()) {
         std::cerr << usageText << '\n';
+        code = exitConfig;
+    } else if (!aclGroup.empty() && aclGroup != "isolated" && aclGroup != "default") {
+        std::cerr << "URNETWORK_DEFAULT_ACL_GROUP must be default or isolated\n";
         code = exitConfig;
     } else if (root.empty() || root.find_first_of(" \t\r\n") != std::string::npos) {
         std::cerr << "set URNETWORK_ROOT_JWT to the root credential\n";
@@ -760,7 +969,7 @@ int main(int argc, char** argv) {
             [&](const std::string& method, const std::string& path, const std::optional<Json>& body) {
                 return apiCall(apiOrigin, root, method, path, body);
             },
-            std::cout};
+            std::cout, aclGroup.empty() ? "isolated" : aclGroup};
         code = run(tool, std::cerr, args);
     }
     curl_global_cleanup();

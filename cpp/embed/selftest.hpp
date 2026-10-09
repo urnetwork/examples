@@ -158,8 +158,11 @@ inline void checkFormatByteCount() {
         {999, "999 B"},
         {1000, "1.0 kB"},
         {999949, "999.9 kB"},
+        {1050, "1.0 kB"},
+        {1150, "1.2 kB"},
         {1250, "1.2 kB"},
         {1750, "1.8 kB"},
+        {999950, "1.0 MB"},
         {999999, "1.0 MB"},
         {1234567890, "1.2 GB"},
         {5000000000, "5.0 GB"},
@@ -594,6 +597,21 @@ inline void checkUsage() {
         "the exit codes are not 0, 1 and 78");
 }
 
+// The start line names the client and the installation, and --licenses names
+// the license kind of the platform it was built for.
+inline void checkStartLine() {
+    expect(startLine("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222") ==
+            "embed client 11111111-1111-1111-1111-111111111111, installation 22222222-2222-2222-2222-222222222222",
+        "the start line differs");
+#if defined(_WIN32)
+    expect(std::string(licenseApp()) == "windows", "the license app kind is not windows");
+#elif defined(__APPLE__)
+    expect(std::string(licenseApp()) == "apple", "the license app kind is not apple");
+#else
+    expect(std::string(licenseApp()) == "linux", "the license app kind is not linux");
+#endif
+}
+
 // Runs every check; throws the first failure.
 inline void runSelfTest() {
     checkFormatByteCount();
@@ -611,6 +629,7 @@ inline void runSelfTest() {
     checkConfig();
     checkSdkValues();
     checkUsage();
+    checkStartLine();
 }
 
 // Runs the self-test and prints one line: exit code 0 when it passed, 1 when
