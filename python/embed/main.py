@@ -5,7 +5,8 @@ your backend wrote), starts a local device with it, and shows the status and
 this client's own data caps. The device carries only the app's own traffic:
 continue with the Sockets and Messages examples.
 
-Usage: main.py [run] | --self-test | --version.
+Usage: main.py [run] | --self-test | --licenses | --version. --licenses prints
+the SDK's licenses and data attributions, as JSON, to publish with the app.
 
 Settings:
 - URNETWORK_EMBED_STATE_DIR: the installation's private state directory
@@ -16,17 +17,20 @@ Settings:
 - URNETWORK_API_URL: the API origin for the cap reads, default
   https://api.bringyour.com.
 
-The self-test needs only Python; the other commands load the urnetwork package.
+The self-test needs only Python; the other commands load the urnetwork package,
+and a native library older than the package exits 78 (sdk_load.py).
 
 Exit codes, for supervisors: 0 stopped on request, 78 configuration or
 credential problem (restarting does not help), 1 any other failure."""
 
 import os
+import platform
 import queue
 import signal
 import sys
 
 from client_token import TokenServerError, TokenServerRefused, fetch_client_jwt
+from sdk_load import SdkLoadError, load_urnetwork, sdk_mismatch_message
 from state import (
     LOG_DIR_NAME,
     ConfigError,
@@ -35,6 +39,7 @@ from state import (
     load_or_create_instance_id,
     parse_client_jwt_client_id,
 )
+from status import license_app, start_line
 from transport import DEFAULT_API_URL, check_origin, urllib_transport
 
 EXIT_STOPPED = 0
@@ -42,7 +47,7 @@ EXIT_FAILURE = 1
 # sysexits EX_CONFIG
 EXIT_CONFIG = 78
 
-USAGE = "usage: main.py [run] | --self-test | --version"
+USAGE = "usage: main.py [run] | --self-test | --licenses | --version"
 
 TOKEN_SERVER_URL_SETTING = "URNETWORK_TOKEN_SERVER_URL"
 DEMO_SESSION_SETTING = "URNETWORK_DEMO_SESSION"
@@ -73,13 +78,25 @@ def run(args: list, transport=urllib_transport) -> int:
             return EXIT_FAILURE
         print("embed self-test passed")
         return EXIT_STOPPED
-    if args == ["--version"]:
+    if args in (["--version"], ["--licenses"]):
         try:
-            import urnetwork
-        except (ImportError, OSError, AttributeError) as error:
-            print(f"could not load the urnetwork package: {error}", file=sys.stderr)
+            urnetwork = load_urnetwork()
+        except SdkLoadError as error:
+            print(error, file=sys.stderr)
+            return error.exit_code
+        if args == ["--version"]:
+            print(urnetwork.version())
+            return EXIT_STOPPED
+        from session import take_string
+
+        try:
+            licenses = take_string(urnetwork.raw, urnetwork.raw.urnet_get_licenses(license_app(platform.system()).encode()))
+        except AttributeError as error:
+            return report_sdk_failure(error, "could not read the sdk licenses")
+        if licenses is None:
+            print("the sdk returned no licenses", file=sys.stderr)
             return EXIT_FAILURE
-        print(urnetwork.version())
+        print(licenses)
         return EXIT_STOPPED
     if args not in ([], ["run"]):
         print(USAGE, file=sys.stderr)
@@ -105,17 +122,16 @@ def run_embed(transport) -> int:
         return EXIT_FAILURE
 
     try:
-        import urnetwork
-    except (ImportError, OSError, AttributeError) as error:
-        print(f"could not load the urnetwork package: {error}", file=sys.stderr)
-        return EXIT_FAILURE
+        urnetwork = load_urnetwork()
+    except SdkLoadError as error:
+        print(error, file=sys.stderr)
+        return error.exit_code
     from session import EVENT_STOP, EmbedConfig, EmbedSession, configure_sdk_logs
 
     try:
         configure_sdk_logs(urnetwork, os.path.join(state_dir, LOG_DIR_NAME))
-    except OSError as error:
-        print(f"could not set the sdk log directory: {error}", file=sys.stderr)
-        return EXIT_FAILURE
+    except (OSError, AttributeError) as error:
+        return report_sdk_failure(error, "could not set the sdk log directory")
 
     # the run loop's events; a stop request is one of them. SimpleQueue.put is
     # safe in a signal handler, which can interrupt the main thread anywhere.
@@ -138,10 +154,9 @@ def run_embed(transport) -> int:
     try:
         session = EmbedSession(config, urnetwork, events, transport)
     except Exception as error:
-        print(f"could not start the device: {error}", file=sys.stderr)
-        return EXIT_FAILURE
+        return report_sdk_failure(error, "could not start the device")
     try:
-        print(f"embed client {client_id}, installation {instance_id}")
+        print(start_line(client_id, instance_id))
         session.run()
         return EXIT_STOPPED
     except ConfigError as error:
@@ -150,6 +165,18 @@ def run_embed(transport) -> int:
         return EXIT_CONFIG
     finally:
         session.close()
+
+
+def report_sdk_failure(error: Exception, doing: str) -> int:
+    """Prints why an SDK call failed and returns the exit code: 78 with the SDK
+    version mismatch line for a C ABI function that the native library lacks, 1
+    otherwise."""
+    mismatch = sdk_mismatch_message(error)
+    if mismatch is not None:
+        print(mismatch, file=sys.stderr)
+        return EXIT_CONFIG
+    print(f"{doing}: {error}", file=sys.stderr)
+    return EXIT_FAILURE
 
 
 def obtain_client_jwt(state_dir: str, instance_id: str, transport):

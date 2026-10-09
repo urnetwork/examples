@@ -7,14 +7,19 @@ one as a test."""
 
 import base64
 import contextlib
+import ctypes as C
 import io
 import json
 import os
+import platform
 import shutil
+import subprocess
+import sys
 import tempfile
 
 from caps import CAPPED_REASON_MONTHLY, CAPPED_REASON_TOTAL, CapReading, parse_cap_answer, parse_cap_object, read_own_caps
 from client_token import TOKEN_ROUTE, TokenServerError, TokenServerRefused, fetch_client_jwt
+from sdk_load import EXIT_CONFIG as SDK_EXIT_CONFIG, SdkLoadError, load_urnetwork, sdk_mismatch_message
 from state import (
     CLIENT_JWT_FILE_NAME,
     INSTANCE_ID_FILE_NAME,
@@ -37,9 +42,11 @@ from status import (
     data_field_text,
     embed_status,
     format_byte_count,
+    license_app,
     parse_client_limit_status,
     parse_providers_added,
     reset_time_text,
+    start_line,
     status_snapshot,
 )
 from transport import check_origin
@@ -171,24 +178,27 @@ def token_answer(client_id: str = TEST_CLIENT_ID, client_jwt: str = TEST_CLIENT_
 
 
 def check_byte_vectors():
-    """Data amounts use decimal units, one decimal, ties to even."""
+    """Data amounts use decimal units, one decimal, ties to even on the exact
+    integer."""
     cases = [
         (0, "0 B"),
         (999, "999 B"),
         (1000, "1.0 kB"),
         (999949, "999.9 kB"),
-        # exact halves round to even, as Go's %.1f does
+        # exact halves round to even on the integer; a float formatter rounds the
+        # binary value of 1.05, just above 1.05, up to 1.1
+        (1050, "1.0 kB"),
+        (1150, "1.2 kB"),
         (1250, "1.2 kB"),
         (1750, "1.8 kB"),
-        # 1.05 is just above 1.05 in binary, so Go's %.1f rounds it up; a formatter
-        # that rounds a shortened decimal instead gets 1.0
-        (1050, "1.1 kB"),
-        # rounds to 1000.0 kB, so it moves to the next unit
+        # 999.95 kB ties to the even 1000.0 kB and moves to the next unit, as does 999.999 kB
+        (999950, "1.0 MB"),
         (999999, "1.0 MB"),
         (1234567890, "1.2 GB"),
         (5000000000, "5.0 GB"),
         (10000000000, "10.0 GB"),
         (3000000000000, "3.0 TB"),
+        (9223372036854775807, "9.2 EB"),
     ]
     for byte_count, text in cases:
         expect(format_byte_count(byte_count) == text, f"{byte_count} bytes format as {format_byte_count(byte_count)!r}, want {text!r}")
@@ -630,6 +640,127 @@ def check_config_errors():
     expect(run_quietly(["run", "extra"]) == EXIT_CONFIG, "extra arguments must exit 78")
 
 
+def check_start_line():
+    """The start line and the kind of app whose licenses --licenses prints."""
+    from main import USAGE
+
+    expect(
+        start_line(TEST_CLIENT_ID, TEST_INSTANCE_ID) == f"embed client {TEST_CLIENT_ID}, installation {TEST_INSTANCE_ID}",
+        "the start line must be the contract's",
+    )
+    expect(
+        [license_app(system) for system in ("Darwin", "Windows", "Linux", "FreeBSD", "")] == ["apple", "windows", "linux", "linux", "linux"],
+        "--licenses must ask for the platform's kind of app",
+    )
+    expect("--licenses" in USAGE, "the usage must name --licenses")
+
+
+# a urnetwork package whose bindings name a function that the native library
+# lacks, as when the library is older than the package: ctypes raises its own
+# AttributeError on every platform
+STALE_PACKAGE = """
+import ctypes
+import os
+
+_library = ctypes.WinDLL("kernel32") if os.name == "nt" else ctypes.CDLL(None)
+_library.urnet_self_test_newer_function.restype = ctypes.c_void_p
+"""
+
+# a urnetwork package with the two C ABI functions that --licenses calls;
+# SELF_TEST_LICENSES "null" answers NULL and "missing" is a library without
+# urnet_get_licenses
+LICENSES_PACKAGE = """
+import ctypes
+import json
+import os
+
+_strings = []
+
+
+class _Raw:
+    def urnet_get_licenses(self, app):
+        mode = os.environ.get("SELF_TEST_LICENSES", "")
+        if mode == "missing":
+            library = ctypes.WinDLL("kernel32") if os.name == "nt" else ctypes.CDLL(None)
+            return library.urnet_get_licenses(app)
+        if mode == "null":
+            return None
+        text = ctypes.create_string_buffer(json.dumps([{"app": app.decode()}]).encode())
+        _strings.append(text)
+        return ctypes.addressof(text)
+
+    def urnet_free_string(self, pointer):
+        pass
+
+
+raw = _Raw()
+
+
+def version():
+    return "self-test"
+"""
+
+
+def run_main(package_source: str, args: list, **settings):
+    """Runs main.py in a child process with a stand-in urnetwork package first on
+    the import path; returns the exit code, stdout and stderr."""
+    with private_dir() as package_root:
+        os.mkdir(os.path.join(package_root, "urnetwork"))
+        with open(os.path.join(package_root, "urnetwork", "__init__.py"), "w") as file:
+            file.write(package_source)
+        environment = {name: value for name, value in os.environ.items() if not name.startswith("URNETWORK_")}
+        environment.update(settings, PYTHONPATH=package_root, PYTHONDONTWRITEBYTECODE="1")
+        main_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+        completed = subprocess.run([sys.executable, main_path, *args], env=environment, capture_output=True, text=True, timeout=60)
+        return completed.returncode, completed.stdout, completed.stderr
+
+
+def check_sdk_mismatch():
+    """A native library older than the urnetwork package exits 78 with the SDK
+    version mismatch line, not a traceback, from every command that loads the
+    package; other load failures exit 1."""
+    library = C.WinDLL("kernel32") if os.name == "nt" else C.CDLL(None)
+    try:
+        library.urnet_self_test_newer_function
+    except AttributeError as error:
+        missing = error
+    else:
+        raise SelfTestError("the platform library has the self-test's function")
+    message = sdk_mismatch_message(missing)
+    expect(message is not None and "SDK version mismatch" in message and "urnet_self_test_newer_function" in message, f"a missing C ABI function must be a version mismatch: {missing}")
+    expect(sdk_mismatch_message(AttributeError("'NoneType' object has no attribute 'raw'")) is None, "another AttributeError is not a version mismatch")
+    expect(sdk_mismatch_message(OSError("dlopen failed: urnet_x")) is None, "a library that does not load is not a version mismatch")
+
+    def raising(error):
+        def importer(_name):
+            raise error
+
+        return importer
+
+    for error, exit_code in [(missing, SDK_EXIT_CONFIG), (ImportError("No module named 'urnetwork'"), 1), (OSError("no library"), 1)]:
+        try:
+            load_urnetwork(raising(error))
+        except SdkLoadError as load_error:
+            expect(load_error.exit_code == exit_code, f"{error!r} must exit {exit_code}, got {load_error.exit_code}")
+        else:
+            raise SelfTestError(f"{error!r} must not load")
+
+    with private_dir() as state_dir:
+        write_private_file(os.path.join(state_dir, CLIENT_JWT_FILE_NAME), (TEST_CLIENT_JWT + "\n").encode())
+        for args, settings in [(["--version"], {}), (["--licenses"], {}), (["run"], {"URNETWORK_EMBED_STATE_DIR": state_dir})]:
+            code, out, err = run_main(STALE_PACKAGE, args, **settings)
+            expect(code == SDK_EXIT_CONFIG, f"{args} with a stale native library must exit 78, got {code}: {err}")
+            expect(err.strip().startswith("SDK version mismatch") and len(err.strip().splitlines()) == 1 and "Traceback" not in err, f"{args} must print the one mismatch line: {err}")
+            expect("urnet_self_test_newer_function" in err and out == "", f"{args} must name the missing function and print nothing else")
+
+    code, out, err = run_main(LICENSES_PACKAGE, ["--licenses"])
+    expect(code == 0 and json.loads(out) == [{"app": license_app(platform.system())}], f"--licenses must print the sdk's JSON for this kind of app: {code} {out} {err}")
+    code, _, err = run_main(LICENSES_PACKAGE, ["--licenses"], SELF_TEST_LICENSES="null")
+    expect(code == 1 and err.strip() == "the sdk returned no licenses", f"no licenses must exit 1: {code} {err}")
+    code, _, err = run_main(LICENSES_PACKAGE, ["--licenses"], SELF_TEST_LICENSES="missing")
+    expect(code == SDK_EXIT_CONFIG and err.startswith("SDK version mismatch") and "urnet_get_licenses" in err, f"a library without urnet_get_licenses must exit 78: {code} {err}")
+
+
 CHECKS = [
     check_byte_vectors,
     check_reset_vectors,
@@ -644,4 +775,6 @@ CHECKS = [
     check_token_fetch,
     check_state_files,
     check_config_errors,
+    check_start_line,
+    check_sdk_mismatch,
 ]

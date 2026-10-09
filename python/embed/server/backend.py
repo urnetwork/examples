@@ -8,6 +8,7 @@ checks, plus the embed commands.
   python3 backend.py usage <key>
   python3 backend.py usage-all
   python3 backend.py remove <key>
+  python3 backend.py acl <key> default|isolated
   python3 backend.py --self-test
 
 <key> is user:<service-user-id>, or user:<service-user-id>:<installation-id>
@@ -20,6 +21,9 @@ Settings:
 - URNETWORK_CLIENT_MAP: absolute filename of this tool's private client map,
   in an existing private, service-owned directory. Not the token server's map.
 - URNETWORK_API_URL: optional HTTPS origin, default https://api.bringyour.com.
+- URNETWORK_DEFAULT_ACL_GROUP: optional, the ACL group of each new client:
+  isolated (the default), so your users never see each other in the peer
+  list, or default, for an app that uses Messages.
 
 Exit codes: 0 success; 78 a configuration or credential problem (missing
 settings, an invalid key or map, the root credential refused, the client
@@ -50,6 +54,7 @@ AUTH_CLIENT_ROUTE = "/network/auth-client"
 REMOVE_CLIENT_ROUTE = "/network/remove-client"
 CAP_ROUTE = "/network/client-data-cap"
 CAPS_ROUTE = "/network/client-data-caps"
+ACL_ROUTE = "/network/client-acl-group"
 USAGE_ALL_PAGE_LIMIT = 1000
 
 MAX_BYTE_COUNT = 9223372036854775807
@@ -57,9 +62,16 @@ BYTE_COUNT_PATTERN = re.compile(r"[0-9]{1,19}")
 
 CLIENT_DOES_NOT_EXIST = "Client does not exist."
 CLIENT_LIMIT_MESSAGE = "client limit reached: your network is at its client limit; see https://ur.io/services"
+UNMAPPED_MESSAGE = "no client is mapped for that key; run provision first"
+ACL_UNSUPPORTED_MESSAGE = "/network/client-acl-group answered 404: the server predates ACL groups"
 
-# a language tool's map has only these fields; the token server's adds pending_caps
-MAP_FIELDS = {"version", "clients"}
+ACL_GROUP_DEFAULT = "default"
+ACL_GROUP_ISOLATED = "isolated"
+ACL_GROUPS = (ACL_GROUP_DEFAULT, ACL_GROUP_ISOLATED)
+
+# a language tool's map has only these fields, pending_acl only while it is not
+# empty; the token server's adds pending_caps
+MAP_FIELDS = {"version", "clients", "pending_acl"}
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -71,7 +83,7 @@ ERROR_MESSAGE_LIMIT = 300
 
 USAGE = (
     "usage: backend.py provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] "
-    "[--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | --self-test"
+    "[--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test"
 )
 
 
@@ -114,24 +126,45 @@ def api_origin(base: str) -> str:
 
 
 def load_map(path: Path) -> dict:
-    """The allocator's private map, refusing one with fields other than version
-    and clients (the token server's map has pending_caps), so that two tools
-    never rewrite each other's map."""
+    """The allocator's private map, with an optional pending_acl: the keys whose
+    new clients still owe their default ACL group. A map with other fields (the
+    token server's map has pending_caps) is refused, so that two tools never
+    rewrite each other's map."""
     try:
         data = allocator.load_map(path)
     except (OSError, ValueError) as error:
         raise config_problem(f"invalid client map: {error}") from None
     extra = sorted(set(data) - MAP_FIELDS)
     if extra:
-        raise config_problem(f"the client map has fields other than version and clients ({', '.join(extra)}); give this tool its own map")
+        raise config_problem(f"the client map has fields other than version, clients and pending_acl ({', '.join(extra)}); give this tool its own map")
+    pending = data.setdefault("pending_acl", [])
+    if (
+        not isinstance(pending, list)
+        or any(not isinstance(key, str) or key not in data["clients"] for key in pending)
+        or len(set(pending)) != len(pending)
+    ):
+        raise config_problem("the client map's pending_acl is not a list of mapped keys")
     return data
 
 
 def save_map(path: Path, data: dict):
+    """Saves the map; pending_acl only while it is not empty."""
+    saved = {"version": data["version"], "clients": data["clients"]}
+    if data.get("pending_acl"):
+        saved["pending_acl"] = data["pending_acl"]
     try:
-        allocator.save_map(path, data)
+        allocator.save_map(path, saved)
     except OSError as error:
         raise failure(f"save the client map: {error}") from None
+
+
+def set_acl_pending(data: dict, key: str, pending: bool):
+    """Records that key's new client owes its default ACL group, or drops the
+    record."""
+    keys = [entry for entry in data.get("pending_acl", []) if entry != key]
+    if pending:
+        keys.append(key)
+    data["pending_acl"] = keys
 
 
 @contextlib.contextmanager
@@ -261,7 +294,12 @@ class Api:
         if status in (401, 403):
             raise config_problem("the root credential was refused; check URNETWORK_ROOT_JWT")
         if status == 404:
-            raise failure(f"{route} answered 404: the server needs a release with this route")
+            # a server that predates the route (EMBED_CONTRACT.md, "Backend tools")
+            if route == ACL_ROUTE:
+                raise failure(ACL_UNSUPPORTED_MESSAGE)
+            if route in (CAP_ROUTE, CAPS_ROUTE):
+                raise failure(f"{route} answered 404: the server predates the data-cap routes")
+            raise failure(f"{route} answered 404")
         if not 200 <= status < 300:
             raise failure(f"{route} failed with HTTP {status}")
         try:
@@ -304,10 +342,12 @@ def urllib_transport(origin: str, root: str):
     return send
 
 
-def provision(api: Api, path: Path, key: str, client_jwt_file: str):
+def provision(api: Api, path: Path, key: str, client_jwt_file: str, acl_group: str):
     """Reissues the key's client, or provisions a new one; on Client does not
-    exist. it drops the mapping and provisions a new client. Writes the client
-    JWT to client_jwt_file and prints only the client ID."""
+    exist. it drops the mapping and provisions a new client. A new client goes
+    into acl_group, with a pending_acl record until the group is applied, before
+    any client JWT is written. Writes the client JWT to client_jwt_file and
+    prints only the client ID."""
     with map_lock(path):
         data = load_map(path)
         old = data["clients"].get(key)
@@ -317,6 +357,7 @@ def provision(api: Api, path: Path, key: str, client_jwt_file: str):
             if is_client_does_not_exist(answer):
                 # deactivated after 30 days without connecting, or removed
                 del data["clients"][key]
+                set_acl_pending(data, key, False)
                 save_map(path, data)
                 old = None
         if old is None:
@@ -333,6 +374,15 @@ def provision(api: Api, path: Path, key: str, client_jwt_file: str):
             if result["client_id"] in data["clients"].values():
                 raise failure("the API returned a client that the map assigns to another key")
             data["clients"][key] = result["client_id"]
+            # the mapping and the record that the client owes its group, in one save
+            set_acl_pending(data, key, acl_group == ACL_GROUP_ISOLATED)
+            save_map(path, data)
+        if key in data["pending_acl"]:
+            # a new client is "default": only an isolated default needs the request.
+            # A failure raises with the record kept, before any client JWT is written.
+            if acl_group == ACL_GROUP_ISOLATED:
+                post_acl_group(api, result["client_id"], ACL_GROUP_ISOLATED)
+            set_acl_pending(data, key, False)
             save_map(path, data)
         try:
             write_private_file(client_jwt_file, (result["by_client_jwt"] + "\n").encode())
@@ -344,8 +394,34 @@ def provision(api: Api, path: Path, key: str, client_jwt_file: str):
 def mapped_client(path: Path, key: str) -> str:
     client = load_map(path)["clients"].get(key)
     if client is None:
-        raise config_problem("no client is mapped for that key; run provision first")
+        raise config_problem(UNMAPPED_MESSAGE)
     return client
+
+
+def post_acl_group(api: Api, client: str, acl_group: str):
+    """Sets the client's ACL group; the answer must name the client and the
+    group."""
+    answer = api.call("POST", ACL_ROUTE, {"client_id": client, "acl_group": acl_group})
+    if answer.get("error") is not None:
+        raise failure("the ACL group request was refused: " + message_of(answer["error"]))
+    if answer.get("client_id") != client or answer.get("acl_group") != acl_group:
+        raise failure("the API answered another client or ACL group")
+
+
+def acl(api: Api, path: Path, key: str, acl_group: str):
+    """Sets the ACL group of the key's client and prints {"client_id": ...,
+    "acl_group": ...}. An explicit group settles a pending default group, so the
+    record is dropped."""
+    with map_lock(path):
+        data = load_map(path)
+        client = data["clients"].get(key)
+        if client is None:
+            raise config_problem(UNMAPPED_MESSAGE)
+        post_acl_group(api, client, acl_group)
+        if key in data["pending_acl"]:
+            set_acl_pending(data, key, False)
+            save_map(path, data)
+    print(compact({"client_id": client, "acl_group": acl_group}))
 
 
 def cap(api: Api, path: Path, key: str, fields: dict):
@@ -400,11 +476,12 @@ def remove(api: Api, path: Path, key: str):
         data = load_map(path)
         client = data["clients"].get(key)
         if client is None:
-            raise config_problem("no client is mapped for that key")
+            raise config_problem(UNMAPPED_MESSAGE)
         answer = api.call("POST", REMOVE_CLIENT_ROUTE, {"client_id": client})
         if answer.get("error") is not None and not is_client_does_not_exist(answer):
             raise failure("remove was refused: " + message_of(answer["error"]))
         del data["clients"][key]
+        set_acl_pending(data, key, False)
         save_map(path, data)
     print(compact({"removed": client}))
 
@@ -423,7 +500,7 @@ def run(args: list, environ=None, transport_factory=urllib_transport) -> int:
                 return EXIT_FAILURE
             print("embed backend self-test passed")
             return EXIT_OK
-        if not args or args[0] not in ("provision", "cap", "usage", "usage-all", "remove"):
+        if not args or args[0] not in ("provision", "cap", "usage", "usage-all", "remove", "acl"):
             raise config_problem(USAGE)
         command, operands = args[0], args[1:]
         if command == "provision" and len(operands) != 2:
@@ -434,6 +511,8 @@ def run(args: list, environ=None, transport_factory=urllib_transport) -> int:
             raise config_problem(USAGE)
         if command == "usage-all" and operands:
             raise config_problem(USAGE)
+        if command == "acl" and (len(operands) != 2 or operands[1] not in ACL_GROUPS):
+            raise config_problem(USAGE)
         key = check_key(operands[0]) if command != "usage-all" else None
         fields = parse_cap_options(operands[1:]) if command == "cap" else None
 
@@ -441,6 +520,9 @@ def run(args: list, environ=None, transport_factory=urllib_transport) -> int:
         if not root:
             raise config_problem("set URNETWORK_ROOT_JWT from the backend's secret store")
         origin = api_origin(environ.get("URNETWORK_API_URL") or "https://api.bringyour.com")
+        acl_group = environ.get("URNETWORK_DEFAULT_ACL_GROUP") or ACL_GROUP_ISOLATED
+        if acl_group not in ACL_GROUPS:
+            raise config_problem("URNETWORK_DEFAULT_ACL_GROUP must be default or isolated")
         path = None
         if command != "usage-all":
             map_name = environ.get("URNETWORK_CLIENT_MAP", "")
@@ -451,13 +533,15 @@ def run(args: list, environ=None, transport_factory=urllib_transport) -> int:
                 raise config_problem("URNETWORK_CLIENT_MAP must be absolute, in an existing service-owned directory")
         api = Api(transport_factory(origin, root))
         if command == "provision":
-            provision(api, path, key, operands[1])
+            provision(api, path, key, operands[1], acl_group)
         elif command == "cap":
             cap(api, path, key, fields)
         elif command == "usage":
             usage(api, path, key)
         elif command == "usage-all":
             usage_all(api)
+        elif command == "acl":
+            acl(api, path, key, operands[1])
         else:
             remove(api, path, key)
         return EXIT_OK
@@ -521,12 +605,19 @@ def self_test():
             os.chmod(directory, 0o700)
         map_path = os.path.join(directory, "clients.json")
         jwt_path = os.path.join(directory, "client.jwt")
-        environ = {"URNETWORK_ROOT_JWT": SELF_TEST_ROOT, "URNETWORK_CLIENT_MAP": map_path, "URNETWORK_API_URL": "http://127.0.0.1:1"}
+        # the checks before the ACL group checks keep new clients in "default",
+        # which sends no ACL request
+        environ = {
+            "URNETWORK_ROOT_JWT": SELF_TEST_ROOT,
+            "URNETWORK_CLIENT_MAP": map_path,
+            "URNETWORK_API_URL": "http://127.0.0.1:1",
+            "URNETWORK_DEFAULT_ACL_GROUP": ACL_GROUP_DEFAULT,
+        }
 
-        def tool(args, api):
+        def tool(args, api, settings=None):
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = run(args, environ, api.factory)
+                code = run(args, environ if settings is None else settings, api.factory)
             text = out.getvalue() + err.getvalue()
             if SELF_TEST_ROOT in text:
                 raise SelfTestError("the root credential reached the output")
@@ -657,6 +748,121 @@ def self_test():
         expect(code == EXIT_CONFIG, "a refused root credential must exit 78")
         code, _, _ = tool(["usage-all"], StandInApi(failure_transport_error()))
         expect(code == EXIT_FAILURE, "an unreachable API must exit 1")
+        for args in (["acl"], ["acl", SELF_TEST_KEY], ["acl", SELF_TEST_KEY, "public"], ["acl", SELF_TEST_KEY, "Default"], ["acl", SELF_TEST_KEY, "default", "extra"], ["acl", "alice", "default"]):
+            code, _, _ = tool(args, StandInApi())
+            expect(code == EXIT_CONFIG, f"{args} must be a usage error")
+        bad_group = dict(environ, URNETWORK_DEFAULT_ACL_GROUP="private")
+        code, _, err = tool(["provision", "user:x", jwt_path], StandInApi(), bad_group)
+        expect(code == EXIT_CONFIG and err.strip() == "URNETWORK_DEFAULT_ACL_GROUP must be default or isolated", "an invalid default ACL group must exit 78")
+
+        self_test_acl_groups(directory, environ, tool, expect)
+        self_test_failure_texts(directory, environ, tool, expect)
+
+
+def self_test_acl_groups(directory, environ, tool, expect):
+    """The default ACL group: applied to a new client only, with pending_acl set
+    before and cleared after, kept and retried after a failure, kept on a server
+    without ACL groups, and settled by acl; the acl command."""
+    acl_map = os.path.join(directory, "acl.json")
+    isolated = {name: value for name, value in dict(environ, URNETWORK_CLIENT_MAP=acl_map).items() if name != "URNETWORK_DEFAULT_ACL_GROUP"}
+    jwt_path = os.path.join(directory, "acl.jwt")
+
+    def pending():
+        return load_map(Path(acl_map))["pending_acl"]
+
+    def provisioned(client):
+        return (200, {"client_id": client, "by_client_jwt": self_test_jwt(client)})
+
+    def applied(client, group):
+        return (200, {"client_id": client, "acl_group": group})
+
+    # unset means isolated: the new client, then one ACL request, then no record
+    api = StandInApi(provisioned(SELF_TEST_CLIENT), applied(SELF_TEST_CLIENT, ACL_GROUP_ISOLATED))
+    code, _, err = tool(["provision", "user:ivan", jwt_path], api, isolated)
+    expect(code == EXIT_OK and [request["path"] for request in api.requests] == [AUTH_CLIENT_ROUTE, ACL_ROUTE], f"a new client must be put in isolated: {err}")
+    expect(api.requests[1]["body"] == {"client_id": SELF_TEST_CLIENT, "acl_group": ACL_GROUP_ISOLATED}, "the ACL request must name the client and isolated")
+    expect(pending() == [] and "pending_acl" not in Path(acl_map).read_text(), "an applied group must leave no record")
+    expect(Path(jwt_path).read_text() == self_test_jwt(SELF_TEST_CLIENT) + "\n", "the client JWT must be written after the group")
+    api = StandInApi(provisioned(SELF_TEST_CLIENT))
+    code, _, _ = tool(["provision", "user:ivan", jwt_path], api, isolated)
+    expect(code == EXIT_OK and len(api.requests) == 1, "a reissue must send no ACL request")
+
+    # a failed request keeps the record and writes no client JWT; the next issue retries
+    judy_jwt = os.path.join(directory, "judy.jwt")
+    code, _, _ = tool(["provision", "user:judy", judy_jwt], StandInApi(provisioned(SELF_TEST_OTHER_CLIENT), (500, {})), isolated)
+    expect(code == EXIT_FAILURE and not os.path.exists(judy_jwt) and pending() == ["user:judy"], "a failed ACL request must keep the record and write no client JWT")
+    expect(load_map(Path(acl_map))["clients"]["user:judy"] == SELF_TEST_OTHER_CLIENT, "the new client must be mapped with its record")
+    api = StandInApi(provisioned(SELF_TEST_OTHER_CLIENT), applied(SELF_TEST_OTHER_CLIENT, ACL_GROUP_ISOLATED))
+    code, _, _ = tool(["provision", "user:judy", judy_jwt], api, isolated)
+    expect(code == EXIT_OK and api.requests[1]["path"] == ACL_ROUTE and pending() == [] and os.path.exists(judy_jwt), "a pending group must be applied on the next issue")
+
+    # a server without ACL groups: exit 1 with the record kept; a default of default then provisions
+    older_map = os.path.join(directory, "older.json")
+    kim_jwt = os.path.join(directory, "kim.jwt")
+    older_isolated = dict(isolated, URNETWORK_CLIENT_MAP=older_map)
+    kim = "55555555-5555-5555-5555-555555555555"
+    code, _, err = tool(["provision", "user:kim", kim_jwt], StandInApi(provisioned(kim), (404, {})), older_isolated)
+    expect(code == EXIT_FAILURE and err.strip() == ACL_UNSUPPORTED_MESSAGE and not os.path.exists(kim_jwt), f"a server without ACL groups must exit 1 with its line: {err}")
+    expect(load_map(Path(older_map))["pending_acl"] == ["user:kim"], "a server without ACL groups must keep the record")
+    api = StandInApi(provisioned(kim))
+    code, _, _ = tool(["provision", "user:kim", kim_jwt], api, dict(older_isolated, URNETWORK_DEFAULT_ACL_GROUP=ACL_GROUP_DEFAULT))
+    expect(code == EXIT_OK and len(api.requests) == 1 and load_map(Path(older_map))["pending_acl"] == [] and os.path.exists(kim_jwt), "a default of default must settle the record without a request")
+
+    # the acl command: the request, the printed answer, and its refusals
+    api = StandInApi(applied(SELF_TEST_CLIENT, ACL_GROUP_DEFAULT))
+    code, out, _ = tool(["acl", "user:ivan", ACL_GROUP_DEFAULT], api, isolated)
+    expect(code == EXIT_OK and json.loads(out) == {"client_id": SELF_TEST_CLIENT, "acl_group": ACL_GROUP_DEFAULT}, "acl must print the answer")
+    expect(api.requests == [{"method": "POST", "path": ACL_ROUTE, "body": {"client_id": SELF_TEST_CLIENT, "acl_group": ACL_GROUP_DEFAULT}}], "acl must post the client and the group")
+    code, _, _ = tool(["acl", "user:ivan", ACL_GROUP_ISOLATED], StandInApi(applied(SELF_TEST_CLIENT, ACL_GROUP_DEFAULT)), isolated)
+    expect(code == EXIT_FAILURE, "an answer for another group must fail")
+    code, _, _ = tool(["acl", "user:ivan", ACL_GROUP_ISOLATED], StandInApi((200, {"error": {"message": CLIENT_DOES_NOT_EXIST}})), isolated)
+    expect(code == EXIT_FAILURE, "a refused ACL request must fail")
+    code, _, err = tool(["acl", "user:ivan", ACL_GROUP_ISOLATED], StandInApi((404, {})), isolated)
+    expect(code == EXIT_FAILURE and err.strip() == ACL_UNSUPPORTED_MESSAGE, f"acl on a server without ACL groups must print its line: {err}")
+
+    # an explicit group settles a pending record, so a later issue keeps it
+    mia = "66666666-6666-6666-6666-666666666666"
+    tool(["provision", "user:mia", os.path.join(directory, "mia.jwt")], StandInApi(provisioned(mia), (500, {})), isolated)
+    expect(pending() == ["user:mia"], "the failed group must be recorded")
+    code, _, _ = tool(["acl", "user:mia", ACL_GROUP_DEFAULT], StandInApi(applied(mia, ACL_GROUP_DEFAULT)), isolated)
+    expect(code == EXIT_OK and pending() == [], "acl must settle a pending record")
+    api = StandInApi(provisioned(mia))
+    code, _, _ = tool(["provision", "user:mia", os.path.join(directory, "mia.jwt")], api, isolated)
+    expect(code == EXIT_OK and len(api.requests) == 1, "a settled group must not be overridden on the next issue")
+
+    # remove drops a pending record with its mapping
+    noor = "77777777-7777-7777-7777-777777777777"
+    tool(["provision", "user:noor", os.path.join(directory, "noor.jwt")], StandInApi(provisioned(noor), (500, {})), isolated)
+    code, _, _ = tool(["remove", "user:noor"], StandInApi((200, {})), isolated)
+    expect(code == EXIT_OK and pending() == [], "remove must drop a pending record")
+
+    # a pending_acl that is not a list of distinct mapped keys is refused untouched
+    pending_map = os.path.join(directory, "pending.json")
+    for value in (
+        {"version": 1, "clients": {}, "pending_acl": ["user:x"]},
+        {"version": 1, "clients": {"user:x": SELF_TEST_CLIENT}, "pending_acl": ["user:x", "user:x"]},
+        {"version": 1, "clients": {"user:x": SELF_TEST_CLIENT}, "pending_acl": "user:x"},
+        {"version": 1, "clients": {"user:x": SELF_TEST_CLIENT}, "pending_acl": [1]},
+    ):
+        text = json.dumps(value).encode()
+        write_private_file(pending_map, text)
+        api = StandInApi()
+        code, _, _ = tool(["provision", "user:x", jwt_path], api, dict(environ, URNETWORK_CLIENT_MAP=pending_map))
+        expect(code == EXIT_CONFIG and Path(pending_map).read_bytes() == text and not api.requests, f"the map {value} must be refused untouched")
+
+
+def self_test_failure_texts(directory, environ, tool, expect):
+    """The unmapped-key and 404 texts."""
+    texts = dict(environ, URNETWORK_CLIENT_MAP=os.path.join(directory, "texts.json"))
+    for args in (["cap", "user:nobody", "--monthly", "1"], ["usage", "user:nobody"], ["remove", "user:nobody"], ["acl", "user:nobody", ACL_GROUP_DEFAULT]):
+        api = StandInApi()
+        code, _, err = tool(args, api, texts)
+        expect(code == EXIT_CONFIG and err.strip() == UNMAPPED_MESSAGE and not api.requests, f"{args[0]} for an unmapped key must exit 78 with the unmapped line: {err}")
+    olga = {"client_id": SELF_TEST_CLIENT, "by_client_jwt": self_test_jwt(SELF_TEST_CLIENT)}
+    tool(["provision", "user:olga", os.path.join(directory, "olga.jwt")], StandInApi((200, olga)), texts)
+    for args, route in ((["cap", "user:olga", "--monthly", "1"], CAP_ROUTE), (["usage", "user:olga"], CAP_ROUTE), (["usage-all"], CAPS_ROUTE)):
+        code, _, err = tool(args, StandInApi((404, {})), texts)
+        expect(code == EXIT_FAILURE and err.strip() == f"{route} answered 404: the server predates the data-cap routes", f"{args[0]} on a server without the cap routes: {err}")
 
 
 def failure_transport_error():

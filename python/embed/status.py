@@ -44,18 +44,34 @@ MINUTES_PER_DAY = 24 * 60
 
 
 def format_byte_count(byte_count: int) -> str:
-    """Decimal units with one decimal: "0 B", "999 B", "1.0 kB", "1.2 GB". Ties
-    round to even, as Go's %.1f does, so 1250 bytes is "1.2 kB"; a value that
-    rounds to 1000.0 moves to the next unit, so 999999 bytes is "1.0 MB"."""
+    """Decimal units with one decimal: "0 B", "999 B", "1.0 kB", "1.2 GB". The
+    tenths round half to even on the exact integer, never on a binary fraction,
+    so 1050 bytes is "1.0 kB" and 1150 bytes "1.2 kB"; a value that rounds to
+    1000.0 moves to the next unit, so 999999 bytes is "1.0 MB"."""
     if byte_count < 1000:
         return f"{byte_count} B"
+    # the bytes in a tenth of the unit
+    tenth = 100
     for unit_index, unit in enumerate(DECIMAL_UNITS):
-        # int / int is the correctly rounded quotient, and format rounds its exact
-        # binary value half to even
-        text = f"{byte_count / 1000 ** (unit_index + 1):.1f}"
-        if float(text) < 1000.0 or unit_index == len(DECIMAL_UNITS) - 1:
-            return f"{text} {unit}"
+        tenths, remainder = divmod(byte_count, tenth)
+        if tenth < 2 * remainder or (2 * remainder == tenth and tenths % 2 == 1):
+            tenths += 1
+        if tenths < 10000 or unit_index == len(DECIMAL_UNITS) - 1:
+            return f"{tenths // 10}.{tenths % 10} {unit}"
+        tenth *= 1000
     raise AssertionError("unreachable")
+
+
+def start_line(client_id: str, instance_id: str) -> str:
+    """The line the console app prints once the device runs (EMBED_CONTRACT.md,
+    "Status")."""
+    return f"embed client {client_id}, installation {instance_id}"
+
+
+def license_app(system: str) -> str:
+    """The kind of app whose licenses --licenses prints, from platform.system():
+    "apple" on macOS, "windows" on Windows, "linux" elsewhere."""
+    return {"Darwin": "apple", "Windows": "windows"}.get(system, "linux")
 
 
 def reset_time_text(monthly_period_end: str) -> str | None:
