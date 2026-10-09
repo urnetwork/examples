@@ -40,6 +40,24 @@ An API key authenticates as the network exactly like a network JWT and carries n
 
 Treat the root credential like a production database password: keep it in the backend's secret store, give it only to the service that provisions, and keep it out of apps, logs, error messages, URLs and repositories. To rotate an API key, create a new key, deploy it to the backend, then remove the old key. Remove a leaked key at once. Removing a root credential stops it from provisioning; it is not how you cut off a user — [pause or remove that user's client](#backend-pause-remove-and-delete-users).
 
+## Embed enablement
+
+Embedding URnetwork needs an **Embed plan**. Embed plans are sold through a review and a contract: [request one on the Services page](https://ur.io/services). Once the contract is in place, the URnetwork team enables Embed for your network.
+
+Until then the network can still provision clients, because `POST /network/auth-client` is not gated, but the Embed routes refuse. `POST` and `GET /network/client-data-cap` (including an app reading its own caps with its client JWT), `GET /network/client-data-caps`, and `POST` and `GET /network/client-acl-group` answer 200 with:
+
+```json
+{"error": {"message": "Embed isn't enabled for this network."}}
+```
+
+Caps and ACL groups that were set while Embed was enabled stay enforced if the team later disables it; only reading and changing them is refused.
+
+`GET /network/embed`, with the root credential only (a client JWT is refused), reads the network's state: whether Embed is enabled, the network's client limit, and the active clients that count toward it.
+
+```json
+{"enabled": true, "client_limit": 5000, "active_client_count": 1234}
+```
+
 ## Backend: provision clients
 
 The backend provisions with `POST /network/auth-client` and the root credential, as the [integration contract](INTEGRATION_CONTRACT.md#backend-provisioning) describes for a top-level client:
@@ -140,7 +158,7 @@ curl -fsS -X POST "$API/network/client-acl-group" \
   --data "{\"client_id\": \"$CLIENT_ID\", \"acl_group\": \"isolated\"}"
 ```
 
-**The examples' default group.** The token server and every backend tool put each new client in `URNETWORK_DEFAULT_ACL_GROUP`: `isolated` when it is unset, so a whitelabel app's users never see each other, or `default` for an app that uses Messages. Other values are a configuration error. Since a new client is already `default`, a default of `default` sends no request. For `isolated`, the new client's mapping and a `pending_acl` record are saved together, then the group is applied, then the record is dropped; an issue for a key still in `pending_acl` applies the current default group before it returns a client JWT. A crash between the calls leaves the record, so a client is never in the wrong group without one.
+**The examples' default group.** The token server and every backend tool put each new client in `URNETWORK_DEFAULT_ACL_GROUP`: `isolated` when it is unset, so a whitelabel app's users never see each other, or `default` for an app that uses Messages. Other values are a configuration error. Since a new client is already `default`, a default of `default` sends no request. For `isolated`, the new client's mapping and a `pending_acl` record are saved together, then the group is applied, then the record is dropped; an issue for a key still in `pending_acl` applies the current default group before it returns a client JWT. A crash between the calls leaves the record, so a client is never in the wrong group without one. While Embed isn't enabled for the network the group cannot be applied, so the record stays; see [Backend tools](#backend-tools) and the [token server's behavior](#behavior).
 
 **A server without ACL groups** answers their route with 404. A backend tool then exits 1 with `/network/client-acl-group answered 404: the server predates ACL groups`, keeps the key in `pending_acl`, and writes no client JWT for a new client; set `URNETWORK_DEFAULT_ACL_GROUP=default` to provision on such a server. The token server reports it once in its log and still answers the token: the client stays `default`, the key stays in `pending_acl`, and a later request applies the group once the server has it.
 
@@ -162,6 +180,7 @@ curl -fsS -X POST "$API/network/client-acl-group" \
 | Monthly cap reached | `capped` with `monthly` until 00:00 UTC on the first | Raise or clear the monthly cap, or wait for the month. |
 | Running total reached | `capped` with `total`; no automatic reset | Raise or clear the cap, or send `reset_total`. |
 | Pause | A cap of `0` | Set the cap back. |
+| Before the team enables Embed | Provisioning works; the cap and ACL group routes answer the [refusal](#embed-enablement) | An [Embed plan](https://ur.io/services); the defaults stay pending and the next issue after Embed is enabled applies them. |
 | The network is at its client limit | Provisioning answers `Client limit exceeded.` | An [Embed plan](https://ur.io/services), or remove clients you no longer need. |
 | User deleted | — | Remove each installation's client and drop the mappings. |
 
@@ -215,7 +234,7 @@ A success answers 200 with:
 }
 ```
 
-`data_cap` is the client's [cap object](#the-cap-object), read with the root credential, or `null` when that read fails or the server has no cap routes yet; it never blocks the token. Every answer carries `Cache-Control: no-store`. An error answers with `{"error": {"code": "<code>", "message": "<text>"}}`:
+`data_cap` is the client's [cap object](#the-cap-object), read with the root credential, or `null` when that read fails, the server has no cap routes yet, or Embed isn't enabled for the network; it never blocks the token. Every answer carries `Cache-Control: no-store`. An error answers with `{"error": {"code": "<code>", "message": "<text>"}}`:
 
 | Status | `code` | When |
 | --- | --- | --- |
@@ -237,7 +256,8 @@ Other methods answer 405 and other paths 404, in the same error shape. There is 
 4. A new key first checks the installation limit: the number of mapped keys beginning `user:<service-user-id>:`. Then it provisions a new client (`"description": "embed installation"`, `"device_spec": "urnetwork-examples/embed-token-server"`), validates the answer, and saves the mapping. A reissue sends the same labels. The `provision` command labels its clients `embed client` and `urnetwork-examples/go-embed-server`; since a reissue relabels a client, a key reissued by the other path just takes the newer labels.
 5. When the default ACL group is `isolated`, a new client's key is saved in the map's `pending_acl` together with the mapping, the group is applied with `POST /network/client-acl-group`, and the key leaves `pending_acl` once that succeeds. If applying fails, the answer is 502 and no token is returned; on a server without ACL groups (404) it is reported once and the request continues with the key still in `pending_acl`. A later request for a key that is still in `pending_acl` applies the group before it returns a token.
 6. When default caps are configured, a new client's key is saved in the map's `pending_caps` together with the mapping, then the caps are applied with `POST /network/client-data-cap` (only the configured fields), and the key leaves `pending_caps` once that succeeds. If applying fails, the answer is 502 and no token is returned. A later request for a key that is still in `pending_caps` applies the default caps before it returns a token. A key never stays uncapped without a record.
-7. Read the cap object, release the lock and answer.
+7. While Embed isn't enabled for the network, the ACL group and cap requests of steps 5 and 6 answer the [refusal](#embed-enablement): the key stays in `pending_acl` and `pending_caps`, the request continues, and the token server reports it once in its log (`Embed isn't enabled for this network: new clients' default ACL group and caps stay pending until it is; see https://ur.io/services`). A request after the team enables Embed applies them.
+8. Read the cap object, release the lock and answer.
 
 The token server's map is the allocators' map with two more fields:
 
@@ -254,7 +274,7 @@ It never answers with, prints or logs the root credential, a session token or a 
 
 ### Self-test
 
-`token-server --self-test` needs no credentials and no network. Against a mock API it checks: session authentication (an unknown token is 401, a short token or a bad user ID is a configuration error); the installation ID and body rules; a new key versus a reissue, with the right wire fields (`client_id` only on a reissue, never `source_client_id`); the `Client does not exist.` re-provision; the installation limit; `client_limit` for both refusal flags; the default ACL group applied once to a new client and never on a reissue, `pending_acl` set before and cleared after, retried on the next request when applying failed, reported once and the token still answered on a server without ACL groups, and no request for a default of `default`; default caps applied once to a new client and never on a reissue, `pending_caps` set before and cleared after, and retried on the next request when applying failed; `data_cap` as `null` when the cap read fails; `Cache-Control: no-store`; the 404, 405 and 503 answers; private map and session file permissions; and that no answer or output contains the root credential.
+`token-server --self-test` needs no credentials and no network. Against a mock API it checks: session authentication (an unknown token is 401, a short token or a bad user ID is a configuration error); the installation ID and body rules; a new key versus a reissue, with the right wire fields (`client_id` only on a reissue, never `source_client_id`); the `Client does not exist.` re-provision; the installation limit; `client_limit` for both refusal flags; the default ACL group applied once to a new client and never on a reissue, `pending_acl` set before and cleared after, retried on the next request when applying failed, reported once and the token still answered on a server without ACL groups, and no request for a default of `default`; default caps applied once to a new client and never on a reissue, `pending_caps` set before and cleared after, and retried on the next request when applying failed; `data_cap` as `null` when the cap read fails; the Embed-not-enabled refusal answering the token with `data_cap` `null`, reported once, the key kept in `pending_acl` and `pending_caps`, and the defaults applied after Embed is enabled; `Cache-Control: no-store`; the 404, 405 and 503 answers; private map and session file permissions; and that no answer or output contains the root credential.
 
 ## Backend tools
 
@@ -268,17 +288,21 @@ Every console language has a backend tool in `<language>/embed/server/`, and the
 | `usage-all` | Pages through `GET /network/client-data-caps` with `limit=1000` and prints one cap object per line, stopping at a `null` cursor or a repeated one. |
 | `remove <key>` | Removes the key's client with `POST /network/remove-client`, then the mapping (also when the answer is `Client does not exist.`), and prints `{"removed": "<client_id>"}`. |
 | `acl <key> default\|isolated` | Sets the [ACL group](#backend-acl-groups) of the key's client with `POST /network/client-acl-group` and prints the answer, `{"client_id": "...", "acl_group": "..."}`. Any other group is a usage error. |
+| `status` | Reads the network's [Embed state](#embed-enablement) with `GET /network/embed` and prints one line, `embed enabled: yes \| client limit: 5000 \| active clients: 1234`, with `no` when Embed isn't enabled. |
 | `--self-test` | The credential-free self-test below. |
 
 `<key>` matches the allocator pattern, so `user:alice` and `user:alice:22222222-2222-2222-2222-222222222222` both work. The language tools accept a map with `version`, `clients` and an optional `pending_acl` array, which they write only while it is not empty, and refuse one with other fields, such as the token server's `pending_caps`, so that two tools never rewrite each other's map. Besides the allocator's settings they read `URNETWORK_DEFAULT_ACL_GROUP`. The description they send is `embed client` and the device spec `urnetwork-examples/<language>-embed-server`, on a new client and on every reissue.
 
-A refusal for either client limit flag prints `client limit reached: your network is at its client limit; see https://ur.io/services` on stderr. The tools exit **0** on success, **78** for a configuration or credential problem (missing settings, an invalid key or map, the root credential refused, the client limit), and **1** for any other failure, with one stderr line that never contains a secret. Three failures have fixed rules:
+A refusal for either client limit flag prints `client limit reached: your network is at its client limit; see https://ur.io/services` on stderr. The tools exit **0** on success, **78** for a configuration or credential problem (missing settings, an invalid key or map, the root credential refused, the client limit), and **1** for any other failure, with one stderr line that never contains a secret. These cases have fixed rules:
 
 - `cap`, `usage`, `remove` or `acl` for a key with no mapped client exits **78** with `no client is mapped for that key; run provision first`.
 - A `<map>.lock` that another process holds exits **1**, a retryable failure, with a line that names the lock and says to retry.
 - A cap route (`/network/client-data-cap` or `/network/client-data-caps`) that answers 404 exits **1** with `<path> answered 404: the server predates the data-cap routes`, where `<path>` is the route's path without its query. The ACL route answering 404 exits **1** with `/network/client-acl-group answered 404: the server predates ACL groups`, from `acl` and from a `provision` that owes an `isolated` group.
+- The [Embed-not-enabled refusal](#embed-enablement) from `cap`, `usage`, `usage-all` or `acl` exits **78** with `embed not enabled: Embed isn't enabled for this network; see https://ur.io/services`.
+- `provision` while Embed isn't enabled still provisions or reissues the client and writes its client JWT. The default ACL group that the client owes stays in `pending_acl` (and, for the token server's `provision`, its default caps in `pending_caps`); it prints `embed not enabled: the client's defaults stay pending until Embed is enabled; see https://ur.io/services` on stderr and exits **0**. A `provision` after the team enables Embed applies them and clears the records.
+- `status` exits **0** for an enabled and for a not enabled network, **78** when the server refuses it (a client JWT as the root credential, for example), and **1** with `/network/embed answered 404: the server predates Embed enablement` on a server without the route.
 
-The self-test needs no credentials and no network. It checks the allocator rules (new versus reissue, key and argument rejection, private map round trip, response and claim checks), the `Client does not exist.` re-provision, the client JWT file's private permissions and that the token never reaches stdout or stderr, the merge request bodies (an omitted option is absent from the JSON, `null` is JSON `null`, byte counts are integers, `reset_total` appears only when given), the cap object parsing, the `usage-all` paging and its stop on a repeated cursor, `remove` dropping the mapping for both answers, the refusal of a map with unknown fields, the `acl` request body and printed answer, the default ACL group on a new client only (with `pending_acl` set before and cleared after, kept and retried after a failure, and no request for a default of `default`), a `provision` that owes a group on a server without ACL groups (exit 1, the key kept in `pending_acl`, no client JWT written), the unmapped-key and 404 texts, and the exit codes.
+The self-test needs no credentials and no network. It checks the allocator rules (new versus reissue, key and argument rejection, private map round trip, response and claim checks), the `Client does not exist.` re-provision, the client JWT file's private permissions and that the token never reaches stdout or stderr, the merge request bodies (an omitted option is absent from the JSON, `null` is JSON `null`, byte counts are integers, `reset_total` appears only when given), the cap object parsing, the `usage-all` paging and its stop on a repeated cursor, `remove` dropping the mapping for both answers, the refusal of a map with unknown fields, the `acl` request body and printed answer, the default ACL group on a new client only (with `pending_acl` set before and cleared after, kept and retried after a failure, and no request for a default of `default`), a `provision` that owes a group on a server without ACL groups (exit 1, the key kept in `pending_acl`, no client JWT written), the Embed-not-enabled refusal (`cap`, `usage`, `usage-all` and `acl` exit 78 with the fixed line; `provision` exits 0 with the client JWT written, the fixed stderr line and the key kept in `pending_acl`, and a `provision` after Embed is enabled applies the group and clears the record), the `status` line for an enabled and a not enabled network and its refusal, 404 and invalid-answer exits, the unmapped-key and 404 texts, and the exit codes.
 
 ## Packaging and embedding the SDK
 
@@ -368,7 +392,7 @@ Every example shows these fields with these exact rules. Console examples print 
 | Field | Rule |
 | --- | --- |
 | Status | The first rule that applies: `signed out` (GUI and Android, after an auth logout or a 401 or 409 from the token server, until started again); `stopped` (GUI and Android, before start or after stop); `client limit` while the client limit status is `client_limit_exceeded`, written `client limit, retry at HH:MM UTC` with the [provider contract's rounding](PROVIDER_CONTRACT.md#status) and plain `client limit` when the retry time is 0; `paused` while the latest cap reading is `capped` and the cap that `capped_reason` names is `0`; `data cap reached, resets YYYY-MM-DD HH:MM UTC` while it is `capped` with `monthly`, from `monthly_period_end` in UTC with the seconds rounded **up** to the next whole minute; plain `data cap reached` while it is `capped` with `total`, or with a `monthly_period_end` that does not parse; `connected` while the window status has at least one provider added (`ProviderStateAdded` of 1 or more); otherwise `connecting`. |
-| Data this month | `checking` until the first cap reading; `unavailable` if that reading fails (a later failure keeps the last value; a server without the cap routes answers 404, which counts as a failure); `no cap` when `monthly_byte_limit` is `null`; otherwise `<used> of <limit>` from `monthly_used_byte_count` and `monthly_byte_limit`. |
+| Data this month | `checking` until the first cap reading; `unavailable` if that reading fails (a later failure keeps the last value; a server without the cap routes answers 404, which counts as a failure); `unavailable` again whenever a reading answers the [Embed-not-enabled refusal](#embed-enablement), which clears the last reading, so the status rules then see no cap reading; `no cap` when `monthly_byte_limit` is `null`; otherwise `<used> of <limit>` from `monthly_used_byte_count` and `monthly_byte_limit`. |
 | Data total | The same rule with `total_used_byte_count` and `total_byte_limit`. |
 
 A field without a cap shows `no cap`, never a used count: a server need not report usage for an uncapped client. Data amounts use decimal units, because data plans and the Embed plan's monthly data budget are sold in them: below 1000 bytes `N B`, otherwise one decimal in `kB`, `MB`, `GB`, `TB`, `PB` or `EB`, in powers of 1000. Every language computes the text with exact integer arithmetic, never binary floating point, so all fifteen examples print the same text for every byte count:
@@ -404,6 +428,8 @@ Golden vectors for self-tests:
 | connecting, caps not read yet | `status: connecting \| data this month: checking \| data total: checking` |
 | connected, monthly 1234567890 of 5000000000, no total cap | `status: connected \| data this month: 1.2 GB of 5.0 GB \| data total: no cap` |
 | connected, the first cap reading failed | `status: connected \| data this month: unavailable \| data total: unavailable` |
+| connected, the first cap reading answers `Embed isn't enabled for this network.` | `status: connected \| data this month: unavailable \| data total: unavailable` |
+| connected, a reading capped `monthly` at 5000000000 of 5000000000, then a reading that answers `Embed isn't enabled for this network.` | `status: connected \| data this month: unavailable \| data total: unavailable` |
 | capped `monthly`, 5000000000 of 5000000000, ends `2026-11-01T00:00:00Z` | `status: data cap reached, resets 2026-11-01 00:00 UTC \| data this month: 5.0 GB of 5.0 GB \| data total: no cap` |
 | capped `total`, 10000000000 of 10000000000, no monthly cap | `status: data cap reached \| data this month: no cap \| data total: 10.0 GB of 10.0 GB` |
 | capped `monthly`, monthly limit 0, used 0 | `status: paused \| data this month: 0 B of 0 B \| data total: no cap` |
@@ -444,7 +470,7 @@ A `--version` command that prints the SDK version is optional. Any other argumen
 Every embed app has a self-test that needs no credentials and no network and creates no device. Console examples run it with `--self-test` and print a single passed line; GUI and Android samples run it as their unit tests. Where the language allows, it does not load the native SDK runtime. It checks:
 
 - the byte vectors above, computed with the exact integer rule, and the reset time, client limit text and status line vectors, and the status rules with the rule vectors (`client limit` before `paused`, `paused` before `data cap reached`, the cap that `capped_reason` names deciding `paused`);
-- the data fields: `checking`, `unavailable`, a later failure keeping the last value, `no cap` for a `null` limit even with a used count, and `<used> of <limit>`;
+- the data fields: `checking`, `unavailable`, a later failure keeping the last value, the Embed-not-enabled refusal clearing the last reading (both fields `unavailable`, no cap reading for the status rules), `no cap` for a `null` limit even with a used count, and `<used> of <limit>`;
 - the cap object parsing: `null` or absent limits, `capped` and `capped_reason`, an unknown `capped_reason` read as capped without a reset time;
 - the JWT `client_id` claim: accepted for a client JWT, refused for a network JWT, a malformed token and an invalid UUID;
 - the token fetch against a stand-in server: the request (the bearer session, `installation_id` equal to `instance-id`), saving `client.jwt` atomically, a `client_id` that does not match the claim refused, and the answers mapped to the exit codes and states above;
