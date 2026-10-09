@@ -9,9 +9,14 @@ import {CapReadings, clientLimitText, dataFields, formatDataAmount, parseCapObje
 // A cap object over no caps and no usage.
 const cap = fields => parseCapObject({monthly_period_end: "2026-11-01T00:00:00Z", capped: false, capped_reason: "", ...fields});
 
-test("data amounts are decimal with one decimal and ties to even", () => {
-  for (const [byteCount, text] of [[0, "0 B"], [999, "999 B"], [1000, "1.0 kB"], [999949, "999.9 kB"], [1250, "1.2 kB"], [1750, "1.8 kB"],
-    [999999, "1.0 MB"], [1234567890, "1.2 GB"], [5000000000, "5.0 GB"], [10000000000, "10.0 GB"], [3000000000000, "3.0 TB"]]) {
+test("data amounts are decimal with one decimal and ties to even on the exact integer", () => {
+  for (const [byteCount, text] of [[0, "0 B"], [999, "999 B"], [1000, "1.0 kB"], [999949, "999.9 kB"],
+    // exact halves round to even on the integer; rounding the binary value of 1.05 would give 1.1
+    [1050, "1.0 kB"], [1150, "1.2 kB"], [1250, "1.2 kB"], [1750, "1.8 kB"],
+    // 999.95 kB ties to the even 1000.0 kB and moves to the next unit, as does 999.999 kB
+    [999950, "1.0 MB"], [999999, "1.0 MB"], [1234567890, "1.2 GB"], [5000000000, "5.0 GB"], [10000000000, "10.0 GB"], [3000000000000, "3.0 TB"],
+    // the largest int64, exact as a BigInt, and as the nearest Number
+    [9223372036854775807n, "9.2 EB"], [Number.MAX_SAFE_INTEGER * 1024, "9.2 EB"]]) {
     assert.equal(formatDataAmount(byteCount), text);
   }
 });
