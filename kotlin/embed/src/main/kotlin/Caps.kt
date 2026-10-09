@@ -11,6 +11,10 @@ import kotlinx.serialization.json.JsonObject
 
 const val capPath = "/network/client-data-cap"
 
+// The server refuses the cap read with this message while the team has not enabled Embed for the
+// network (EMBED_CONTRACT.md, "Embed enablement"). The refusal clears the last reading.
+const val embedNotEnabledMessage = "Embed isn't enabled for this network."
+
 /**
  * One cap object, as GET /network/client-data-cap answers it. A limit is null when that cap is not
  * set. cappedReason is "monthly", "total", or "" when the client is not capped.
@@ -68,8 +72,26 @@ data class DataCap(
 }
 
 /**
+ * Whether a JSON text is the Embed-not-enabled refusal,
+ * {"error": {"message": "Embed isn't enabled for this network."}}.
+ */
+fun isEmbedNotEnabled(json: String?): Boolean =
+    try {
+        parseNullableJsonObject(json)?.objectMember("error")?.stringMember("message") == embedNotEnabledMessage
+    } catch (e: IllegalArgumentException) {
+        false
+    }
+
+/**
+ * One finished cap read: the cap object, or null for a failure. embedNotEnabled marks the
+ * Embed-not-enabled refusal, which clears the last reading.
+ */
+data class CapRead(val cap: DataCap?, val embedNotEnabled: Boolean = false)
+
+/**
  * The cap readings so far. A failed reading keeps the last successful one; before any success, a
- * failure shows "unavailable". Owned by the status loop's thread.
+ * failure shows "unavailable". The Embed-not-enabled refusal clears the last reading. Owned by the
+ * status loop's thread.
  */
 class CapReadings {
     /** The latest successful reading; null until one succeeds. */
@@ -87,22 +109,36 @@ class CapReadings {
             latest = reading
         }
     }
+
+    /**
+     * Records the Embed-not-enabled refusal: it clears the last reading, so both data fields read
+     * "unavailable" and the status rules see no cap reading.
+     */
+    fun recordEmbedNotEnabled() {
+        attempted = true
+        latest = null
+    }
 }
 
 /**
  * GET /network/client-data-cap with the client JWT; the client is the JWT's own, so no client_id is
- * sent. Null for any failure: unreachable, a status other than 2xx (a server without the cap routes
- * answers 404), or an answer that is not a cap object. Never throws.
+ * sent. No cap for any failure: unreachable, a status other than 2xx (a server without the cap
+ * routes answers 404), or an answer that is not a cap object; the Embed-not-enabled refusal is
+ * marked. Never throws.
  */
-fun readCap(apiOrigin: URI, clientJwt: String, transport: HttpTransport): DataCap? =
+fun readCap(apiOrigin: URI, clientJwt: String, transport: HttpTransport): CapRead =
     try {
         val answer = transport.send("GET", apiOrigin.resolve(capPath), clientJwt, null)
-        if (answer.status in 200..299) DataCap.parse(answer.body) else null
+        when {
+            answer.status !in 200..299 -> CapRead(null)
+            isEmbedNotEnabled(answer.body) -> CapRead(null, embedNotEnabled = true)
+            else -> CapRead(DataCap.parse(answer.body))
+        }
     } catch (e: InterruptedException) {
         Thread.currentThread().interrupt()
-        null
+        CapRead(null)
     } catch (e: IOException) {
-        null
+        CapRead(null)
     } catch (e: RuntimeException) {
-        null
+        CapRead(null)
     }

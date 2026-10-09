@@ -69,6 +69,9 @@ private inline fun <reified T : Exception> expectThrows(reason: String, block: (
 private fun readings(vararg readings: DataCap?): CapReadings =
     CapReadings().also { capReadings -> readings.forEach(capReadings::record) }
 
+/** Cap readings after the given readings, then the Embed-not-enabled refusal. */
+private fun notEnabled(vararg readings: DataCap?): CapReadings = readings(*readings).also { it.recordEmbedNotEnabled() }
+
 /** Decimal units, one decimal, ties to even on the exact integer, the next unit at 1000.0. */
 private fun checkFormatByteCount() {
     val cases = listOf(
@@ -137,6 +140,18 @@ private fun checkStatusLines() {
             "status: connected | data this month: 1.2 GB of 5.0 GB | data total: no cap",
         line(clientLimitStatusNone, 0, readings(null), 1) to
             "status: connected | data this month: unavailable | data total: unavailable",
+        line(clientLimitStatusNone, 0, notEnabled(), 1) to
+            "status: connected | data this month: unavailable | data total: unavailable",
+        line(
+            clientLimitStatusNone, 0,
+            notEnabled(
+                DataCap(
+                    monthlyByteLimit = 5000000000, monthlyUsedByteCount = 5000000000,
+                    monthlyPeriodEnd = "2026-11-01T00:00:00Z", capped = true, cappedReason = "monthly",
+                ),
+            ),
+            1,
+        ) to "status: connected | data this month: unavailable | data total: unavailable",
         line(
             clientLimitStatusNone, 0,
             readings(
@@ -217,6 +232,11 @@ private fun checkDataFields() {
     expect(dataField(readings(DataCap(totalByteLimit = 10000000000, totalUsedByteCount = 1000)), monthly = false) == "1.0 kB of 10.0 GB") {
         "the total field is wrong"
     }
+    // the Embed-not-enabled refusal clears the last reading
+    val cleared = notEnabled(good)
+    expect(cleared.latest == null && dataField(cleared, monthly = true) == "unavailable" && dataField(cleared, monthly = false) == "unavailable") {
+        "the Embed-not-enabled refusal does not clear the last reading"
+    }
 }
 
 /** The cap object parsing. */
@@ -248,8 +268,11 @@ private fun checkCapParsing() {
         """{"capped_reason":7}""",
     )
     for (text in invalid) {
-        expect(DataCap.parse(text) == null) { "invalid cap object $text parsed" }
+        expect(DataCap.parse(text) == null && !isEmbedNotEnabled(text)) { "invalid cap object $text parsed" }
     }
+    // the Embed-not-enabled refusal is no cap object, and is recognized
+    val refusal = """{"error":{"message":"Embed isn't enabled for this network."}}"""
+    expect(DataCap.parse(refusal) == null && isEmbedNotEnabled(refusal)) { "the Embed-not-enabled refusal is misread" }
 }
 
 /** An unsigned JWT with the given claims: the app checks the shape and the client_id claim. */
@@ -380,18 +403,22 @@ private fun checkTokenFetch() {
     }
 }
 
-/** The cap read presents the client JWT and treats any failure as no reading. */
+/** The cap read presents the client JWT and treats any failure as no reading; the Embed-not-enabled refusal is marked. */
 private fun checkCapRead() {
     val token = jwt("client_id" to testClientId)
     val ok = StandIn(200, """{"monthly_byte_limit":5,"capped":false,"capped_reason":""}""")
     val read = readCap(testApiOrigin, token, ok)
-    expect(read?.monthlyByteLimit == 5L) { "a cap answer is not read" }
+    expect(read.cap?.monthlyByteLimit == 5L && !read.embedNotEnabled) { "a cap answer is not read" }
     expect(ok.method == "GET" && ok.uri == "https://api.bringyour.com/network/client-data-cap" && ok.bearer == token && ok.jsonBody == null) {
         "the cap read is ${ok.method} ${ok.uri}"
     }
-    expect(readCap(testApiOrigin, token, StandIn(404, "404 page not found")) == null) { "a server without the cap routes is a reading" }
-    expect(readCap(testApiOrigin, token, StandIn(200, """{"error":{"message":"denied"}}""")) == null) { "an error answer is a reading" }
-    expect(readCap(testApiOrigin, token, StandIn(200, "", true)) == null) { "an unreachable API is a reading" }
+    expect(readCap(testApiOrigin, token, StandIn(404, "404 page not found")) == CapRead(null)) { "a server without the cap routes is a reading" }
+    expect(readCap(testApiOrigin, token, StandIn(200, """{"error":{"message":"denied"}}""")) == CapRead(null)) { "an error answer is a reading" }
+    expect(readCap(testApiOrigin, token, StandIn(200, "", true)) == CapRead(null)) { "an unreachable API is a reading" }
+    expect(
+        readCap(testApiOrigin, token, StandIn(200, """{"error":{"message":"Embed isn't enabled for this network."}}""")) ==
+            CapRead(null, embedNotEnabled = true),
+    ) { "the Embed-not-enabled refusal is not marked" }
 }
 
 /** The state directory: private files, atomic replacement, one instance id, no symlinks. */

@@ -98,7 +98,7 @@ class EmbedSession(private val out: PrintStream, private val err: PrintStream) {
     // the cap readings so far, and the cap read in flight
     private var clientJwt = ""
     private val capReadings = CapReadings()
-    private var capRead: Future<DataCap?>? = null
+    private var capRead: Future<CapRead>? = null
     private var nextCapReadTime = 0L
 
     /** Whether requestStop was called; set from any thread. */
@@ -244,22 +244,27 @@ class EmbedSession(private val out: PrintStream, private val err: PrintStream) {
         val now = System.nanoTime()
         val finished = capRead
         if (finished != null && finished.isDone) {
-            val reading = try {
+            val read = try {
                 finished.get()
             } catch (e: ExecutionException) {
-                null
+                CapRead(null)
             } catch (e: InterruptedException) {
                 Thread.currentThread().interrupt()
-                null
+                CapRead(null)
             }
-            capReadings.record(reading)
+            // the Embed-not-enabled refusal clears the last reading; another failure keeps it
+            if (read.embedNotEnabled) {
+                capReadings.recordEmbedNotEnabled()
+            } else {
+                capReadings.record(read.cap)
+            }
             capRead = null
         }
         if (capRead == null && 0 <= now - nextCapReadTime) {
             val readJwt = clientJwt
             val readHttp = http
             val apiOrigin = settings.apiOrigin
-            capRead = capReader.submit<DataCap?> { readCap(apiOrigin, readJwt, readHttp) }
+            capRead = capReader.submit<CapRead> { readCap(apiOrigin, readJwt, readHttp) }
             nextCapReadTime = now + capReadInterval.inWholeNanoseconds
         }
     }

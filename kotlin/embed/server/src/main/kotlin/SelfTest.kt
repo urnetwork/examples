@@ -56,6 +56,13 @@ private class StandInApi : Transport {
 
     // when set, the ACL route answers the other group
     var aclMismatch = false
+
+    // when set, Embed isn't enabled for the network: the data-cap and ACL-group routes answer the
+    // refusal and GET /network/embed answers enabled false
+    var embedDisabled = false
+
+    // when set, GET /network/embed answers this body
+    var embedAnswer: String? = null
     private var nextClient = 1
     private var generation = 0
 
@@ -91,6 +98,13 @@ private class StandInApi : Transport {
         val capPrefix = "$capPath?client_id="
         val capsPrefix = "$capsPath?limit=1000"
         return when {
+            embedDisabled && (path.startsWith(capPath) || path == aclPath) ->
+                ApiResponse(200, """{"error":{"message":"Embed isn't enabled for this network."}}""")
+            request.method == "GET" && path == embedPath -> ApiResponse(
+                200,
+                embedAnswer ?: json.createObjectNode().put("enabled", !embedDisabled).put("client_limit", 100)
+                    .put("active_client_count", nextClient - 1).toString(),
+            )
             request.method == "POST" && path == authClientPath -> {
                 val clientId = body.path("client_id").textValue()
                 when {
@@ -164,6 +178,8 @@ fun selfTest() {
         checkRemove(dir)
         checkMap(dir)
         checkAclGroups(dir)
+        checkEmbedNotEnabled(dir)
+        checkEmbedStatus(dir)
         checkFailureTexts(dir)
         checkNothingSecretPrinted()
     } finally {
@@ -274,7 +290,7 @@ private fun checkArguments(dir: Path) {
         listOf("cap", "user:a", "--monthly", "9223372036854775808"), listOf("cap", "user:a", "--monthly", "1", "--monthly", "2"),
         listOf("cap", "user:a", "--foo"), listOf("cap", "user:a", "--monthly"), listOf("cap", "user:a", "--reset-total", "--reset-total"),
         listOf("acl"), listOf("acl", "user:a"), listOf("acl", "user:a", "other"), listOf("acl", "user:a", "Default"),
-        listOf("acl", "user:a", "default", "extra"), listOf("acl", "alice", "default"),
+        listOf("acl", "user:a", "default", "extra"), listOf("acl", "alice", "default"), listOf("status", "extra"),
     )
     for (args in usages) {
         expect(exec(api, env, *args.toTypedArray()).exit == 78) { "the arguments ${args.joinToString(" ")} do not exit 78" }
@@ -511,6 +527,88 @@ private fun checkAclGroups(dir: Path) {
             exec(refused, env(dir, "pending.json"), "provision", "user:x", dir.resolve("x.jwt").toString()).exit == 78 &&
                 Files.readString(map) == text && refused.requests.isEmpty(),
         ) { "the map $text is accepted" }
+    }
+}
+
+/**
+ * The Embed-not-enabled refusal: cap, usage, usage-all and acl exit 78 with the fixed line;
+ * provision still provisions and writes the client JWT, keeps the default group pending with the
+ * fixed stderr line, and a provision after the team enables Embed applies it.
+ */
+private fun checkEmbedNotEnabled(dir: Path) {
+    val api = StandInApi()
+    val isolated = env(dir, "embed.json", aclGroup = null)
+    expect(exec(api, isolated, "provision", "user:pia", dir.resolve("pia.jwt").toString()).exit == 0) {
+        "provision before the refusal failed"
+    }
+    api.embedDisabled = true
+    val refusedCommands = listOf(
+        listOf("cap", "user:pia", "--monthly", "1"), listOf("usage", "user:pia"), listOf("usage-all"),
+        listOf("acl", "user:pia", "isolated"),
+    )
+    for (args in refusedCommands) {
+        val refused = exec(api, isolated, *args.toTypedArray())
+        expect(refused.exit == 78 && refused.out.isEmpty() && refused.err == embedNotEnabledLine + System.lineSeparator()) {
+            "${args[0]} while Embed isn't enabled answers ${refused.exit}: ${refused.err}"
+        }
+    }
+    val quinnJwt = dir.resolve("quinn.jwt")
+    var run = exec(api, isolated, "provision", "user:quinn", quinnJwt.toString())
+    val quinn = loadMap(dir.resolve("embed.json")).path("clients").path("user:quinn").asText()
+    expect(
+        run.exit == 0 && run.out.trim() == """{"client_id":"$quinn"}""" && run.err == embedPendingLine + System.lineSeparator(),
+    ) { "provision while Embed isn't enabled answers ${run.exit}: ${run.out}${run.err}" }
+    expect(Files.readString(quinnJwt) == api.issuedJwts.last() + "\n" && pendingAcl(dir, "embed.json") == listOf("user:quinn")) {
+        "provision while Embed isn't enabled wrote no client JWT or dropped the record"
+    }
+    api.embedDisabled = false
+    run = exec(api, isolated, "provision", "user:quinn", quinnJwt.toString())
+    expect(run.exit == 0 && run.err.isEmpty() && pendingAcl(dir, "embed.json").isEmpty() && api.aclGroups[quinn] == "isolated") {
+        "provision after Embed was enabled does not apply the group: ${run.err}"
+    }
+}
+
+/**
+ * The status command: GET /network/embed with the root credential, printed as the fixed line for an
+ * enabled and a not enabled network; a refusal exits 78; a server without the route and an invalid
+ * answer exit 1.
+ */
+private fun checkEmbedStatus(dir: Path) {
+    val env = env(dir, "status.json")
+    val api = StandInApi().apply { embedAnswer = """{"enabled":true,"client_limit":5000,"active_client_count":1234}""" }
+    var run = exec(api, env, "status")
+    expect(
+        run.exit == 0 && run.out == "embed enabled: yes | client limit: 5000 | active clients: 1234" + System.lineSeparator() &&
+            run.err.isEmpty(),
+    ) { "status printed ${run.out}${run.err}" }
+    expect(
+        api.requests.size == 1 && api.requests[0].method == "GET" && api.requests[0].pathAndQuery == embedPath &&
+            api.requests[0].body == null,
+    ) { "the status request is not GET /network/embed" }
+    run = exec(StandInApi().apply { embedDisabled = true }, env, "status")
+    expect(run.exit == 0 && run.out == "embed enabled: no | client limit: 100 | active clients: 0" + System.lineSeparator()) {
+        "status while Embed isn't enabled printed ${run.out}${run.err}"
+    }
+    run = exec(StandInApi().apply { embedAnswer = """{"error":{"message":"Invalid credential."}}""" }, env, "status")
+    expect(run.exit == 78 && run.out.isEmpty() && run.err.contains("Invalid credential.") && run.err.count { it == '\n' } == 1) {
+        "status on a refusal answers ${run.exit}: ${run.err}"
+    }
+    expect(exec(StandInApi().apply { status = 401 }, env, "status").exit == 78) { "status with a refused root credential" }
+    run = exec(StandInApi().apply { status = 404 }, env, "status")
+    expect(run.exit == 1 && run.err.trim() == embedUnsupportedMessage) {
+        "status on a server without Embed enablement answers ${run.exit}: ${run.err}"
+    }
+    val invalid = listOf(
+        """{"enabled":true}""",
+        """{"enabled":"yes","client_limit":1,"active_client_count":1}""",
+        """{"enabled":true,"client_limit":-1,"active_client_count":0}""",
+        """{"enabled":true,"client_limit":1.5,"active_client_count":0}""",
+        """{"enabled":1,"client_limit":1,"active_client_count":1}""",
+        """{"enabled":true,"client_limit":"1","active_client_count":1}""",
+    )
+    for (answer in invalid) {
+        run = exec(StandInApi().apply { embedAnswer = answer }, env, "status")
+        expect(run.exit == 1 && run.out.isEmpty()) { "status accepted $answer" }
     }
 }
 

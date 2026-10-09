@@ -2,7 +2,8 @@
 // tools"): the integration allocator (../../integration/server) extended with
 // what a backend needs to embed URnetwork. It provisions one client per user
 // installation, sets and reads that client's data caps, reads every capped
-// client of the network, removes a client, and sets a client's ACL group.
+// client of the network, removes a client, sets a client's ACL group, and
+// reads the network's Embed state.
 // Your service authenticates its user first and supplies the key internally:
 // never take a key, a client ID or a cap from a raw request field.
 //
@@ -12,6 +13,7 @@
 //   usage-all
 //   remove <key>
 //   acl <key> default|isolated
+//   status
 //   --self-test
 //
 // <key> is user:<service-user-id> or user:<service-user-id>:<installation-id>.
@@ -70,10 +72,25 @@ const val capPath = "/network/client-data-cap"
 const val capsPath = "/network/client-data-caps"
 const val removePath = "/network/remove-client"
 const val aclPath = "/network/client-acl-group"
+const val embedPath = "/network/embed"
 const val unmappedMessage = "no client is mapped for that key; run provision first"
 const val aclUnsupportedMessage = "/network/client-acl-group answered 404: the server predates ACL groups"
+
+// The server refuses the data-cap and ACL-group routes with this message while the team has not
+// enabled Embed for the network (EMBED_CONTRACT.md, "Embed enablement"); caps and groups set
+// earlier stay enforced.
+const val embedNotEnabledMessage = "Embed isn't enabled for this network."
+
+// cap, usage, usage-all and acl print this for the refusal and exit 78
+const val embedNotEnabledLine = "embed not enabled: Embed isn't enabled for this network; see https://ur.io/services"
+
+// provision prints this on stderr when the client's default ACL group stays pending because Embed
+// isn't enabled, and exits 0
+const val embedPendingLine =
+    "embed not enabled: the client's defaults stay pending until Embed is enabled; see https://ur.io/services"
+const val embedUnsupportedMessage = "/network/embed answered 404: the server predates Embed enablement"
 const val usage =
-    "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test"
+    "usage: provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|--monthly null] [--total <bytes>|--total null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | status | --self-test"
 
 val keys = Regex("user:[A-Za-z0-9][A-Za-z0-9_.:@-]{0,122}")
 val ids = Regex("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
@@ -141,7 +158,7 @@ fun runCommand(
             }
             "provision" -> {
                 if (args.size != 3) throw config(usage)
-                provision(checkKey(args[1]), checkJwtFile(args[2]), settings(env, transport, map = true), out)
+                provision(checkKey(args[1]), checkJwtFile(args[2]), settings(env, transport, map = true), out, err)
             }
             "cap" -> {
                 if (args.size < 2) throw config(usage)
@@ -162,6 +179,10 @@ fun runCommand(
             "acl" -> {
                 if (args.size != 3 || args[2] !in setOf("default", "isolated")) throw config(usage)
                 acl(checkKey(args[1]), args[2], settings(env, transport, map = true), out)
+            }
+            "status" -> {
+                if (args.size != 1) throw config(usage)
+                status(settings(env, transport, map = false), out)
             }
             else -> throw config(usage)
         }
@@ -185,9 +206,10 @@ private fun refused(message: String) = ToolException(exitFailure, "the URnetwork
  * Reissues the key's client, or provisions a new one, and writes the client JWT to jwtFile. A
  * reissue that answers "Client does not exist." (a client deactivated after 30 days without
  * connecting) drops the mapping and provisions a new client. Prints {"client_id": ...}, never the
- * token.
+ * token. While Embed isn't enabled the default ACL group stays pending, with a line on err, and a
+ * provision after the team enables Embed applies it.
  */
-private fun provision(key: String, jwtFile: Path, settings: Settings, out: PrintStream) {
+private fun provision(key: String, jwtFile: Path, settings: Settings, out: PrintStream, err: PrintStream) {
     val mapFile = settings.mapFile!!
     val lock = takeLock(mapFile)
     try {
@@ -220,17 +242,24 @@ private fun provision(key: String, jwtFile: Path, settings: Settings, out: Print
             }
             saveMap(mapFile, map)
         }
+        var embedEnabled = true
         if (aclPending(map, key)) {
             // a new client is "default": only an isolated default needs the request. A failure
             // throws with the record kept, before any client JWT is written.
             if (settings.aclGroup == "isolated") {
-                postAclGroup(settings, result.first, "isolated")
+                embedEnabled = postAclGroup(settings, result.first, "isolated", allowNotEnabled = true)
             }
-            setAclPending(map, key, false)
-            saveMap(mapFile, map)
+            // while Embed isn't enabled the record stays and the client works
+            if (embedEnabled) {
+                setAclPending(map, key, false)
+                saveMap(mapFile, map)
+            }
         }
         writePrivate(jwtFile, "${result.second}\n".toByteArray(Charsets.UTF_8))
         out.println(json.writeValueAsString(json.createObjectNode().put("client_id", result.first)))
+        if (!embedEnabled) {
+            err.println(embedPendingLine)
+        }
     } finally {
         Files.deleteIfExists(lock)
     }
@@ -332,14 +361,46 @@ private fun acl(key: String, group: String, settings: Settings, out: PrintStream
     }
 }
 
-/** Posts the client's ACL group; the answer must name the client and the group. */
-private fun postAclGroup(settings: Settings, clientId: String, group: String) {
+/**
+ * Posts the client's ACL group; the answer must name the client and the group. The
+ * Embed-not-enabled refusal exits 78, or returns false when allowNotEnabled is set.
+ */
+private fun postAclGroup(settings: Settings, clientId: String, group: String, allowNotEnabled: Boolean = false): Boolean {
     val answer = call(settings, "POST", aclPath, json.createObjectNode().put("client_id", clientId).put("acl_group", group))
+    if (allowNotEnabled && embedNotEnabled(answer)) {
+        return false
+    }
     checkRefusal(answer)
     if (answer.path("client_id").textValue() != clientId || answer.path("acl_group").textValue() != group) {
         throw ToolException(exitFailure, "the URnetwork API answered another client or ACL group")
     }
+    return true
 }
+
+/**
+ * Prints the network's Embed state from GET /network/embed as one line, "embed enabled: yes |
+ * client limit: 5000 | active clients: 1234". A refusal, such as for a client JWT, is a
+ * configuration error (78).
+ */
+private fun status(settings: Settings, out: PrintStream) {
+    val answer = call(settings, "GET", embedPath, null)
+    val error = answer["error"]
+    if (error != null && !error.isNull) {
+        throw config("the URnetwork API refused the request: ${printable(error.path("message").textValue() ?: "")}")
+    }
+    val enabled = answer.path("enabled")
+    val clientLimit = count(answer.path("client_limit"))
+    val activeClientCount = count(answer.path("active_client_count"))
+    if (!enabled.isBoolean || clientLimit == null || activeClientCount == null) {
+        throw ToolException(exitFailure, "the URnetwork API answered network/embed with something invalid")
+    }
+    out.println(
+        "embed enabled: ${if (enabled.booleanValue()) "yes" else "no"} | client limit: $clientLimit | active clients: $activeClientCount",
+    )
+}
+
+/** A non-negative JSON integer that fits a long, or null. */
+private fun count(node: JsonNode): Long? = if (node.isIntegralNumber && node.canConvertToLong() && 0 <= node.longValue()) node.longValue() else null
 
 /** Whether key owes its default ACL group: the map's pending_acl. */
 fun aclPending(map: ObjectNode, key: String): Boolean = map.path("pending_acl").any { it.textValue() == key }
@@ -466,13 +527,22 @@ private fun capObject(answer: ObjectNode): String {
     return json.writeValueAsString(answer)
 }
 
-/** Fails when an answer carries a refusal. */
+/**
+ * Fails when an answer carries a refusal: the Embed-not-enabled refusal is a configuration error
+ * (78) with the fixed line, another one fails (1).
+ */
 private fun checkRefusal(answer: ObjectNode) {
+    if (embedNotEnabled(answer)) {
+        throw config(embedNotEnabledLine)
+    }
     val error = answer["error"]
     if (error != null && !error.isNull) {
         throw refused(error.path("message").textValue() ?: "")
     }
 }
+
+/** Whether an answer is the Embed-not-enabled refusal. */
+private fun embedNotEnabled(answer: ObjectNode): Boolean = answer.path("error").path("message").textValue() == embedNotEnabledMessage
 
 /** The client mapped to key; an unmapped key is a configuration error. */
 private fun mappedClient(map: ObjectNode, key: String): String =
@@ -559,6 +629,7 @@ private fun call(settings: Settings, method: String, pathAndQuery: String, body:
                 exitFailure,
                 when {
                     route == aclPath -> aclUnsupportedMessage
+                    route == embedPath -> embedUnsupportedMessage
                     route.startsWith(capPath) -> "$route answered 404: the server predates the data-cap routes"
                     else -> "$route answered 404"
                 },
