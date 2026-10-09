@@ -28,14 +28,6 @@ import Foundation
   import CRT
 #endif
 
-/// The kind of app whose licenses --licenses prints.
-#if os(Windows)
-  let licenseApp = URNET_LICENSE_APP_WINDOWS
-#elseif canImport(Darwin)
-  let licenseApp = URNET_LICENSE_APP_APPLE
-#else
-  let licenseApp = URNET_LICENSE_APP_LINUX
-#endif
 
 /// Writes one line to stdout at once, also when stdout is a file, so background
 /// logs show each status line when it happens.
@@ -102,7 +94,7 @@ func runEmbed() -> Int32 {
     return EmbedExitCode.failure
   }
   defer { session.close() }
-  writeOutput("embed client \(config.clientId), installation \(config.instanceId)")
+  writeOutput(startLine(clientId: config.clientId, instanceId: config.instanceId))
   return withExtendedLifetime(stopSignals) {
     session.run()
   }

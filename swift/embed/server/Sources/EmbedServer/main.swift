@@ -6,13 +6,16 @@
 //   embed-server usage <key>
 //   embed-server usage-all
 //   embed-server remove <key>
+//   embed-server acl <key> default|isolated
 //   embed-server --self-test
 //
 // It extends the Swift integration allocator (../../integration/server): the
 // same settings (URNETWORK_ROOT_JWT, an API key or a network JWT;
 // URNETWORK_CLIENT_MAP, an absolute path in an existing private,
 // service-owned directory; optional URNETWORK_API_URL), map format, key
-// pattern, lock and response checks. Your service authenticates its user
+// pattern, lock and response checks, and reads URNETWORK_DEFAULT_ACL_GROUP,
+// the ACL group of each new client: isolated (the default) or default. Your
+// service authenticates its user
 // first and supplies the key internally, as
 // user:<service-user-id>:<installation-id>, never a raw request field or a
 // URnetwork client ID. Exit codes: 0 success, 78 configuration or credential
@@ -38,10 +41,12 @@ let exitConfig: Int32 = 78
 let clientDescription = "embed client"
 let deviceSpec = "urnetwork-examples/swift-embed-server"
 let usageText =
-  "usage: embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | --self-test"
+  "usage: embed-server provision <key> <client-jwt-file> | cap <key> [--monthly <bytes>|null] [--total <bytes>|null] [--reset-total] | usage <key> | usage-all | remove <key> | acl <key> default|isolated | --self-test"
 let clientLimitText =
   "client limit reached: your network is at its client limit; see https://ur.io/services"
 let clientGoneMessage = "Client does not exist."
+let unmappedText = "no client is mapped for that key; run provision first"
+let aclUnsupportedText = "/network/client-acl-group answered 404: the server predates ACL groups"
 let mapInvalid = "the client map is not a valid private map"
 let rootRefused = "the API refused the root credential"
 
@@ -137,30 +142,56 @@ struct AnyKey: CodingKey {
   }
 }
 
-/// The private map: version 1 and the client of each key. Only the
-/// allocators' fields are accepted, so a map with other fields (such as the
-/// token server's pending_caps) is refused and never rewritten by this tool.
+/// The private map: version 1, the client of each key, and pending_acl, the
+/// keys whose new clients still owe their default ACL group. Only the
+/// allocators' fields and pending_acl are accepted, so a map with other fields
+/// (such as the token server's pending_caps) is refused and never rewritten
+/// by this tool.
 struct ClientMap: Codable {
   var version = 1
   var clients: [String: String] = [:]
+  var pendingAcl: [String] = []
 
   enum CodingKeys: String, CodingKey {
     case version
     case clients
+    case pendingAcl = "pending_acl"
   }
 
   /// An empty map.
   init() {}
 
-  /// Decodes a map with exactly the version and clients members.
+  /// Decodes a map with the version and clients members and an optional
+  /// pending_acl.
   init(from decoder: Decoder) throws {
     let members = try decoder.container(keyedBy: AnyKey.self)
-    guard Set(members.allKeys.map(\.stringValue)) == ["version", "clients"] else {
+    let names = Set(members.allKeys.map(\.stringValue))
+    guard names == ["version", "clients"] || names == ["version", "clients", "pending_acl"] else {
       throw Failure(exitConfig, mapInvalid)
     }
     let container = try decoder.container(keyedBy: CodingKeys.self)
     version = try container.decode(Int.self, forKey: .version)
     clients = try container.decode([String: String].self, forKey: .clients)
+    pendingAcl = try container.decodeIfPresent([String].self, forKey: .pendingAcl) ?? []
+  }
+
+  /// Encodes pending_acl only while it is not empty, so the map stays the
+  /// allocators' map.
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(version, forKey: .version)
+    try container.encode(clients, forKey: .clients)
+    if !pendingAcl.isEmpty {
+      try container.encode(pendingAcl, forKey: .pendingAcl)
+    }
+  }
+
+  /// Records or clears that key owes its default ACL group.
+  mutating func setAclPending(_ key: String, _ owes: Bool) {
+    pendingAcl.removeAll { $0 == key }
+    if owes {
+      pendingAcl.append(key)
+    }
   }
 }
 
@@ -187,6 +218,10 @@ func loadMap(_ path: String) throws -> ClientMap {
   }
   var seen = Set<String>()
   for (key, id) in map.clients where !keyValid(key) || !idValid(id) || !seen.insert(id).inserted {
+    throw Failure(exitConfig, mapInvalid)
+  }
+  // pending_acl: distinct mapped keys
+  if Set(map.pendingAcl).count != map.pendingAcl.count || map.pendingAcl.contains(where: { map.clients[$0] == nil }) {
     throw Failure(exitConfig, mapInvalid)
   }
   return map
@@ -263,6 +298,8 @@ struct Tool {
   var mapPath: String
   var call: Call
   var output: (String) -> Void
+  /// the ACL group of each new client: "isolated" or "default"
+  var aclGroup = "isolated"
 }
 
 /// The kind of an API answer.
@@ -352,9 +389,29 @@ func requireKey(_ key: String, _ command: String) throws {
 /// The key's mapped client, or a configuration failure.
 func requireClient(_ map: ClientMap, _ key: String) throws -> String {
   guard let client = map.clients[key] else {
-    throw Failure(exitConfig, "no client is mapped for \(key)")
+    throw Failure(exitConfig, unmappedText)
   }
   return client
+}
+
+/// Posts client's ACL group and checks that the answer names the client and the
+/// group; prints {"client_id": "...", "acl_group": "..."} when print is set.
+func postAclGroup(_ tool: Tool, _ client: String, _ group: String, print: Bool) throws {
+  let answer = callApi(tool, "POST", "/network/client-acl-group", ["client_id": client, "acl_group": group])
+  switch answer.kind {
+  case .unauthorized:
+    throw Failure(exitConfig, rootRefused)
+  case .failed where answer.status == 404:
+    throw Failure(exitFailure, aclUnsupportedText)
+  case .refused:
+    throw Failure(exitFailure, "the API refused: \(answer.refusalMessage)")
+  case .ok where answer.object["client_id"] as? String == client && answer.object["acl_group"] as? String == group:
+    if print {
+      tool.output("{\"client_id\":\"\(client)\",\"acl_group\":\"\(group)\"}")
+    }
+  default:
+    throw Failure(exitFailure, "setting the ACL group failed: no valid answer (HTTP \(answer.status))")
+  }
 }
 
 /// provision <key> <client-jwt-file>: reissues the key's client, or provisions
@@ -387,6 +444,7 @@ func provision(_ tool: Tool, _ key: String, _ jwtFile: String) throws {
         if old != nil && answer.refusalMessage == clientGoneMessage {
           // deactivated after 30 days without connecting: provision anew
           map.clients[key] = nil
+          map.setAclPending(key, false)
           try saveMap(tool.mapPath, map)
           old = nil
           continue attempts
@@ -407,6 +465,19 @@ func provision(_ tool: Tool, _ key: String, _ jwtFile: String) throws {
         throw Failure(exitFailure, "provisioning answered a client mapped to another key")
       }
       map.clients[key] = id
+      // the mapping and the record that the client owes its group, in one save
+      if tool.aclGroup == "isolated" {
+        map.setAclPending(key, true)
+      }
+      try saveMap(tool.mapPath, map)
+    }
+    if map.pendingAcl.contains(key) {
+      // a new client is "default": only an isolated default needs the request.
+      // A failure throws with the record kept, before any client JWT is written.
+      if tool.aclGroup == "isolated" {
+        try postAclGroup(tool, id, "isolated", print: false)
+      }
+      map.setAclPending(key, false)
       try saveMap(tool.mapPath, map)
     }
     do {
@@ -468,19 +539,18 @@ func capRequest(_ client: String, _ options: [String]) -> [String: Any]? {
 }
 
 /// Prints a cap object answer, or throws the failure.
-func printCap(_ tool: Tool, _ answer: Answer) throws {
+func printCap(_ tool: Tool, _ route: String, _ answer: Answer) throws {
   switch answer.kind {
   case .unauthorized:
     throw Failure(exitConfig, rootRefused)
+  case .failed where answer.status == 404:
+    throw Failure(exitFailure, "\(route) answered 404: the server predates the data-cap routes")
   case .refused:
     throw Failure(exitFailure, "the API refused: \(answer.refusalMessage)")
   case .ok where answer.object["client_id"] != nil:
     tool.output(jsonLine(answer.object))
   default:
-    throw Failure(
-      exitFailure,
-      "no cap object in the answer (HTTP \(answer.status); a server without the cap routes answers 404)"
-    )
+    throw Failure(exitFailure, "no cap object in the answer (HTTP \(answer.status))")
   }
 }
 
@@ -491,14 +561,14 @@ func cap(_ tool: Tool, _ key: String, _ options: [String]) throws {
   guard let body = capRequest(client, options) else {
     throw Failure(exitConfig, "cap: give --monthly, --total or --reset-total with byte counts or null")
   }
-  try printCap(tool, callApi(tool, "POST", "/network/client-data-cap", body))
+  try printCap(tool, "/network/client-data-cap", callApi(tool, "POST", "/network/client-data-cap", body))
 }
 
 /// usage <key>: the key's cap object, read with the root credential.
 func usage(_ tool: Tool, _ key: String) throws {
   try requireKey(key, "usage")
   let client = try requireClient(try loadMap(tool.mapPath), key)
-  try printCap(tool, callApi(tool, "GET", "/network/client-data-cap?client_id=\(client)", nil))
+  try printCap(tool, "/network/client-data-cap", callApi(tool, "GET", "/network/client-data-cap?client_id=\(client)", nil))
 }
 
 /// Percent-encodes all but the unreserved characters.
@@ -520,6 +590,9 @@ func usageAll(_ tool: Tool) throws {
     let answer = callApi(tool, "GET", path, nil)
     if answer.kind == .unauthorized {
       throw Failure(exitConfig, rootRefused)
+    }
+    if answer.kind == .failed && answer.status == 404 {
+      throw Failure(exitFailure, "/network/client-data-caps answered 404: the server predates the data-cap routes")
     }
     guard answer.kind == .ok, let clients = answer.object["clients"] as? [Any],
       clients.allSatisfy({ $0 is [String: Any] })
@@ -554,8 +627,27 @@ func removeClient(_ tool: Tool, _ key: String) throws {
       throw Failure(exitFailure, "removing the client failed: \(answer.refusalMessage)")
     }
     map.clients[key] = nil
+    map.setAclPending(key, false)
     try saveMap(tool.mapPath, map)
     tool.output(jsonLine(["removed": client]))
+  }
+}
+
+/// acl <key> default|isolated: sets the ACL group of the key's client and prints
+/// {"client_id": "...", "acl_group": "..."}. An explicit group settles a
+/// pending default group, so the record is dropped.
+func acl(_ tool: Tool, _ key: String, _ group: String) throws {
+  guard keyValid(key), group == "default" || group == "isolated" else {
+    throw Failure(exitConfig, usageText)
+  }
+  try withMapLock(tool.mapPath) {
+    var map = try loadMap(tool.mapPath)
+    let client = try requireClient(map, key)
+    try postAclGroup(tool, client, group, print: true)
+    if map.pendingAcl.contains(key) {
+      map.setAclPending(key, false)
+      try saveMap(tool.mapPath, map)
+    }
   }
 }
 
@@ -574,6 +666,8 @@ func run(_ tool: Tool, _ args: [String], error: (String) -> Void) -> Int32 {
       try usageAll(tool)
     case ("remove", 2):
       try removeClient(tool, args[1])
+    case ("acl", 3):
+      try acl(tool, args[1], args[2])
     default:
       throw Failure(exitConfig, usageText)
     }
@@ -677,13 +771,17 @@ final class Mock {
   }
 }
 
+/// The default ACL group of the self-test's runs: "default" sends no ACL
+/// request, so the checks that predate ACL groups keep their answer order.
+var testAclGroup = "default"
+
 /// Runs a command line against the mock, with its exit code and output.
 func runWith(_ mock: Mock, _ mapPath: String, _ args: [String]) -> (
   code: Int32, out: String, err: String
 ) {
   var out = ""
   var err = ""
-  let tool = Tool(mapPath: mapPath, call: mock.call, output: { out += $0 + "\n" })
+  let tool = Tool(mapPath: mapPath, call: mock.call, output: { out += $0 + "\n" }, aclGroup: testAclGroup)
   let code = run(tool, args) { err += $0 + "\n" }
   return (code, out, err)
 }
@@ -841,6 +939,85 @@ func selfTest() throws {
   chmod(mapPath, 0o644)
   try check(runWith(Mock([(200, answer)]), mapPath, ["provision", key, jwtPath]).code == exitConfig)
   try FileManager.default.removeItem(atPath: mapPath)
+  // fixed texts: a key with no mapped client
+  for args in [["cap", "user:nobody", "--monthly", "1"], ["usage", "user:nobody"], ["remove", "user:nobody"], ["acl", "user:nobody", "isolated"]] {
+    let unused = Mock()
+    let fixed = runWith(unused, mapPath, args)
+    try check(fixed.code == exitConfig && fixed.err == unmappedText + "\n" && unused.methods.isEmpty)
+  }
+  // ACL groups: a new client goes into the isolated group before its client
+  // JWT is written, with the pending_acl record saved first and then dropped
+  testAclGroup = "isolated"
+  defer { testAclGroup = "default" }
+  let id3 = "33333333-3333-3333-3333-333333333333"
+  let id4 = "44444444-4444-4444-4444-444444444444"
+  let jwt3 = "e30.eyJjbGllbnRfaWQiOiIzMzMzMzMzMy0zMzMzLTMzMzMtMzMzMy0zMzMzMzMzMzMzMzMifQ.test"
+  let jwt4 = "e30.eyJjbGllbnRfaWQiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtNDQ0NC00NDQ0NDQ0NDQ0NDQifQ.test"
+  let answer3 = jsonLine(["client_id": id3, "by_client_jwt": jwt3])
+  let answer4 = jsonLine(["client_id": id4, "by_client_jwt": jwt4])
+  func aclAnswer(_ client: String, _ group: String) -> String { jsonLine(["client_id": client, "acl_group": group]) }
+  func pending(_ key: String) -> Bool { (try? loadMap(mapPath))?.pendingAcl.contains(key) ?? false }
+  let key3 = "user:carol:33333333-3333-3333-3333-333333333333"
+  let key4 = "user:carol:44444444-4444-4444-4444-444444444444"
+  let key5 = "user:carol:55555555-5555-5555-5555-555555555555"
+  let jwt3Path = directory.appendingPathComponent("c3.jwt").path
+  let jwt4Path = directory.appendingPathComponent("c4.jwt").path
+  let jwt5Path = directory.appendingPathComponent("c5.jwt").path
+  let isolate = Mock([(200, answer3), (200, aclAnswer(id3, "isolated"))])
+  try check(runWith(isolate, mapPath, ["provision", key3, jwt3Path]).code == exitOk)
+  try check(isolate.methods.count == 2 && isolate.methods[1] == "POST" && isolate.paths[1] == "/network/client-acl-group")
+  try check(isolate.bodies[1]?["client_id"] as? String == id3 && isolate.bodies[1]?["acl_group"] as? String == "isolated" && isolate.bodies[1]?.count == 2)
+  try check(!pending(key3) && !(String(decoding: FileManager.default.contents(atPath: mapPath) ?? Data(), as: UTF8.self)).contains("pending_acl"))
+  let reissue3 = Mock([(200, answer3)])
+  try check(runWith(reissue3, mapPath, ["provision", key3, jwt3Path]).code == exitOk && reissue3.methods.count == 1)
+  // the ACL request fails: no client JWT, the record kept; the next provision
+  // reissues and applies it
+  let failing = Mock([(200, answer4), (500, "{}")])
+  try check(runWith(failing, mapPath, ["provision", key4, jwt4Path]).code == exitFailure)
+  try check(!FileManager.default.fileExists(atPath: jwt4Path) && mapped(key4) == id4 && pending(key4))
+  let retried = Mock([(200, answer4), (200, aclAnswer(id4, "isolated"))])
+  try check(runWith(retried, mapPath, ["provision", key4, jwt4Path]).code == exitOk)
+  try check(retried.bodies[0]?["client_id"] as? String == id4 && retried.paths[1] == "/network/client-acl-group")
+  try check(FileManager.default.fileExists(atPath: jwt4Path) && !pending(key4))
+  // a server without ACL groups: exit 1 with the fixed text, the record kept and
+  // no client JWT; a default of "default" then provisions with no ACL request
+  let oldServer = runWith(Mock([(200, answer2), (404, "404 page not found")]), mapPath, ["provision", key5, jwt5Path])
+  try check(oldServer.code == exitFailure && oldServer.err == aclUnsupportedText + "\n")
+  try check(!FileManager.default.fileExists(atPath: jwt5Path) && pending(key5))
+  testAclGroup = "default"
+  let asDefault = Mock([(200, answer2)])
+  try check(runWith(asDefault, mapPath, ["provision", key5, jwt5Path]).code == exitOk && asDefault.methods.count == 1)
+  try check(FileManager.default.fileExists(atPath: jwt5Path) && !pending(key5))
+  // acl: the request and its printed answer; an invalid group reaches no API;
+  // an answer for another group and a server without ACL groups fail
+  let setDefault = Mock([(200, aclAnswer(id3, "default"))])
+  let set = runWith(setDefault, mapPath, ["acl", key3, "default"])
+  try check(set.code == exitOk && set.out == #"{"client_id":"\#(id3)","acl_group":"default"}"# + "\n")
+  try check(setDefault.paths[0] == "/network/client-acl-group" && setDefault.bodies[0]?["acl_group"] as? String == "default" && setDefault.bodies[0]?["client_id"] as? String == id3)
+  let unusedAcl = Mock()
+  try check(runWith(unusedAcl, mapPath, ["acl", key3, "private"]).code == exitConfig && unusedAcl.methods.isEmpty)
+  try check(runWith(Mock([(200, aclAnswer(id3, "isolated"))]), mapPath, ["acl", key3, "default"]).code == exitFailure)
+  let oldAcl = runWith(Mock([(404, "404 page not found")]), mapPath, ["acl", key3, "default"])
+  try check(oldAcl.code == exitFailure && oldAcl.err == aclUnsupportedText + "\n")
+  // an explicit group settles a pending default group, and a map with a valid
+  // pending_acl is accepted
+  try check(FileManager.default.createFile(atPath: mapPath, contents: Data(#"{"version":1,"clients":{"\#(key3)":"\#(id3)"},"pending_acl":["\#(key3)"]}"#.utf8), attributes: [.posixPermissions: 0o600]))
+  chmod(mapPath, 0o600)
+  try check(runWith(Mock([(200, aclAnswer(id3, "default"))]), mapPath, ["acl", key3, "default"]).code == exitOk)
+  try check(!pending(key3) && mapped(key3) == id3)
+  // a server without the cap routes: exit 1 with the fixed text
+  for (args, route) in [(["cap", key3, "--monthly", "1"], "/network/client-data-cap"), (["usage", key3], "/network/client-data-cap"), (["usage-all"], "/network/client-data-caps")] {
+    let old = runWith(Mock([(404, "404 page not found")]), mapPath, args)
+    try check(old.code == exitFailure && old.err == "\(route) answered 404: the server predates the data-cap routes\n")
+  }
+  // a pending_acl entry that is not a mapped key, or not an array, is refused
+  for raw in [#"{"version":1,"clients":{},"pending_acl":["user:nobody"]}"#, #"{"version":1,"clients":{},"pending_acl":{}}"#] {
+    try check(FileManager.default.createFile(atPath: mapPath, contents: Data(raw.utf8), attributes: [.posixPermissions: 0o600]))
+    chmod(mapPath, 0o600)
+    let unusedMap = Mock([(200, answer)])
+    try check(runWith(unusedMap, mapPath, ["provision", key, jwtPath]).code == exitConfig && unusedMap.methods.isEmpty)
+  }
+  try FileManager.default.removeItem(atPath: mapPath)
   // keys and command lines
   try check(keyValid("user:alice") && keyValid(key) && !keyValid("user:../a") && !keyValid(id))
   try check(!keyValid("user:") && !keyValid("user:-a"))
@@ -887,8 +1064,13 @@ func main() -> Int32 {
   let root = environment["URNETWORK_ROOT_JWT"] ?? ""
   let mapPath = environment["URNETWORK_CLIENT_MAP"] ?? ""
   let base = environment["URNETWORK_API_URL"] ?? ""
+  let aclGroup = environment["URNETWORK_DEFAULT_ACL_GROUP"] ?? ""
   if args.isEmpty {
     writeError(usageText)
+    return exitConfig
+  }
+  if !["", "isolated", "default"].contains(aclGroup) {
+    writeError("URNETWORK_DEFAULT_ACL_GROUP must be default or isolated")
     return exitConfig
   }
   if root.isEmpty || root.contains(where: { $0.isWhitespace }) {
@@ -904,7 +1086,8 @@ func main() -> Int32 {
     return exitConfig
   }
   let tool = Tool(
-    mapPath: mapPath, call: { apiCall(apiOrigin, root, $0, $1, $2) }, output: writeOutput)
+    mapPath: mapPath, call: { apiCall(apiOrigin, root, $0, $1, $2) }, output: writeOutput,
+    aclGroup: aclGroup.isEmpty ? "isolated" : aclGroup)
   return run(tool, args, error: writeError)
 }
 

@@ -150,7 +150,24 @@ public let selfTestChecks: [(name: String, run: () throws -> Void)] = [
   (name: "state files", run: checkStateFiles),
   (name: "configuration", run: checkConfiguration),
   (name: "usage", run: checkUsage),
+  (name: "start line", run: checkStartLine),
 ]
+
+/// The start line names the client and the installation, and --licenses names
+/// the license kind of the platform it was built for.
+public func checkStartLine() throws {
+  try expect(
+    startLine(clientId: "11111111-1111-1111-1111-111111111111", instanceId: "22222222-2222-2222-2222-222222222222")
+      == "embed client 11111111-1111-1111-1111-111111111111, installation 22222222-2222-2222-2222-222222222222",
+    "the start line differs")
+  #if os(Windows)
+    try expect(licenseApp == "windows", "the license app kind is not windows")
+  #elseif canImport(Darwin)
+    try expect(licenseApp == "apple", "the license app kind is not apple")
+  #else
+    try expect(licenseApp == "linux", "the license app kind is not linux")
+  #endif
+}
 
 /// Runs every check and throws the first failure, named by its check.
 public func runSelfTest() throws {
@@ -163,11 +180,12 @@ public func runSelfTest() throws {
   }
 }
 
-/// Data amounts use decimal units with one decimal, ties to even.
+/// Data amounts use decimal units with one decimal, ties to even on the exact
+/// value: 1050 bytes is exactly 1.05 kB and shows "1.0 kB".
 public func checkFormatByteCount() throws {
   let cases: [(Int64, String)] = [
-    (0, "0 B"), (999, "999 B"), (1000, "1.0 kB"), (999949, "999.9 kB"), (1250, "1.2 kB"),
-    (1750, "1.8 kB"), (999999, "1.0 MB"), (1234567890, "1.2 GB"), (5000000000, "5.0 GB"),
+    (0, "0 B"), (999, "999 B"), (1000, "1.0 kB"), (999949, "999.9 kB"), (1050, "1.0 kB"),
+    (1150, "1.2 kB"), (1250, "1.2 kB"), (1750, "1.8 kB"), (999950, "1.0 MB"), (999999, "1.0 MB"), (1234567890, "1.2 GB"), (5000000000, "5.0 GB"),
     (10000000000, "10.0 GB"), (3000000000000, "3.0 TB"), (Int64.max, "9.2 EB"),
   ]
   for (byteCount, text) in cases {

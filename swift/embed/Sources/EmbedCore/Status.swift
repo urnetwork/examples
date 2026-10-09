@@ -37,6 +37,21 @@ public let clientLimitStatusExceeded = "client_limit_exceeded"
 /// value that rounds to 1000.0 moves to the next unit. The arithmetic is exact
 /// integer arithmetic, so the text does not depend on float formatting; a tie
 /// rounds to even, as Go's %.1f does.
+/// "embed client <client_id>, installation <instance_id>", printed at start.
+public func startLine(clientId: String, instanceId: String) -> String {
+  return "embed client \(clientId), installation \(instanceId)"
+}
+
+/// The GetLicenses app kind that --licenses prints: "apple" on Apple platforms,
+/// "windows" on Windows, "linux" elsewhere.
+#if os(Windows)
+  public let licenseApp = "windows"
+#elseif canImport(Darwin)
+  public let licenseApp = "apple"
+#else
+  public let licenseApp = "linux"
+#endif
+
 public func formatByteCount(_ byteCount: Int64) -> String {
   let units = ["kB", "MB", "GB", "TB", "PB", "EB"]
   if byteCount < 1000 {

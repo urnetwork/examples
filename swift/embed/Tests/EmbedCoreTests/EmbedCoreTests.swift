@@ -82,9 +82,14 @@ final class EmbedCoreTests: XCTestCase {
     try checkUsage()
   }
 
+  /// The start line and the license kind of --licenses.
+  func testStartLine() throws {
+    try checkStartLine()
+  }
+
   /// --self-test runs every check above.
   func testSelfTestRunsEveryCheck() throws {
-    XCTAssertEqual(selfTestChecks.count, 15)
+    XCTAssertEqual(selfTestChecks.count, 16)
     try runSelfTest()
   }
 }
