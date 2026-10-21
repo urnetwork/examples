@@ -1,6 +1,6 @@
 module github.com/urnetwork/examples/go/embed
 
-go 1.26.7
+go 1.27.3
 
 require github.com/urnetwork/sdk/v2026 v2026.10.8-1066946420
 

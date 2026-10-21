@@ -1,6 +1,6 @@
 module github.com/urnetwork/examples/javascript/integration/companion
 
-go 1.26.7
+go 1.27.3
 
 require (
 	github.com/gorilla/websocket v1.5.3
