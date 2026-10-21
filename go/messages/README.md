@@ -6,7 +6,7 @@ This local Device example discovers real-time peers and exchanges text over subp
 
 ## Build and check
 
-Use Go 1.26.7+. The checked-in calendar SDK pin is a release baseline; select a release containing peer/subprotocol APIs with `go get github.com/urnetwork/sdk/v2026@VERSION` and `go mod tidy` before building. The integration module is linked by a local replacement. Run from `go/messages`:
+Use Go 1.27.3. The checked-in calendar SDK pin is a release baseline; select a release containing peer/subprotocol APIs with `go get github.com/urnetwork/sdk/v2026@VERSION` and `go mod tidy` before building. The integration module is linked by a local replacement. Run from `go/messages`:
 
 ```sh
 go build -o messages-example .

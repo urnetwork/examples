@@ -8,7 +8,7 @@ The app receives a scoped client JWT from its authenticated service backend. Onl
 
 The reusable bootstrap is [client.go](client.go) and [go.mod](go.mod). Import `github.com/urnetwork/examples/go/integration` and call `integration.Open(false)` for messaging or `integration.Open(true)` for sockets. Keep the returned session alive, then call `Close()` after subscriptions and connections close.
 
-The client modules use Go 1.26.7+ and an SDK calendar-version pin. Select a peer/subprotocol-capable SDK version as described in [Messages](../messages/README.md#build-and-check). The sibling programs use a local module replacement for this helper. From `go/integration`, build and check the sibling client program:
+The client modules use Go 1.27.3 and an SDK calendar-version pin. Select a peer/subprotocol-capable SDK version as described in [Messages](../messages/README.md#build-and-check). The sibling programs use a local module replacement for this helper. From `go/integration`, build and check the sibling client program:
 
 ```sh
 cd ../messages
@@ -28,7 +28,7 @@ The JWT must contain its assigned `client_id`. Generate an installation UUID onc
 
 ## Backend allocator
 
-The server-only executable is [main.go](server/main.go) and [go.mod](server/go.mod). Go 1.24+ is required. This independent server module uses the standard library and does not depend on the URnetwork SDK. Run these commands from `go/integration/server`:
+The server-only executable is [main.go](server/main.go) and [go.mod](server/go.mod). Go 1.27.3 is required. This independent server module uses the standard library and does not depend on the URnetwork SDK. Run these commands from `go/integration/server`:
 
 ```sh
 go build -o allocator .

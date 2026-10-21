@@ -10,7 +10,7 @@ The same binary is also the provider of the JavaScript, TypeScript and Electron 
 
 ## Build from sibling checkouts
 
-Use **Node 24+**, **Go 1.26.7+**, npm and make. The companion's [go.mod](go.mod) requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query rather than a pin: `go mod tidy` resolves it to the latest 2026 SDK release and records that version, so run it first (and again to move to a newer release). It needs network access. The message packages depend on `file:../../../sdk/js`, the SDK's JavaScript bundle and WASM built from an sdk checkout, which needs its Go siblings; the provider programs need only the companion. Keep these repositories as siblings:
+Use **Node 24+**, **Go 1.27.3**, npm and make. The companion's [go.mod](go.mod) requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query rather than a pin: `go mod tidy` resolves it to the latest 2026 SDK release and records that version, so run it first (and again to move to a newer release). It needs network access. The message packages depend on `file:../../../sdk/js`, the SDK's JavaScript bundle and WASM built from an sdk checkout, which needs its Go siblings; the provider programs need only the companion. Keep these repositories as siblings:
 
 ```text
 workspace/

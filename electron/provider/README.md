@@ -26,7 +26,7 @@ The window shows the disclaimer next to **Start providing**.
 
 ## Build and test
 
-Use Node 24 or later with npm, and Go 1.26.7 or later for the companion. The app's only dependency is Electron 44; it needs no URnetwork JavaScript package, because the companion serves the whole status. The companion's [go.mod](../../javascript/integration/companion/go.mod) requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query rather than a pin: `go mod tidy` resolves it to the latest 2026 SDK release, so run it first. Provider mode needs the provider intent, client limit and extender APIs, which are in the first SDK release after sdk `c638dfa8`.
+Use Node 24 or later with npm, and Go 1.27.3 for the companion. The app's only dependency is Electron 44; it needs no URnetwork JavaScript package, because the companion serves the whole status. The companion's [go.mod](../../javascript/integration/companion/go.mod) requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query rather than a pin: `go mod tidy` resolves it to the latest 2026 SDK release, so run it first. Provider mode needs the provider intent, client limit and extender APIs, which are in the first SDK release after sdk `c638dfa8`.
 
 The app runs the companion from `bin/<platform>-<arch>/` in this directory, named with Node's `process.platform` and `process.arch`: `bin/darwin-arm64/ur-companion`, `bin/linux-x64/ur-companion`, `bin/win32-x64/ur-companion.exe`. Set `URNETWORK_COMPANION_PATH` to an absolute path to run another build. On macOS and Linux, from the examples checkout:
 

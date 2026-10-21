@@ -21,7 +21,7 @@ This Node 24 console app embeds URnetwork in your product on Windows, macOS and 
 
 ## Build and self-test
 
-Use Node 24 or later and Go 1.26.7 or later. Neither the app nor the backend tool needs packages; the app needs the native companion built. The companion's `go.mod` requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query: `go mod tidy` resolves it to the latest 2026 SDK release, which needs network access. The embed app needs an SDK release from the first release after sdk `c638dfa8`. From `examples/javascript` on macOS or Linux:
+Use Node 24 or later and Go 1.27.3. Neither the app nor the backend tool needs packages; the app needs the native companion built. The companion's `go.mod` requires the SDK as `github.com/urnetwork/sdk/v2026 v2026`, a version query: `go mod tidy` resolves it to the latest 2026 SDK release, which needs network access. The embed app needs an SDK release from the first release after sdk `c638dfa8`. From `examples/javascript` on macOS or Linux:
 
 ```sh
 cd integration/companion

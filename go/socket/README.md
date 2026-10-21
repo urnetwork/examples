@@ -18,7 +18,7 @@ go run . -mode http -target https://example.com/
 go run . -mode resty -target https://example.com/
 ```
 
-Go 1.26.7+ is used by this example. The shared [client bootstrap](../integration/client.go) requires both environment variables and does not generate or save an instance UUID. Generate one during installation (for example with `uuidgen` on macOS), persist it and export that same value on later runs. Device creation uses the scoped JWT issued by your backend; see the [integration contract](../../INTEGRATION_CONTRACT.md).
+Go 1.27.3 is used by this example. The shared [client bootstrap](../integration/client.go) requires both environment variables and does not generate or save an instance UUID. Generate one during installation (for example with `uuidgen` on macOS), persist it and export that same value on later runs. Device creation uses the scoped JWT issued by your backend; see the [integration contract](../../INTEGRATION_CONTRACT.md).
 
 For an unversioned development checkout, update SDK imports and requirements in both this module and the shared integration module to `github.com/urnetwork/sdk v0.0.0`, then add the required local `replace` directives for `sdk`, `connect`, `glog` and `goidenticons`. Published calendar-major modules use their versioned import paths; a local replace alone cannot rewrite imports inside an unversioned source tree.
 
