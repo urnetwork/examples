@@ -54,13 +54,18 @@ REPLACE_MODES = ("auto", "manual")
 
 
 class Refused(Exception):
-    """The API refused the call. `limit` is a hard cap or a rate limit;
-    `upgrade` asks for a plan upgrade."""
+    """The API refused the call, with the server's message and its flags:
+    `limit` (client_limit_exceeded) is the proxy cap or the create rate;
+    `upgrade` (upgrade_required) means the network is not on Pro;
+    `no_unique_supply` means no unused exit IP is available in the location;
+    `rate_limited` means a rotate came too soon (once a minute, 60 a day)."""
 
-    def __init__(self, message, limit=False, upgrade=False):
+    def __init__(self, message, limit=False, upgrade=False, no_unique_supply=False, rate_limited=False):
         super().__init__(message)
         self.limit = limit
         self.upgrade = upgrade
+        self.no_unique_supply = no_unique_supply
+        self.rate_limited = rate_limited
 
 
 def endpoint(base, path):
@@ -102,7 +107,9 @@ def refusal(obj):
         return Refused("the API refused the call")
     return Refused(str(error.get("message") or "the API refused the call"),
                    limit=bool(error.get("client_limit_exceeded")),
-                   upgrade=bool(error.get("upgrade_required")))
+                   upgrade=bool(error.get("upgrade_required")),
+                   no_unique_supply=bool(error.get("no_unique_supply")),
+                   rate_limited=bool(error.get("rate_limited")))
 
 
 def parse_created(obj):
@@ -131,11 +138,17 @@ def parse_created(obj):
 
 
 def describe_exit(exit_):
+    """One line for an `exit` object: where it is, its id, and its state. While
+    a failed exit waits for a new one, `state` is replacing or no_supply and
+    `state_reason` says why."""
     if not exit_:
         return "no unique exit reported (is the network on Pro, and the server current?)"
     place = " / ".join(part for part in (exit_.get("country_code"), exit_.get("region"), exit_.get("city")) if part)
-    return "%s (exit_id %s, %s since %s)" % (place or "unknown location", exit_.get("exit_id"),
-                                             exit_.get("state"), exit_.get("exit_since"))
+    state = exit_.get("state")
+    if exit_.get("state_reason"):
+        state = "%s: %s" % (state, exit_["state_reason"])
+    return "%s (exit_id %s, %s since %s, replace %s)" % (
+        place or "no exit yet", exit_.get("exit_id"), state, exit_.get("exit_since"), exit_.get("replace_mode"))
 
 
 def distinct_report(observed):
@@ -213,11 +226,20 @@ def create_proxies(api, count, country, replace, out, sleep=time.sleep):
         try:
             proxy = api.create(body)
         except Refused as e:
-            if e.limit and "minute" in str(e).lower():
+            # the create rate refuses with a message about the minute; the cap,
+            # the Pro gate (upgrade) and no_unique_supply cannot be waited out
+            if e.limit and not e.upgrade and "minute" in str(e).lower():
                 print("create %d: %s; waiting a minute" % (index, e), file=out)
                 sleep(60)
-                proxy = api.create(body)
+                try:
+                    proxy = api.create(body)
+                except Refused as again:
+                    print("create %d refused: %s" % (index, again), file=out)
+                    break
             else:
+                if e.no_unique_supply:
+                    print("create %d: no unique exit IP is left in this location; "
+                          "try another location or best available" % index, file=out)
                 print("create %d refused: %s" % (index, e), file=out)
                 break
         created.append(proxy)
@@ -249,8 +271,15 @@ def run(api, count, country, replace, rotate, echo_url, keep, out, echo=echo_thr
             print("duplicate exit %s: %s" % (ip, ", ".join(labels)), file=out)
         if rotate and created:
             first = created[0]
-            new_exit = api.rotate(first["client_id"])
-            print("rotated proxy 1: %s" % describe_exit(new_exit), file=out)
+            try:
+                print("rotated proxy 1: %s" % describe_exit(api.rotate(first["client_id"])), file=out)
+            except Refused as e:
+                if e.rate_limited:
+                    print("rotate proxy 1: rate limited (once a minute, 60 a day); try again later", file=out)
+                elif e.no_unique_supply:
+                    print("rotate proxy 1: no other unique exit in this location; it keeps its exit", file=out)
+                else:
+                    print("rotate proxy 1 refused: %s" % e, file=out)
         return created
     finally:
         if not keep:
@@ -265,6 +294,8 @@ class MockApi(http.server.BaseHTTPRequestHandler):
     calls = []
     lock = threading.Lock()
     serial = [0]
+    # set to an `error` object to refuse rotates, e.g. {"rate_limited": True, ...}
+    rotate_refusal = None
 
     def log_message(self, *args):
         pass
@@ -284,10 +315,15 @@ class MockApi(http.server.BaseHTTPRequestHandler):
                 answer = {"client_id": client, "proxy_config_result": {
                     "keepalive_seconds": 300, "proxy_host": "proxy.example", "auth_token": "token%d" % n,
                     "https_proxy_url": "https://token%d.proxy.example:443" % n, "socks_proxy_port": 1080,
-                    "exit": {"exit_id": "ex_%d" % n, "country_code": "de", "region": "Berlin", "city": "Berlin",
-                             "exit_since": "2026-11-05T19:00:00Z", "state": "assigned"}}}
+                    "exit": {"exit_id": "019a5d70-2c11-7b0e-8a51-%012x" % n, "country_code": "de",
+                             "region": "Berlin", "city": "Berlin", "exit_since": "2026-11-05T19:00:00Z",
+                             "state": "assigned", "replace_mode": config.get("unique_exit_replace", "auto")}}}
         elif self.path == ROTATE_EXIT_PATH:
-            answer = {"exit": {"exit_id": "ex_rotated_%d" % n, "country_code": "fr", "state": "assigned"}}
+            if self.rotate_refusal is not None:
+                answer = {"error": dict(self.rotate_refusal)}
+            else:
+                answer = {"exit": {"exit_id": "019a5d70-2c11-7b0e-8a51-%012x" % n, "country_code": "fr",
+                                   "state": "assigned", "replace_mode": "auto"}}
         elif self.path == REMOVE_CLIENT_PATH:
             answer = {}
         else:

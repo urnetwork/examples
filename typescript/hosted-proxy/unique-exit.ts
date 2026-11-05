@@ -43,14 +43,18 @@ const countryPattern = /^[A-Za-z]{2}$/;
 export const REPLACE_MODES = ["auto", "manual"] as const;
 export type ReplaceMode = (typeof REPLACE_MODES)[number];
 
-// `proxy_config_result.exit`: the proxy's current exit, never its IP.
+// `proxy_config_result.exit`, and `clients[].exit` in /network/proxies: the
+// proxy's current exit, never its IP.
 export interface ProxyExit {
-  exit_id?: string;
+  exit_id?: string; // a udid, absent while the proxy has no exit
   country_code?: string;
   region?: string;
   city?: string;
   exit_since?: string;
-  state?: string; // "assigned", "replacing" or "no_supply"
+  state: "assigned" | "replacing" | "no_supply";
+  // with replacing or no_supply: offline, unreachable, verdict, collision, cap, manual or no_supply
+  state_reason?: string;
+  replace_mode: "auto" | "manual";
 }
 
 export interface CreatedProxy {
@@ -61,15 +65,22 @@ export interface CreatedProxy {
   exit: ProxyExit | null;
 }
 
-// The API refused the call. `limit` is a hard cap or a rate limit; `upgrade`
-// asks for a plan upgrade.
+// The API refused the call, with the server's message and its flags: `limit`
+// (client_limit_exceeded) is the proxy cap or the create rate; `upgrade`
+// (upgrade_required) means the network is not on Pro; `noUniqueSupply` means no
+// unused exit IP is available in the location; `rateLimited` means a rotate
+// came too soon (once a minute, 60 a day).
 export class Refused extends Error {
   limit: boolean;
   upgrade: boolean;
-  constructor(message: string, limit = false, upgrade = false) {
+  noUniqueSupply: boolean;
+  rateLimited: boolean;
+  constructor(message: string, flags: {limit?: boolean; upgrade?: boolean; noUniqueSupply?: boolean; rateLimited?: boolean} = {}) {
     super(message);
-    this.limit = limit;
-    this.upgrade = upgrade;
+    this.limit = Boolean(flags.limit);
+    this.upgrade = Boolean(flags.upgrade);
+    this.noUniqueSupply = Boolean(flags.noUniqueSupply);
+    this.rateLimited = Boolean(flags.rateLimited);
   }
 }
 
@@ -103,7 +114,12 @@ export function refusal(obj: any): Refused | null {
   if (obj?.error == null) return null;
   const error = obj.error;
   if (typeof error !== "object") return new Refused("the API refused the call");
-  return new Refused(String(error.message || "the API refused the call"), Boolean(error.client_limit_exceeded), Boolean(error.upgrade_required));
+  return new Refused(String(error.message || "the API refused the call"), {
+    limit: error.client_limit_exceeded,
+    upgrade: error.upgrade_required,
+    noUniqueSupply: error.no_unique_supply,
+    rateLimited: error.rate_limited,
+  });
 }
 
 // The proxy's client id, proxy URLs and exit from an auth-client result.
@@ -126,10 +142,14 @@ export function parseCreated(obj: any): CreatedProxy {
   };
 }
 
+// One line for an `exit` object: where it is, its id, and its state. While a
+// failed exit waits for a new one, `state` is replacing or no_supply and
+// `state_reason` says why.
 export function describeExit(exit: ProxyExit | null | undefined): string {
   if (!exit) return "no unique exit reported (is the network on Pro, and the server current?)";
   const place = [exit.country_code, exit.region, exit.city].filter(Boolean).join(" / ");
-  return `${place || "unknown location"} (exit_id ${exit.exit_id}, ${exit.state} since ${exit.exit_since})`;
+  const state = exit.state_reason ? `${exit.state}: ${exit.state_reason}` : exit.state;
+  return `${place || "no exit yet"} (exit_id ${exit.exit_id}, ${state} since ${exit.exit_since}, replace ${exit.replace_mode})`;
 }
 
 // `observed` maps a proxy label to the exit IP seen through it. Returns the
@@ -238,15 +258,23 @@ export async function createProxies(api: Api, count: number, country: string | u
     try {
       proxy = await api.create(body);
     } catch (e) {
-      if (e instanceof Refused && e.limit && /minute/i.test(e.message)) {
+      if (!(e instanceof Refused)) throw e;
+      // the create rate refuses with a message about the minute; the cap, the
+      // Pro gate (upgrade) and noUniqueSupply cannot be waited out
+      if (e.limit && !e.upgrade && /minute/i.test(e.message)) {
         log(`create ${index}: ${e.message}; waiting a minute`);
         await sleep(60_000);
-        proxy = await api.create(body);
-      } else if (e instanceof Refused) {
+        try {
+          proxy = await api.create(body);
+        } catch (again) {
+          if (!(again instanceof Refused)) throw again;
+          log(`create ${index} refused: ${again.message}`);
+          break;
+        }
+      } else {
+        if (e.noUniqueSupply) log(`create ${index}: no unique exit IP is left in this location; try another location or best available`);
         log(`create ${index} refused: ${e.message}`);
         break;
-      } else {
-        throw e;
       }
     }
     created.push(proxy);
@@ -294,7 +322,14 @@ export async function run(api: Api, options: RunOptions): Promise<CreatedProxy[]
     log(`${Object.keys(exits).length} proxies, ${distinct} distinct exit IPs`);
     for (const [ip, labels] of Object.entries(duplicates)) log(`duplicate exit ${ip}: ${labels.join(", ")}`);
     if (options.rotate && created.length) {
-      log(`rotated proxy 1: ${describeExit(await api.rotate(created[0].client_id))}`);
+      try {
+        log(`rotated proxy 1: ${describeExit(await api.rotate(created[0].client_id))}`);
+      } catch (e) {
+        if (!(e instanceof Refused)) throw e;
+        if (e.rateLimited) log("rotate proxy 1: rate limited (once a minute, 60 a day); try again later");
+        else if (e.noUniqueSupply) log("rotate proxy 1: no other unique exit in this location; it keeps its exit");
+        else log(`rotate proxy 1 refused: ${e.message}`);
+      }
     }
     return created;
   } finally {
@@ -309,9 +344,11 @@ export async function run(api: Api, options: RunOptions): Promise<CreatedProxy[]
 // request shapes and answers as the server does.
 export interface MockCall {path: string; authorization: string | undefined; body: any}
 
-export async function startMock(): Promise<{base: string; calls: MockCall[]; close: () => Promise<void>}> {
+// `rotateRefusal`, when set, is the `error` object every rotate answers with.
+export async function startMock(options: {rotateRefusal?: object} = {}): Promise<{base: string; calls: MockCall[]; close: () => Promise<void>}> {
   const calls: MockCall[] = [];
   let serial = 0;
+  const udid = (prefix: string, n: number) => `${prefix}-${n.toString(16).padStart(12, "0")}`;
   const server = http.createServer((request, response) => {
     let raw = "";
     request.setEncoding("utf8");
@@ -325,16 +362,19 @@ export async function startMock(): Promise<{base: string; calls: MockCall[]; clo
         answer = body?.proxy_config?.unique_exit !== true
           ? {error: {client_limit_exceeded: false, message: "expected unique_exit"}}
           : {
-              client_id: `019a5d6e-1d8e-7a3c-9c44-${n.toString(16).padStart(12, "0")}`,
+              client_id: udid("019a5d6e-1d8e-7a3c-9c44", n),
               proxy_config_result: {
                 keepalive_seconds: 300, proxy_host: "proxy.example", auth_token: `token${n}`,
                 https_proxy_url: `https://token${n}.proxy.example:443`, socks_proxy_port: 1080,
-                exit: {exit_id: `ex_${n}`, country_code: "de", region: "Berlin", city: "Berlin",
-                       exit_since: "2026-11-05T19:00:00Z", state: "assigned"},
+                exit: {exit_id: udid("019a5d70-2c11-7b0e-8a51", n), country_code: "de", region: "Berlin", city: "Berlin",
+                       exit_since: "2026-11-05T19:00:00Z", state: "assigned",
+                       replace_mode: body.proxy_config.unique_exit_replace ?? "auto"},
               },
             };
       } else if (request.url === ROTATE_EXIT_PATH) {
-        answer = {exit: {exit_id: `ex_rotated_${n}`, country_code: "fr", state: "assigned"}};
+        answer = options.rotateRefusal
+          ? {error: options.rotateRefusal}
+          : {exit: {exit_id: udid("019a5d70-2c11-7b0e-8a51", n), country_code: "fr", state: "assigned", replace_mode: "auto"}};
       } else if (request.url === REMOVE_CLIENT_PATH) {
         answer = {};
       } else {

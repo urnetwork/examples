@@ -29,31 +29,79 @@ test("the API URL must be an HTTPS origin", () => {
     assert.throws(() => endpoint(bad, AUTH_CLIENT_PATH));
 });
 
+const exitId = "019a5d70-2c11-7b0e-8a51-0f6c3d2e9b47";
+
 test("parses the exit and both proxy URLs", () => {
   const proxy = parseCreated({
     client_id: "019a5d6e-1d8e-7a3c-9c44-6b7f2a1e0c55",
     proxy_config_result: {
       proxy_host: "proxy.example", auth_token: "tok", socks_proxy_port: 1080,
       https_proxy_url: "https://tok.proxy.example:443",
-      exit: {exit_id: "ex_1", country_code: "de", region: "Berlin", city: "Berlin", exit_since: "2026-11-05T19:00:00Z", state: "assigned"},
+      exit: {exit_id: exitId, country_code: "de", region: "Berlin", city: "Berlin", exit_since: "2026-11-05T19:00:00Z",
+             state: "assigned", replace_mode: "auto"},
     },
   });
-  assert.equal(proxy.exit?.exit_id, "ex_1");
+  assert.equal(proxy.exit?.exit_id, exitId);
   assert.equal(proxy.https_proxy_url, "https://tok.proxy.example:443");
   // the token is the SOCKS5 username, with a placeholder password
   assert.equal(proxy.socks_proxy_url, "socks5h://tok:x@proxy.example:1080");
   assert.match(describeExit(proxy.exit), /de \/ Berlin \/ Berlin/);
+  assert.match(describeExit(proxy.exit), /replace auto/);
 });
 
-test("refusals carry the server's message", () => {
-  const cases: [object, boolean, boolean, string][] = [
-    [{error: {client_limit_exceeded: false, message: "no_unique_supply"}}, false, false, "no_unique_supply"],
-    [{error: {client_limit_exceeded: true, message: "Too many new proxies this minute."}}, true, false, "Too many new proxies this minute."],
-    [{error: {client_limit_exceeded: true, upgrade_required: true, message: "Pro only"}}, true, true, "Pro only"],
+test("describes a waiting exit with its reason", () => {
+  const line = describeExit({state: "no_supply", state_reason: "offline", replace_mode: "manual"});
+  assert.match(line, /no_supply: offline/);
+  assert.match(line, /no exit yet/);
+});
+
+test("refusals carry the server's message and flags", () => {
+  const cases: [Record<string, unknown>, {limit: boolean; upgrade: boolean; noUniqueSupply: boolean; rateLimited: boolean}][] = [
+    [{client_limit_exceeded: false, no_unique_supply: true, message: "No unique exit IP is available in this location right now."},
+     {limit: false, upgrade: false, noUniqueSupply: true, rateLimited: false}],
+    [{client_limit_exceeded: true, message: "Too many new proxies this minute."},
+     {limit: true, upgrade: false, noUniqueSupply: false, rateLimited: false}],
+    [{client_limit_exceeded: false, upgrade_required: true, message: "Unique exit IPs are a UR Pro feature."},
+     {limit: false, upgrade: true, noUniqueSupply: false, rateLimited: false}],
+    [{rate_limited: true, message: "This proxy rotated in the last minute."},
+     {limit: false, upgrade: false, noUniqueSupply: false, rateLimited: true}],
   ];
-  for (const [obj, limit, upgrade, message] of cases) {
-    assert.throws(() => parseCreated(obj), (e: unknown) => e instanceof Refused && e.message === message && e.limit === limit && e.upgrade === upgrade);
+  for (const [error, flags] of cases) {
+    assert.throws(() => parseCreated({error}), (e: unknown) =>
+      e instanceof Refused && e.message === error.message && e.limit === flags.limit && e.upgrade === flags.upgrade &&
+      e.noUniqueSupply === flags.noUniqueSupply && e.rateLimited === flags.rateLimited);
   }
+});
+
+test("a refused rotate still removes the proxies", async () => {
+  for (const [refusal, expected] of [
+    [{rate_limited: true, message: "This proxy rotated in the last minute."}, /rate limited/],
+    [{no_unique_supply: true, message: "No unique exit IP is available."}, /keeps its exit/],
+  ] as const) {
+    const mock = await startMock({rotateRefusal: refusal});
+    try {
+      const lines: string[] = [];
+      await run(new Api(mock.base, "root"), {count: 2, rotate: true, echoUrl: DEFAULT_ECHO_URL, keep: false,
+                                            log: line => lines.push(line), echo: mockEcho, sleep: async () => {}});
+      assert.match(lines.join("\n"), expected);
+      assert.equal(mock.calls.filter(call => call.path === REMOVE_CLIENT_PATH).length, 2);
+    } finally {
+      await mock.close();
+    }
+  }
+});
+
+test("no unique supply stops creating", async () => {
+  class NoSupplyApi extends Api {
+    override async create(): Promise<never> {
+      throw new Refused("No unique exit IP is available in this location right now.", {noUniqueSupply: true});
+    }
+  }
+  const lines: string[] = [];
+  const created = await createProxies(new NoSupplyApi("https://api.bringyour.com", "root"), 3, "is", undefined,
+                                      line => lines.push(line), async () => {});
+  assert.deepEqual(created, []);
+  assert.match(lines.join("\n"), /no unique exit IP is left in this location/);
 });
 
 test("flags exits that proxies share", () => {
