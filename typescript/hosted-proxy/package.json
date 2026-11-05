@@ -1,0 +1,22 @@
+{
+  "name": "urnetwork-typescript-hosted-proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc",
+    "test": "npm run check && node --test unique-exit.test.ts",
+    "self-test": "node unique-exit.ts --self-test",
+    "start": "node unique-exit.ts"
+  },
+  "dependencies": {
+    "socks-proxy-agent": "^8.0.5",
+    "undici": "^7.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
