@@ -6,11 +6,9 @@
 
 ## Install and run
 
-Install a socket-capable release using Go modules. The checked-in calendar-version pin is a release baseline; update it to the first socket release before running from the public registry:
+`go.mod` pins a released SDK version with the socket APIs; upgrade with `go get github.com/urnetwork/sdk/v2026@latest && go mod tidy`. From `go/socket`:
 
 ```sh
-go get github.com/urnetwork/sdk/v2026@<socket-release-version>
-go mod tidy
 go run . -version
 export URNETWORK_CLIENT_JWT='your-scoped-client-jwt'
 export URNETWORK_INSTANCE_ID='your-persisted-instance-uuid'
