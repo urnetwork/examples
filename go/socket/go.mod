@@ -5,10 +5,11 @@ go 1.27.3
 require (
 	github.com/go-resty/resty/v2 v2.16.5
 	github.com/urnetwork/examples/go/integration v0.0.0
-	github.com/urnetwork/sdk/v2026 v2026.9.14-1046068620
+	github.com/urnetwork/sdk/v2026 v2026.10.30-1086064830
 )
 
 require (
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -25,6 +26,7 @@ require (
 	github.com/ipfs/go-cid v0.6.2 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
 	github.com/jbenet/go-temp-err-catcher v0.1.0 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/koron/go-ssdp v0.9.1 // indirect
 	github.com/libp2p/go-buffer-pool v0.1.0 // indirect
@@ -71,11 +73,13 @@ require (
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.61.0 // indirect
+	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
-	github.com/urnetwork/connect/v2026 v2026.9.14-1046068620 // indirect
-	github.com/urnetwork/glog/v2026 v2026.9.14-1046068620 // indirect
-	github.com/urnetwork/goidenticons/v2026 v2026.9.14-1046068620 // indirect
+	github.com/theodorsm/covert-dtls v1.5.1 // indirect
+	github.com/urnetwork/connect/v2026 v2026.10.30-1086064830 // indirect
+	github.com/urnetwork/glog/v2026 v2026.10.30-1086064830 // indirect
+	github.com/urnetwork/goidenticons/v2026 v2026.10.30-1086064830 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260727155853-b88d891fe743 // indirect
