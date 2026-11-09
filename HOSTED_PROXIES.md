@@ -128,7 +128,7 @@ done
 
 ## Errors
 
-A refusal is an `error` object with a `message` and flags. The HTTP status is still 200, except that with x402 inline payments enabled, the Pro refusal can answer 402 with the terms for a Pro month.
+A refusal is an `error` object with a `message` and flags, with HTTP status 200. Only a request that asks for x402 terms (`X-UR-X402: 1`) gets HTTP 402 with the terms for a Pro month instead of an `upgrade_required` refusal.
 
 When you create a proxy (`/network/auth-client`):
 - **`client_limit_exceeded: true`:** the cap of 1,000 active proxies, or the rate of 20 a minute. For the rate, wait a minute and try again.
