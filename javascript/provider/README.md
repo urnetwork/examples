@@ -21,7 +21,7 @@ This Node 24 console app runs a URnetwork provider inside your application on Wi
 
 ## Build and self-test
 
-Use Node 24 or later and Go 1.27.3. The app itself needs no packages; it needs the native companion built. The companion's `go.mod` pins a released SDK version; upgrade from the companion directory with `go get github.com/urnetwork/sdk/v2026@latest && go mod tidy`, which needs network access. Providing needs the first SDK release after sdk `c638dfa8` (provider intent, client limit status, extender settings). From `examples/javascript` on macOS or Linux:
+Use Node 24 or later and Go 1.27.4. The app itself needs no packages; it needs the native companion built. The companion's `go.mod` pins a released SDK version; upgrade from the companion directory with `go get github.com/urnetwork/sdk/v2026@latest && go mod tidy`, which needs network access. Providing needs the first SDK release after sdk `c638dfa8` (provider intent, client limit status, extender settings). From `examples/javascript` on macOS or Linux:
 
 ```sh
 cd integration/companion
