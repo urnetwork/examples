@@ -128,7 +128,7 @@ done
 
 ## Errors
 
-A refusal is an `error` object with a `message` and flags, with HTTP status 200. Only a request that asks for x402 terms (`X-UR-X402: 1`) gets HTTP 402 with the terms for a Pro month instead of an `upgrade_required` refusal.
+A refusal is an `error` object with a `message` and flags, with HTTP status 200. Only a request that asks for x402 terms (`X-UR-X402: 1`) gets HTTP 402 with the terms for a Pro month instead of an `upgrade_required` refusal: x402 v2 in the `PAYMENT-REQUIRED` header, v1 in the body. x402 clients refuse a payment over $1 by default, so raise your client's per-payment cap to the price before it pays ([ur.io/agents.md](https://ur.io/agents.md) has the setting for each client).
 
 When you create a proxy (`/network/auth-client`):
 - **`client_limit_exceeded: true`:** the cap of 1,000 active proxies, or the rate of 20 a minute. For the rate, wait a minute and try again.
