@@ -1,6 +1,6 @@
 module github.com/urnetwork/examples/go/messages
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/urnetwork/connect/v2026 v2026.9.14-1046068620

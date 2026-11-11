@@ -22,7 +22,7 @@ This Node 24 console app, written in TypeScript and run with Node's type strippi
 
 ## Build and self-test
 
-Use Node 24 or later and Go 1.27.3. The app runs its `.ts` files directly with Node's type stripping; `npm ci` installs only the type-check packages (TypeScript and the Node types), in the app and in `server/`. The app needs the native companion built. The companion's `go.mod` pins a released SDK version; upgrade from the companion directory with `go get github.com/urnetwork/sdk/v2026@latest && go mod tidy`, which needs network access. The embed app needs an SDK release from the first release after sdk `c638dfa8`. From `examples` on macOS or Linux:
+Use Node 24 or later and Go 1.27.4. The app runs its `.ts` files directly with Node's type stripping; `npm ci` installs only the type-check packages (TypeScript and the Node types), in the app and in `server/`. The app needs the native companion built. The companion's `go.mod` pins a released SDK version; upgrade from the companion directory with `go get github.com/urnetwork/sdk/v2026@latest && go mod tidy`, which needs network access. The embed app needs an SDK release from the first release after sdk `c638dfa8`. From `examples` on macOS or Linux:
 
 ```sh
 cd javascript/integration/companion

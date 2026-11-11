@@ -1,6 +1,6 @@
 module github.com/urnetwork/examples/go/socket
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/go-resty/resty/v2 v2.16.5

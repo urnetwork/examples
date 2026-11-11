@@ -19,7 +19,7 @@ This console app embeds URnetwork in one installation of your app on Windows, ma
 
 ## Build and self-test
 
-Use Go 1.27.3. `go.mod` pins the SDK release `github.com/urnetwork/sdk/v2026 v2026.10.8-1066946420`; the embed app needs a release after sdk `c638dfa8`, which adds the client limit status. Move to a newer release with `go get github.com/urnetwork/sdk/v2026@<version>`; the module tag is the pin. From `go/embed` on macOS or Linux:
+Use Go 1.27.4. `go.mod` pins the SDK release `github.com/urnetwork/sdk/v2026 v2026.10.8-1066946420`; the embed app needs a release after sdk `c638dfa8`, which adds the client limit status. Move to a newer release with `go get github.com/urnetwork/sdk/v2026@<version>`; the module tag is the pin. From `go/embed` on macOS or Linux:
 
 ```sh
 go build -o embed .
@@ -47,7 +47,7 @@ GOOS=linux GOARCH=amd64 go build -o embed-linux-amd64 .
 
 `--self-test` needs no credentials and no network and creates no device. It checks the byte, reset time, client limit and status line vectors of the contract, the status rules and their order, the data fields, the cap object parsing, the client JWT claim, the token fetch against an in-process stand-in server, the state files, the configuration errors, the start line and the license kind. `--licenses` prints the SDK's licenses and data attributions as a JSON array, to publish with your app; it needs no state, credential or network.
 
-The backend tool in [server/](server/README.md) is a separate module that uses only the standard library (Go 1.27.3):
+The backend tool in [server/](server/README.md) is a separate module that uses only the standard library (Go 1.27.4):
 
 ```sh
 cd server
