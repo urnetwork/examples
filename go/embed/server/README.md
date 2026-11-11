@@ -19,7 +19,7 @@ The reference embed backend, for your backend only. One binary, standard library
 
 ## Build and self-test
 
-Use Go 1.27.3. From `go/embed/server` on macOS or Linux:
+Use Go 1.27.4. From `go/embed/server` on macOS or Linux:
 
 ```sh
 go build -o token-server .
